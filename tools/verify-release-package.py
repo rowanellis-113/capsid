@@ -1,6 +1,6 @@
 # Verify the owned CPack archive before prerelease artifact upload/publication.
 from pathlib import Path, PurePosixPath
-import hashlib, json, os, subprocess, tarfile, tempfile, zipfile
+import hashlib, json, os, re, subprocess, tarfile, tempfile, zipfile
 
 from release_package_architecture import (
     native_release_platform,
@@ -45,11 +45,15 @@ for archive in sorted(
     roots = [p for p in scratch.iterdir() if p.is_dir()]
     assert len(roots) == 1
     root = roots[0]
+    expected_version = re.search(
+        r"project\(capsid_runtime\s+VERSION\s+([^\s)]+)",
+        (source / "CMakeLists.txt").read_text(encoding="utf-8"),
+    )[1]
     info = (root / "share/capsid/build-info.txt").read_text()
     assert (
         "commit=" + os.environ["PRODUCT_SHA"] in info
         and "treeClean=true" in info
-        and "version=0.3.0" in info
+        and "version=" + expected_version in info
     )
     script = scratch / "verify.cmake"
     script.write_text(

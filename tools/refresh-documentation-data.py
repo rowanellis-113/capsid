@@ -54,7 +54,7 @@ def derive(root):
     assert beta["draft"] is False and len(beta["assets"]) == 11
     assert beta["githubLatest"] == (github_latest["tag"] == beta["tag"])
     assert not (beta["prerelease"] and beta["githubLatest"])
-    assert version == beta["runtimeVersion"] and abi == 7 and wire == 3
+    assert abi == 7 and wire == 3
     # Bind the API/source description to its declared release, rather than just
     # relabeling a changed runtime tree with the old qualified commit.
     source_paths = ["src", "include", "js", "patches", "cmake", "CMakeLists.txt", "vendor"]
@@ -63,6 +63,10 @@ def derive(root):
     assert source_manifest["sourceCommit"] == publication["productCheckout"]
     assert source_manifest["sourceTree"] == publication["productTree"]
     checkout = source_manifest["checkout"]
+    if checkout["kind"] != "engine-integration-successor":
+        assert version == beta["runtimeVersion"]
+    else:
+        assert re.fullmatch(r"0\.3\.\d+", version)
     assert checkout["kind"] in {
         "docs-successor",
         "formatting-successor",

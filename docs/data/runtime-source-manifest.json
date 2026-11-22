@@ -7,7 +7,7 @@
     "CMakeLists.txt": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "9671a096c72e8142ec939ccc54bfb043826ec177"
+      "gitObject": "131546b56361959fae26cd797679e2b570055fea"
     },
     "cmake/AuditEscapeCapabilityDefaults.cmake": {
       "mode": "100644",
@@ -162,7 +162,7 @@
     "cmake/build_worker.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "ffec3b8c56876c0912e1df4b825291c61b8d1da4"
+      "gitObject": "4924b4b6a28f35d6dee212954e352b49fb394e0b"
     },
     "cmake/capability_manifest_hash.h.in": {
       "mode": "100644",
@@ -3112,6 +3112,10 @@
     "releaseQualificationInherited": false,
     "changeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.4 integration with density defaults (QJS_DISABLE_NATIVE_OWN_BYTECODE + QJS_DISABLE_PROPERTY_IC), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
     "buildInputChanges": {
+      "CMakeLists.txt": {
+        "qualifiedGitObject": "9671a096c72e8142ec939ccc54bfb043826ec177",
+        "currentGitObject": "131546b56361959fae26cd797679e2b570055fea"
+      },
       "cmake/AuditTxikiVendor.cmake": {
         "qualifiedGitObject": "25735a0ef0cec0347445d2d7bb90d82b949d55bc",
         "currentGitObject": "6b471da34c89fb352092f41d197b43293da1d3b2"
@@ -3150,7 +3154,7 @@
       },
       "cmake/build_worker.cmake": {
         "qualifiedGitObject": "835fe8a6629217083865717108594237fc25d2ca",
-        "currentGitObject": "ffec3b8c56876c0912e1df4b825291c61b8d1da4"
+        "currentGitObject": "4924b4b6a28f35d6dee212954e352b49fb394e0b"
       }
     },
     "runtimeInputChanges": {

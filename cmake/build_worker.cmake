@@ -155,6 +155,15 @@ if(CAPSID_BUILD_WORKER)
         add_link_options(${CAPSID_DEPENDENCY_LINK_OPTIONS})
     endif()
     add_subdirectory("${CAPSID_TXIKI_OVERLAY}" "${CMAKE_CURRENT_BINARY_DIR}/txiki-build" EXCLUDE_FROM_ALL)
+    # Keep lws_ssl_capable_write out of LTO IR on Linux GNU/Clang when tests
+    # are enabled so test-tjs-http-short-write's --wrap=lws_ssl_capable_write
+    # intercepts calls deterministically regardless of LTO partitioning.
+    if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(
+            "${CAPSID_TXIKI_OVERLAY}/deps/libwebsockets/lib/tls/mbedtls/mbedtls-ssl.c"
+            TARGET_DIRECTORY websockets
+            APPEND PROPERTY COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:-fno-lto>")
+    endif()
     # Nested runtimes replace the parent Debug optimization with -O0.
     # Restore -O1 after configuring them for instrumented Debug builds,
     # retaining debug symbols and every sanitizer and recovery option.
