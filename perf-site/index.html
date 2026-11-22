@@ -111,6 +111,7 @@
   }
   body {
     min-height: 100vh;
+    overflow-x: clip;
     background:
       radial-gradient(ellipse 82% 520px at 18% -100px, rgba(0, 212, 255, 0.13), transparent 68%),
       radial-gradient(ellipse 68% 460px at 88% -80px, rgba(168, 85, 247, 0.12), transparent 68%),
@@ -139,23 +140,28 @@
   }
   .topbar-inner {
     max-width: 1200px; margin: 0 auto; padding: 12px 28px;
-    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    flex-wrap: nowrap; min-height: 58px;
   }
-  @media (max-width: 640px) { .topbar-inner { padding: 10px 16px; flex-wrap: wrap; gap: 10px; } }
 
   .brand-link {
     display: inline-flex; align-items: center; gap: 10px;
     color: var(--text); text-decoration: none; flex-shrink: 0;
   }
   .brand-link:hover { text-decoration: none; opacity: 0.94; }
-  .brand-logo-svg { height: 30px; width: auto; display: block; }
+  .brand-logo-svg { height: 29px; width: auto; display: block; }
 
-  .nav-links { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
-  .nav-links a { font-size: 13.5px; font-weight: 500; color: var(--text-3); transition: color 0.15s; }
+  .nav-links {
+    display: flex; align-items: center; gap: 20px;
+    flex-wrap: nowrap; white-space: nowrap; flex-shrink: 0;
+  }
+  .nav-links a { font-size: 13.5px; font-weight: 500; color: var(--text-3); white-space: nowrap; transition: color 0.15s; }
   .nav-links a:hover { color: var(--text); text-decoration: none; }
-  @media (max-width: 900px) { .nav-links { display: none; } }
 
-  .nav-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .nav-actions {
+    display: flex; align-items: center; gap: 8px;
+    flex-wrap: nowrap; flex-shrink: 0; min-width: 0;
+  }
   .nav-meta {
     font: 600 11px var(--mono); color: var(--text-3);
     padding: 5px 10px; border-radius: 99px;
@@ -165,7 +171,23 @@
   .nav-meta:hover { border-color: var(--brand-border); color: var(--text); text-decoration: none; }
   .nav-meta.is-verified { color: var(--brand-ink); border-color: var(--brand-border); background: var(--brand-bg); }
   .nav-meta.is-unverified { color: var(--warn); border-color: var(--warn-border); background: var(--warn-bg); }
-  @media (max-width: 680px) { .nav-meta { max-width: 190px; overflow: hidden; text-overflow: ellipsis; } }
+
+  @media (max-width: 1180px) {
+    .nav-meta { display: none; }
+  }
+  @media (max-width: 920px) {
+    .nav-links { display: none; }
+  }
+  @media (max-width: 640px) {
+    .topbar-inner { padding: 10px 16px; gap: 10px; min-height: 52px; }
+    .brand-logo-svg { height: 25px; }
+  }
+  @media (max-width: 420px) {
+    .topbar-inner { padding: 9px 14px; gap: 8px; }
+    .brand-logo-svg { height: 22px; }
+    .icon-btn { width: 32px; height: 32px; }
+    .btn-primary.btn-sm { padding: 6px 11px; font-size: 12px; }
+  }
 
   .icon-btn {
     width: 34px; height: 34px; border-radius: 9px;
@@ -219,14 +241,17 @@
   @media (max-width: 640px) { .hero h1 { font-size: 32px; letter-spacing: -1.1px; } }
 
   .hero-eyebrow {
-    display: inline-flex; align-items: center; gap: 8px;
-    font: 700 11px var(--mono); letter-spacing: 0.9px; text-transform: uppercase;
+    display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+    font: 700 11px/1.35 var(--mono); letter-spacing: 0.8px; text-transform: uppercase;
     padding: 5px 12px; border-radius: 99px; margin-bottom: 18px;
     background: var(--brand-bg); border: 1px solid var(--brand-border); color: var(--brand-ink);
   }
   .hero-eyebrow .pulse {
-    width: 7px; height: 7px; border-radius: 50%;
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
     background: var(--brand); box-shadow: 0 0 10px var(--brand);
+  }
+  @media (max-width: 480px) {
+    .hero-eyebrow { font-size: 10px; letter-spacing: 0.45px; padding: 4px 10px; }
   }
 
   .hero h1 {
@@ -258,21 +283,24 @@
     box-shadow: var(--shadow-card); min-width: 0;
   }
   .install-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: nowrap;
     padding: 6px 10px; background: #0c152b; border-bottom: 1px solid #1b2b4e;
+    overflow-x: auto; scrollbar-width: none;
   }
-  .install-tabs { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+  .install-head::-webkit-scrollbar { display: none; }
+  .install-tabs { display: inline-flex; gap: 3px; flex-wrap: nowrap; flex-shrink: 0; }
   .install-tab {
     border: 0; background: transparent; color: #94a3b8;
     font: 600 10.5px var(--mono); padding: 3px 8px; border-radius: 6px; cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    white-space: nowrap; transition: background 0.15s, color 0.15s;
   }
   .install-tab:hover { color: #e2e8f0; }
   .install-tab.active { background: rgba(0, 212, 255, 0.16); color: #00d4ff; }
   .install-rel-link {
-    font: 600 10.5px var(--mono); color: #7dd3fc; white-space: nowrap;
+    font: 600 10.5px var(--mono); color: #7dd3fc; white-space: nowrap; flex-shrink: 0;
   }
   .install-rel-link:hover { color: #00d4ff; text-decoration: underline; }
+  @media (max-width: 480px) { .install-rel-link { display: none; } }
   .install-bar {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
     padding: 9px 10px 9px 14px; min-width: 0;
@@ -352,41 +380,43 @@
     border-top: 1px solid #1b2b4e;
   }
   .capsule-flow-title {
-    font: 700 10px var(--mono); letter-spacing: 0.9px; text-transform: uppercase;
-    color: #7dd3fc; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;
+    font: 700 10px var(--mono); letter-spacing: 0.8px; text-transform: uppercase;
+    color: #7dd3fc; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
   }
   .capsule-nodes {
-    display: grid; grid-template-columns: 1fr auto 1.25fr auto 1fr; gap: 6px; align-items: center;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.25fr) auto minmax(0, 1fr);
+    gap: 6px; align-items: stretch;
   }
-  @media (max-width: 540px) {
+  @media (max-width: 600px) {
     .capsule-nodes { grid-template-columns: 1fr; }
     .capsule-arrow { transform: rotate(90deg); justify-self: center; }
   }
   .cnode {
     padding: 9px 10px; border-radius: 10px; background: #0e1933; border: 1px solid #223561;
-    text-align: left;
+    text-align: left; display: flex; flex-direction: column; justify-content: center; min-width: 0;
   }
   .cnode.is-shell {
     background: linear-gradient(135deg, rgba(0, 212, 255, 0.14) 0%, rgba(168, 85, 247, 0.14) 100%);
     border-color: rgba(0, 212, 255, 0.45);
   }
-  .cnode .cn-k { font: 700 9.5px var(--mono); letter-spacing: 0.6px; text-transform: uppercase; color: #7dd3fc; }
+  .cnode .cn-k { font: 700 9.5px var(--mono); letter-spacing: 0.6px; text-transform: uppercase; color: #7dd3fc; white-space: nowrap; }
   .cnode.is-shell .cn-k { color: #00d4ff; }
-  .cnode .cn-v { font: 700 12px var(--font); color: #f8fafc; margin-top: 2px; }
-  .cnode .cn-s { font: 500 10.5px var(--mono); color: #94a3b8; margin-top: 2px; }
-  .capsule-arrow { color: #38bdf8; font: 700 14px var(--mono); text-align: center; }
+  .cnode .cn-v { font: 700 12px var(--font); color: #f8fafc; margin-top: 2px; white-space: nowrap; }
+  .cnode .cn-s { font: 500 10.5px var(--mono); color: #94a3b8; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .capsule-arrow { color: #38bdf8; font: 700 14px var(--mono); text-align: center; align-self: center; }
 
   /* 4-Column Proof Strip directly below Hero */
   .kpis {
     display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
-    margin-bottom: 18px;
+    margin-bottom: 18px; align-items: stretch;
   }
-  @media (max-width: 960px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 520px) { .kpis { grid-template-columns: 1fr; } }
+  @media (max-width: 1080px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 540px) { .kpis { grid-template-columns: 1fr; } }
 
   .kpi {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 18px 20px; position: relative; overflow: hidden;
+    padding: 17px 18px; position: relative; overflow: hidden; min-width: 0;
+    display: flex; flex-direction: column;
     box-shadow: var(--shadow-card); transition: border-color 0.18s, transform 0.18s;
   }
   .kpi:hover { border-color: var(--brand-border); transform: translateY(-2px); }
@@ -403,21 +433,27 @@
     opacity: 0.45;
   }
   .kpi.hero-kpi::before { opacity: 1; height: 2px; }
-  .kpi .k-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-  .kpi .k-label { font: 700 10.5px var(--mono); letter-spacing: 0.8px; text-transform: uppercase; color: var(--text-4); }
+  .kpi .k-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin-bottom: 10px; min-height: 22px; flex-wrap: nowrap;
+  }
+  .kpi .k-label {
+    font: 700 10.5px var(--mono); letter-spacing: 0.65px; text-transform: uppercase; color: var(--text-4);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
   .kpi .k-badge {
-    font: 700 10px var(--mono); padding: 2px 7px; border-radius: 99px;
+    font: 700 10px var(--mono); padding: 2px 7px; border-radius: 99px; flex-shrink: 0;
     background: var(--brand-bg); border: 1px solid var(--brand-border); color: var(--brand-ink);
     white-space: nowrap;
   }
   .kpi .k-value {
     font-family: var(--font-display);
-    font-size: 30px; font-weight: 800; letter-spacing: -0.9px; color: var(--text);
+    font-size: clamp(25px, 2.3vw, 30px); font-weight: 800; letter-spacing: -0.9px; color: var(--text);
     font-variant-numeric: tabular-nums; line-height: 1.1; white-space: nowrap;
   }
   .kpi.hero-kpi .k-value { color: var(--brand-ink); }
   .kpi .k-value small { font-size: 12.5px; font-weight: 500; color: var(--text-4); margin-left: 5px; letter-spacing: 0; }
-  .kpi .k-sub { font-size: 12px; color: var(--text-3); margin-top: 8px; line-height: 1.52; }
+  .kpi .k-sub { font-size: 12px; color: var(--text-3); margin-top: 8px; line-height: 1.5; }
   .kpi .k-sub b { color: var(--text); font-weight: 600; }
 
   /* ============ Section Headers ============ */
@@ -442,6 +478,7 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 22px 24px; margin-bottom: 14px; box-shadow: var(--shadow-card); min-width: 0;
   }
+  @media (max-width: 640px) { .card { padding: 18px 16px; } }
   .card.featured {
     border-color: var(--brand-border);
     background:
@@ -449,18 +486,21 @@
       var(--surface);
   }
   .card-head {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 16px; flex-wrap: wrap;
     margin-bottom: 14px;
   }
+  .card-head > div:first-child { min-width: 0; flex: 1 1 240px; }
   .card h3 { font-size: 15.5px; font-weight: 700; color: var(--text); margin-bottom: 3px; letter-spacing: -0.2px; }
   .card .sub { font-size: 12.5px; color: var(--text-4); line-height: 1.5; }
   .card > .sub { margin-bottom: 14px; }
 
-  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; align-items: stretch; }
   .grid-2 > * { min-width: 0; }
+  .grid-2 > .card { margin-bottom: 0; display: flex; flex-direction: column; }
+  .grid-2 > .card > .footnote { margin-top: auto; padding-top: 10px; }
   @media (max-width: 960px) { .grid-2 { grid-template-columns: minmax(0, 1fr); } }
 
-  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: stretch; }
   .grid-3 > * { min-width: 0; }
   @media (max-width: 960px) { .grid-3 { grid-template-columns: minmax(0, 1fr); } }
 
@@ -478,14 +518,16 @@
     border: 1px solid var(--brand-border); color: var(--brand-ink);
   }
   .story-card .st-tag { font: 700 10.5px var(--mono); letter-spacing: 0.7px; text-transform: uppercase; color: var(--brand-ink); }
-  .story-card h3 { font-size: 16px; font-weight: 750; color: var(--text); letter-spacing: -0.2px; }
+  .story-card h3 { font-size: 16px; font-weight: 750; color: var(--text); letter-spacing: -0.2px; line-height: 1.3; }
   .story-card p { font-size: 13.5px; color: var(--text-3); line-height: 1.65; }
   .story-card p b { color: var(--text); font-weight: 650; }
   .story-metric {
     margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border-soft);
-    font: 600 12px var(--mono); color: var(--text-2); display: flex; justify-content: space-between; gap: 8px;
+    font: 600 12px var(--mono); color: var(--text-2);
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
   }
-  .story-metric strong { color: var(--brand-ink); }
+  .story-metric span { min-width: 0; color: var(--text-3); font-weight: 500; }
+  .story-metric strong { color: var(--brand-ink); white-space: nowrap; flex-shrink: 0; }
 
   /* ============ Use Case 2x2 Grid ============ */
   .usecase-card {
@@ -493,32 +535,31 @@
     padding: 22px 24px; display: flex; flex-direction: column; gap: 10px;
     box-shadow: var(--shadow-card); transition: border-color 0.18s;
   }
+  @media (max-width: 640px) { .usecase-card { padding: 18px 16px; } }
   .usecase-card:hover { border-color: var(--brand-border); }
-  .usecase-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-  .usecase-num { font: 700 11px var(--mono); letter-spacing: 0.8px; color: var(--brand-ink); }
+  .usecase-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: nowrap; }
+  .usecase-num { font: 700 11px var(--mono); letter-spacing: 0.7px; color: var(--brand-ink); white-space: nowrap; }
   .usecase-pill {
-    font: 600 10.5px var(--mono); padding: 2px 8px; border-radius: 99px;
+    font: 600 10.5px var(--mono); padding: 2px 8px; border-radius: 99px; white-space: nowrap; flex-shrink: 0;
     background: var(--violet-bg); border: 1px solid var(--violet-border); color: var(--brand-3);
   }
-  .usecase-card h3 { font-size: 16px; font-weight: 750; color: var(--text); }
+  .usecase-card h3 { font-size: 16px; font-weight: 750; color: var(--text); line-height: 1.3; }
   .usecase-card p { font-size: 13.5px; color: var(--text-3); line-height: 1.65; }
-  .usecase-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .usecase-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 6px; }
   .usecase-chips span {
-    font: 500 11px var(--mono); padding: 3px 8px; border-radius: 6px;
+    font: 500 11px var(--mono); padding: 3px 8px; border-radius: 6px; white-space: nowrap;
     background: var(--bg-elev); border: 1px solid var(--border); color: var(--text-2);
   }
 
   /* ============ Visual 2 GiB Packing Comparator ============ */
   .packing-bars { display: grid; gap: 12px; margin-top: 14px; }
   .pack-row {
-    display: grid; grid-template-columns: 180px minmax(0, 1fr) 150px;
+    display: grid; grid-template-columns: minmax(176px, 206px) minmax(0, 1fr) minmax(136px, 162px);
     gap: 14px; align-items: center;
   }
-  @media (max-width: 720px) {
-    .pack-row { grid-template-columns: 1fr; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--border-soft); }
-  }
-  .pack-name { font-size: 13px; font-weight: 650; color: var(--text); display: flex; align-items: center; gap: 8px; }
-  .pack-name .sub-tag { font: 500 10.5px var(--mono); color: var(--text-4); display: block; }
+  .pack-name { font-size: 13px; font-weight: 650; color: var(--text); display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .pack-name > div { min-width: 0; }
+  .pack-name .sub-tag { font: 500 10.5px var(--mono); color: var(--text-4); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pack-track {
     height: 22px; border-radius: 7px; background: var(--bg-elev);
     border: 1px solid var(--border); overflow: hidden; position: relative;
@@ -528,11 +569,19 @@
   .pack-val { text-align: right; font: 700 13px var(--mono); color: var(--text); white-space: nowrap; }
   .pack-val.is-capsid { color: var(--brand-ink); font-size: 14px; }
   .pack-val small { display: block; font: 500 10.5px var(--mono); color: var(--text-4); }
-  @media (max-width: 720px) { .pack-val { text-align: left; } }
+  @media (max-width: 680px) {
+    .pack-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border-soft);
+    }
+    .pack-row:last-child { padding-bottom: 0; border-bottom: 0; }
+    .pack-track { grid-column: 1 / -1; height: 18px; }
+    .pack-val { text-align: right; }
+  }
 
   /* ============ Pills & Benchmark Tab Bar ============ */
   .pills {
-    display: inline-flex; gap: 4px; padding: 3px; border-radius: 9px;
+    display: inline-flex; gap: 4px; padding: 3px; border-radius: 9px; max-width: 100%;
     background: var(--bg-elev); border: 1px solid var(--border); flex-wrap: wrap;
   }
   .pills:empty { display: none; }
@@ -545,14 +594,14 @@
   .pill.active { background: var(--brand-bg-hi); color: var(--brand-ink); box-shadow: inset 0 0 0 1px var(--brand-border); }
 
   .bench-nav {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px 12px; flex-wrap: wrap;
     margin: 26px 0 16px; padding: 10px 14px; border-radius: var(--radius);
     background: var(--surface); border: 1px solid var(--border);
   }
   .bench-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
   .bench-tab {
     border: 1px solid transparent; background: transparent; color: var(--text-3);
-    font: 650 13px var(--font); padding: 8px 14px; border-radius: 9px;
+    font: 650 13px var(--font); padding: 8px 13px; border-radius: 9px; white-space: nowrap;
     cursor: pointer; transition: all 0.15s; display: inline-flex; align-items: center; gap: 7px;
   }
   .bench-tab:hover { color: var(--text); background: var(--surface-2); }
@@ -561,6 +610,13 @@
   }
   .bench-tab .bt-num { font: 700 11px var(--mono); opacity: 0.78; }
   .bench-panel.is-hidden { display: none; }
+  @media (max-width: 640px) {
+    .bench-nav { padding: 8px 10px; }
+    .bench-tab { padding: 7px 10px; font-size: 12px; }
+    .pills { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+    .pills::-webkit-scrollbar { display: none; }
+    .pill { padding: 4px 8px; font-size: 11px; flex-shrink: 0; }
+  }
 
   /* ============ Charts, Legends, Tables ============ */
   .chart svg { display: block; width: 100%; height: auto; }
@@ -623,23 +679,23 @@
   .scorecard-tbl thead th { font-size: 10px; letter-spacing: 0.65px; }
 
   /* ============ Scenario Decision Matrix ============ */
-  .scenario-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+  .scenario-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; align-items: stretch; }
   @media (max-width: 960px) { .scenario-grid { grid-template-columns: 1fr; } }
   .scenario-item {
     background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
-    padding: 18px; display: flex; flex-direction: column; gap: 8px;
+    padding: 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0;
   }
   .scenario-item.is-capsid {
     border-color: var(--brand-border);
     background: linear-gradient(180deg, var(--brand-bg) 0%, var(--bg-elev) 100%);
   }
-  .scenario-item .sc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-  .scenario-item h4 { font-size: 14.5px; font-weight: 750; color: var(--text); }
+  .scenario-item .sc-head { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+  .scenario-item h4 { font-size: 15px; font-weight: 750; color: var(--text); line-height: 1.3; }
   .scenario-item.is-capsid h4 { color: var(--brand-ink); }
-  .scenario-item .sc-pick { font: 700 10.5px var(--mono); color: var(--text-3); padding: 2px 8px; border-radius: 99px; background: var(--surface); border: 1px solid var(--border); }
+  .scenario-item .sc-pick { font: 700 10.5px var(--mono); color: var(--text-3); padding: 2px 8px; border-radius: 99px; background: var(--surface); border: 1px solid var(--border); white-space: nowrap; }
   .scenario-item.is-capsid .sc-pick { color: var(--brand-ink); background: var(--brand-bg-hi); border-color: var(--brand-border); }
-  .scenario-item p { font-size: 12.5px; color: var(--text-3); line-height: 1.6; }
-  .scenario-item ul { list-style: none; display: grid; gap: 5px; margin-top: 2px; }
+  .scenario-item p { font-size: 12.5px; color: var(--text-3); line-height: 1.58; }
+  .scenario-item ul { list-style: none; display: grid; gap: 6px; margin-top: 2px; }
   .scenario-item li { font-size: 12px; color: var(--text-2); line-height: 1.5; padding-left: 14px; position: relative; }
   .scenario-item li::before { content: "\2022"; position: absolute; left: 2px; color: var(--text-4); }
   .scenario-item.is-capsid li::before { color: var(--brand-ink); }
@@ -718,15 +774,18 @@
   .qs-term-bar {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
     padding: 8px 12px; background: #0c152b; border-bottom: 1px solid #1b2b4e;
-    flex-wrap: wrap;
+    flex-wrap: nowrap; min-width: 0;
   }
   .qs-term-title {
     font: 600 11px var(--mono); color: #94a3b8; display: inline-flex; align-items: center; gap: 7px;
+    min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   }
-  .qs-term-title .dot-s { width: 7px; height: 7px; border-radius: 50%; background: #00d4ff; opacity: 0.85; }
-  .qs-term-tabs { display: inline-flex; gap: 4px; background: #070d1c; padding: 2px; border-radius: 7px; border: 1px solid #1b2b4e; }
+  .qs-term-title > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .qs-term-title .dot-s { width: 7px; height: 7px; border-radius: 50%; background: #00d4ff; opacity: 0.85; flex-shrink: 0; }
+  .qs-term-tabs { display: inline-flex; gap: 4px; background: #070d1c; padding: 2px; border-radius: 7px; border: 1px solid #1b2b4e; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .qs-term-tabs::-webkit-scrollbar { display: none; }
   .qs-term-tab {
-    border: 0; background: transparent; color: #94a3b8;
+    border: 0; background: transparent; color: #94a3b8; white-space: nowrap;
     font: 600 11px var(--mono); padding: 3px 9px; border-radius: 5px; cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
@@ -759,14 +818,19 @@
     display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
     border-bottom: 1px solid var(--border-soft);
   }
-  .prov-context { font-size: 12.5px; color: var(--text-3); line-height: 1.58; flex: 1 1 420px; }
+  .prov-context { font-size: 12.5px; color: var(--text-3); line-height: 1.58; flex: 1 1 360px; min-width: 0; }
   .prov-context b { color: var(--text); font-weight: 600; }
-  .prov-picker { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-  .prov-picker label { font: 700 11px var(--mono); letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-4); }
+  .prov-picker { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+  .prov-picker label { font: 700 11px var(--mono); letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-4); flex-shrink: 0; }
   .prov-picker select {
     background: var(--bg-elev); color: var(--text);
     border: 1px solid var(--border-hi); border-radius: 8px;
-    padding: 6px 10px; font: 600 12px var(--mono); max-width: 100%; cursor: pointer;
+    padding: 6px 10px; font: 600 12px var(--mono); max-width: 100%; min-width: 0; cursor: pointer;
+  }
+  @media (max-width: 640px) {
+    .prov-top { padding: 12px 14px; gap: 10px; }
+    .prov-picker { width: 100%; }
+    .prov-picker select { flex: 1 1 auto; width: 0; }
   }
   .prov-picker select:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
   .prov-verify {
@@ -781,15 +845,16 @@
   .prov-verify.is-unverified { background: var(--warn-bg); color: var(--warn); }
   .prov-verify.is-unverified .dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
 
-  .method-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
-  @media (max-width: 980px) { .method-grid { grid-template-columns: 1fr; } }
+  .method-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; }
+  @media (max-width: 980px) { .method-grid { grid-template-columns: minmax(0, 1fr); gap: 24px; } }
   .m-sub { font: 700 11px var(--mono); letter-spacing: 1.1px; text-transform: uppercase; color: var(--text-4); margin-bottom: 14px; }
   .proto { list-style: none; display: grid; gap: 14px; }
   .proto li { font-size: 13px; color: var(--text-3); line-height: 1.65; }
   .proto b { display: block; color: var(--text); font-weight: 650; margin-bottom: 2px; font-size: 13.5px; }
-  .fp { display: grid; grid-template-columns: 104px 1fr; gap: 8px 16px; align-items: baseline; }
+  .fp { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px 14px; align-items: baseline; }
+  @media (max-width: 480px) { .fp { grid-template-columns: 76px minmax(0, 1fr); gap: 6px 10px; } }
   .fp dt { font: 700 11px var(--mono); letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-4); text-align: right; }
-  .fp dd { font: 500 12px var(--mono); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fp dd { font: 500 12px var(--mono); color: var(--text-2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .archive-list { padding-left: 20px; margin-top: 12px; }
   .archive-list li { margin-bottom: 14px; font-size: 13px; color: var(--text-2); }
   .archive-list .digest { display: block; overflow-wrap: anywhere; font: 11px var(--mono); color: var(--text-4); margin-top: 2px; }
@@ -914,18 +979,18 @@
   <!-- ================= 01. Product Hero ================= -->
   <header class="hero">
     <div>
-      <div class="hero-eyebrow"><span class="pulse"></span>OS-ISOLATED JS RUNTIME &middot; EMBEDDABLE C/C++ ABI v7</div>
+      <div class="hero-eyebrow"><span class="pulse"></span>OS-ISOLATED JS RUNTIME &middot; C/C++ ABI v7</div>
       <h1>Run untrusted AI code <span class="grad">at micro-container density.</span></h1>
       <p class="hero-desc" id="hero-desc">
-        A <b>secure, embeddable, high-density JavaScript runtime</b>. Lock every generated
-        <span class="mono">fetch(request)</span> handler inside mandatory Linux
+        A <b>secure, embeddable, high-density JavaScript runtime</b>. Isolate untrusted
+        <span class="mono">fetch(request)</span> handlers inside mandatory Linux
         <b>Namespaces, Landlock, and Seccomp</b> — sub-20&nbsp;ms cold starts, low-tens-of-MiB
-        loaded footprint, and hundreds of isolated workers per 2&nbsp;GiB node.
+        PSS, and hundreds of workers per 2&nbsp;GiB.
       </p>
 
       <div class="hero-cta">
-        <a class="btn-primary" href="#quickstart">Quick Start (30s) &rarr;</a>
-        <a class="btn-ghost" href="#overview">Explore Verified Benchmarks</a>
+        <a class="btn-primary" href="#quickstart">Quick Start &rarr;</a>
+        <a class="btn-ghost" href="#overview">Verified Benchmarks</a>
         <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid" target="_blank" rel="noopener">GitHub</a>
       </div>
 
@@ -933,10 +998,10 @@
         <div class="install-head">
           <div class="install-tabs" role="tablist" aria-label="Hero install method">
             <button type="button" class="install-tab active" role="tab" aria-selected="true" id="hero-inst-unix">Linux / macOS</button>
-            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-win">Windows (PS)</button>
-            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-manual">wget / Tarball</button>
+            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-win">Windows</button>
+            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-manual">Tarball</button>
           </div>
-          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5" target="_blank" rel="noopener">All v0.3.0-beta.5 assets &rarr;</a>
+          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5" target="_blank" rel="noopener">v0.3.0-beta.5 assets &rarr;</a>
         </div>
         <div class="install-bar">
           <code><span class="prompt" id="install-prompt">$</span><span id="install-cmd">curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.0-beta.5</span></code>
@@ -952,7 +1017,7 @@
         <div class="stage-dots"><span></span><span></span><span></span></div>
         <div class="stage-tabs">
           <button type="button" class="stage-tab active" id="code-tab-js">worker.mjs</button>
-          <button type="button" class="stage-tab" id="code-tab-cpp">host.cc (C++ SDK)</button>
+          <button type="button" class="stage-tab" id="code-tab-cpp">host.cc</button>
         </div>
       </div>
 
@@ -979,25 +1044,25 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
 
       <div class="capsule-flow">
         <div class="capsule-flow-title">
-          <span>CAPSID ISOLATION ARCHITECTURE</span>
-          <span>ZERO JIT RWX PAGES</span>
+          <span>ISOLATION PIPELINE</span>
+          <span>ZERO JIT RWX</span>
         </div>
         <div class="capsule-nodes">
           <div class="cnode">
-            <div class="cn-k">Host Boundary</div>
+            <div class="cn-k">Host</div>
             <div class="cn-v">Policy &amp; Limits</div>
-            <div class="cn-s">TLS &middot; Credits &middot; Bindings</div>
+            <div class="cn-s">TLS &middot; Credits</div>
           </div>
           <div class="capsule-arrow">&rarr;</div>
           <div class="cnode is-shell">
-            <div class="cn-k">Strict OS Capsule</div>
+            <div class="cn-k">OS Capsule</div>
             <div class="cn-v">Linux Sandbox</div>
             <div class="cn-s">NS &middot; Landlock &middot; Seccomp</div>
           </div>
           <div class="capsule-arrow">&rarr;</div>
           <div class="cnode">
-            <div class="cn-k">Tenant Worker</div>
-            <div class="cn-v">QuickJS-NG</div>
+            <div class="cn-k">Worker</div>
+            <div class="cn-v" id="stage-engine-name">QuickJS-NG</div>
             <div class="cn-s" id="stage-worker-stat">18.6 MiB &middot; 18.5 ms</div>
           </div>
         </div>
@@ -1023,10 +1088,9 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         </div>
         <div class="st-tag">01 / Hard OS Isolation</div>
         <h3>Default-deny Linux capsule</h3>
-        <p>Every tenant runs in its own worker process fenced by <b>Linux Namespaces, Landlock, and Seccomp</b>.
-           When <span class="mono">egress_policy == NULL</span>, all outbound network requests fail closed;
-           <span class="mono">tjs:*</span>, FFI, and raw sockets cannot be enabled.</p>
-        <div class="story-metric"><span>JIT RWX attack surface</span><strong>Zero (QuickJS-NG)</strong></div>
+        <p>Every tenant runs in its own worker fenced by <b>Namespaces, Landlock, and Seccomp</b>.
+           Outbound egress fails closed by default; <span class="mono">tjs:*</span>, FFI, and raw sockets stay disabled.</p>
+        <div class="story-metric"><span>JIT RWX pages</span><strong>Zero</strong></div>
       </div>
 
       <div class="story-card">
@@ -1034,21 +1098,21 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
         <div class="st-tag">02 / Scale-to-Zero</div>
-        <h3>Sub-20 ms cold starts at 1 MiB</h3>
-        <p>Precompiled QuickJS bytecode eliminates parse-time stalls as user scripts grow from 10&nbsp;KiB
-           to 1&nbsp;MiB — waking isolated workers faster than V8, JSC, or containers with zero warm-up jitter.</p>
-        <div class="story-metric"><span>10 KiB / 1 MiB bytecode</span><strong id="story-cold-val">5.5 ms / 18.5 ms</strong></div>
+        <h3>Sub-20 ms 1 MiB cold starts</h3>
+        <p>Precompiled <span id="story-engine-name">QuickJS-NG</span> bytecode removes parse stalls from 10&nbsp;KiB to 1&nbsp;MiB,
+           waking isolated workers faster than V8, JSC, or containers with predictable latency.</p>
+        <div class="story-metric"><span>10 KiB / 1 MiB cold</span><strong id="story-cold-val">5.5 / 18.5 ms</strong></div>
       </div>
 
       <div class="story-card">
         <div class="story-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
         </div>
-        <div class="st-tag">03 / Multi-Tenant Economics</div>
-        <h3>Pack hundreds of tenants per 2 GiB</h3>
-        <p>No runaway multi-hundred-MiB JIT code cache. Under 64-connection load, Capsid's complete
-           host + strict worker tree holds <b>low-tens of megabytes</b>, preserving 99%+ warm pool capacity.</p>
-        <div class="story-metric"><span>2 GiB warmed strict pool</span><strong id="story-dens-val">731 workers</strong></div>
+        <div class="st-tag">03 / Multi-Tenant Density</div>
+        <h3>Hundreds of tenants in 2 GiB</h3>
+        <p>Without multi-hundred-MiB JIT code caches, Capsid's host + strict worker tree stays in the
+           <b>low tens of MiB</b> and preserves 99%+ warm pool capacity.</p>
+        <div class="story-metric"><span>2 GiB warm pool</span><strong id="story-dens-val">731 workers</strong></div>
       </div>
     </div>
   </section>
@@ -1056,21 +1120,21 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
   <!-- ================= 03. Built For (Use Cases) ================= -->
   <section id="use-cases">
     <div class="eyebrow">Use Cases</div>
-    <h2>Built for workloads where untrusted code meets tight budgets</h2>
-    <p class="lede">Whether you are executing LLM-generated tool handlers on every prompt or embedding
-      a programmable extension layer inside a C++ service, Capsid keeps authority strictly in the Host.</p>
+    <h2>Built for untrusted code under tight budgets</h2>
+    <p class="lede">Whether executing LLM-generated tool handlers on every prompt or embedding
+      a programmable extension layer in C++, Capsid keeps all authority in the Host.</p>
 
     <div class="grid-2">
       <div class="usecase-card">
         <div class="usecase-head">
           <span class="usecase-num">01 / AI INFRASTRUCTURE</span>
-          <span class="usecase-pill">Flagship Wedge</span>
+          <span class="usecase-pill">Flagship</span>
         </div>
-        <h3>Untrusted AI Agent &amp; Code-Gen Sandboxes</h3>
-        <p>Execute LLM-generated JavaScript tools, data transformers, and agent workflows inside a fresh,
-           kernel-enforced sandbox with explicit egress allowlists, hard CPU/memory deadlines, and instant teardown.</p>
+        <h3>AI Agent &amp; Code-Gen Sandboxes</h3>
+        <p>Run LLM-generated JavaScript tools and transforms inside a fresh kernel-enforced sandbox
+           with explicit egress allowlists, hard deadlines, and instant teardown.</p>
         <div class="usecase-chips">
-          <span id="uc-cold-10k">6.9 ms cold start (10 KiB)</span><span>Default-deny egress</span><span>Zero ambient FS</span>
+          <span id="uc-cold-10k">6.9 ms cold (10 KiB)</span><span>Default-deny egress</span><span>Zero ambient FS</span>
         </div>
       </div>
 
@@ -1079,11 +1143,11 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-num">02 / MULTI-TENANT SAAS</span>
           <span class="usecase-pill">High Density</span>
         </div>
-        <h3>Customer Plugins, Rules &amp; Webhooks</h3>
-        <p>Give every enterprise customer custom request hooks, auth scripts, or workflow transforms without
-           spinning up per-tenant containers. Crash or OOM in one worker never leaks into neighboring tenants.</p>
+        <h3>Customer Plugins &amp; Webhooks</h3>
+        <p>Give every tenant custom request hooks, auth rules, or transforms without per-tenant containers.
+           A crash or OOM in one worker never impacts neighboring tenants.</p>
         <div class="usecase-chips">
-          <span id="uc-dens-2g">729 warm workers / 2 GiB</span><span>Process-level fault isolation</span><span>Binding RPC gates</span>
+          <span id="uc-dens-2g">729 workers / 2 GiB</span><span>Process isolation</span><span>Binding RPC</span>
         </div>
       </div>
 
@@ -1092,25 +1156,24 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-num">03 / SERVERLESS &amp; EDGE</span>
           <span class="usecase-pill">Scale-to-Zero</span>
         </div>
-        <h3>Long-Tail FaaS &amp; Edge Request Routing</h3>
-        <p>Stop paying idle RAM tax to keep rarely-invoked functions warm. Capsid pairs sub-20&nbsp;ms
-           cold instantiation with low-megabyte steady-state PSS and Web-standard Fetch / Streams / WebSocket APIs.</p>
+        <h3>Long-Tail FaaS &amp; Edge Routing</h3>
+        <p>Stop paying idle RAM tax to keep rarely-invoked functions warm. Pair sub-20&nbsp;ms cold starts
+           with low-MiB steady-state PSS and Web Fetch / Streams / WebSocket APIs.</p>
         <div class="usecase-chips">
-          <span id="uc-mem-tree">18.5 MiB loaded tree</span><span id="uc-eff-qps">1,175 QPS / MiB</span><span>Fetch + WebSocket v4</span>
+          <span id="uc-mem-tree">18.5 MiB tree</span><span id="uc-eff-qps">1,175 QPS / MiB</span><span>Fetch + WS v4</span>
         </div>
       </div>
 
       <div class="usecase-card">
         <div class="usecase-head">
-          <span class="usecase-num">04 / SYSTEMS ENGINEERING</span>
-          <span class="usecase-pill">Embeddable SDK</span>
+          <span class="usecase-num">04 / SYSTEMS SDK</span>
+          <span class="usecase-pill">Embeddable</span>
         </div>
-        <h3>Embeddable C11 / C++11 Runtime Engine</h3>
-        <p>Integrate directly into gateways, proxies, databases, or control planes via stable
-           <span class="mono">&lt;capsid/runtime.h&gt;</span> (ABI v7). Your Host owns listeners, TLS,
-           credits, backpressure, cancellation, and trusted credential Bindings.</p>
+        <h3>Embeddable C11 / C++11 Engine</h3>
+        <p>Embed into gateways, proxies, or databases via <span class="mono">&lt;capsid/runtime.h&gt;</span> (ABI v7).
+           Your Host owns listeners, TLS, credits, backpressure, and trusted credential Bindings.</p>
         <div class="usecase-chips">
-          <span>C11 / C++11 ABI v7</span><span>CMake package</span><span>Linux &middot; macOS &middot; Windows</span>
+          <span>C11 / C++11 ABI v7</span><span>CMake SDK</span><span>Linux &middot; macOS &middot; Win</span>
         </div>
       </div>
     </div>
@@ -1120,15 +1183,14 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
   <section id="economics">
     <div class="eyebrow">Density &amp; Trade-Offs</div>
     <h2>How many isolated tenants fit in 2 GiB of RAM?</h2>
-    <p class="lede">Raw single-process QPS hides what happens when you actually isolate tenants.
-      Below translates our verified memory and density measurements into real <b>2&nbsp;GiB node capacity</b> —
-      followed by an honest guide on when to pick Capsid versus V8/JSC peers.</p>
+    <p class="lede">Raw single-process QPS hides the real cost of tenant isolation.
+      Below translates our verified measurements into <b>2&nbsp;GiB node capacity</b> and clear runtime trade-offs.</p>
 
     <div class="card featured" id="packing-card">
       <div class="card-head">
         <div>
-          <h3>2 GiB multi-tenant packing comparison (10 KiB warmed workers vs. single-process upper bounds)</h3>
-          <div class="sub">Capsid &amp; workerd show actually measured 2048 MiB density pools (100 req/worker); single-process peers show derived arithmetic ceiling <span class="mono">floor(2048 &divide; loaded PSS)</span> before container/OS sandbox overhead</div>
+          <h3>2 GiB multi-tenant packing comparison</h3>
+          <div class="sub">Capsid &amp; workerd show measured 2,048 MiB warmed pools (10 KiB, 100 req/worker); single-process peers show <span class="mono">floor(2048 &divide; loaded PSS)</span> upper bounds before sandbox overhead</div>
         </div>
       </div>
       <div class="packing-bars" id="packing-visual"></div>
@@ -1137,8 +1199,8 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
     <div class="card" id="scenario-card">
       <div class="card-head">
         <div>
-          <h3>Scenario selection guide — when to choose which runtime</h3>
-          <div class="sub">Translating measured isolation boundaries, cold-start latency, memory density, and throughput ceilings into workload fit</div>
+          <h3>Scenario selection guide</h3>
+          <div class="sub">Choosing between OS isolation, V8 isolates, and unsandboxed JIT ceilings by workload</div>
         </div>
       </div>
       <div class="scenario-grid" id="scenario-grid"></div>
@@ -1319,10 +1381,10 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
 
     <div class="qs-os-bar">
       <div class="pills" role="tablist" aria-label="Quick Start operating system">
-        <button type="button" class="pill active" role="tab" aria-selected="true" id="qs-os-unix">Linux &amp; macOS (bash)</button>
-        <button type="button" class="pill" role="tab" aria-selected="false" id="qs-os-win">Windows (PowerShell)</button>
+        <button type="button" class="pill active" role="tab" aria-selected="true" id="qs-os-unix">Linux &amp; macOS</button>
+        <button type="button" class="pill" role="tab" aria-selected="false" id="qs-os-win">Windows (PS)</button>
       </div>
-      <span class="qs-os-note" id="qs-os-note">Production strict Linux sandboxing is <b>Linux-only</b>; native macOS &amp; Windows builds are for trusted dev &amp; SDK integration.</span>
+      <span class="qs-os-note" id="qs-os-note">Strict sandboxing is <b>Linux-only</b>; macOS &amp; Windows builds are for dev &amp; SDK integration.</span>
     </div>
 
     <div class="qs-timeline">
@@ -1477,7 +1539,7 @@ $sourceName = ([System.Uri]$bundle).AbsoluteUri
           <div class="qs-badge"><span class="qs-idx">04</span>Optional · Production</div>
           <h3>Bundle npm deps &amp; compile trusted bytecode</h3>
           <p>Apps with TypeScript or npm dependencies (Hono, itty-router) bundle ahead of time into one ESM file.
-             For sub-20&nbsp;ms cold starts on large bundles, precompile trusted QuickJS bytecode with the matching
+             For sub-20&nbsp;ms cold starts on large bundles, precompile trusted <span id="qs-engine-name">QuickJS-NG</span> bytecode with the matching
              release's <span class="mono">capsid-bytecode-compile</span> and sign <span class="mono">message.bin</span>
              offline (see <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/host-config.md" target="_blank" rel="noopener">Host configuration</a>).</p>
           <div class="qs-meta"><span>Sub-20 ms 1 MiB cold start</span><span>Signed attestation</span></div>
@@ -1750,6 +1812,21 @@ function stacksOf(cells) {
 function isCapsidStack(s) {
   return s === "capsid" || s === "capsid-source" || s === "capsid-bytecode";
 }
+function parseSemverCore(str) {
+  var m = String(str || "").match(/v?(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!m) return null;
+  return [parseInt(m[1], 10), parseInt(m[2], 10), m[3] ? parseInt(m[3], 10) : 0];
+}
+function usesQuickjsTurbo(point) {
+  var ver = parseSemverCore(
+    (point && ((point.git && point.git.tag) || point.version || point.release)) || ""
+  );
+  if (!ver) return false;
+  return ver[0] > 0 || ver[1] > 3 || (ver[1] === 3 && ver[2] >= 1);
+}
+function engineNameFor(point) {
+  return usesQuickjsTurbo(point) ? "quickjs-turbo" : "QuickJS-NG";
+}
 function coldKeyFor(stack) {
   return stack === "capsid" ? "capsid-bytecode" : stack;
 }
@@ -1994,15 +2071,20 @@ function renderHero() {
   var cpu = (m.cpu || "").replace(/\(R\)|\(TM\)/g, "").trim();
   cpu = cpu.split(" ").slice(-1)[0] || "—";
   var lane = (m.uname || "").indexOf("WSL2") >= 0 ? "WSL2" : "Linux";
-  var matrixChip = contract === "capsid-perf-lane-v3" ? "v3 · Pure-JS 7-stack + Dynamic API" :
-                   contract === "capsid-perf-lane-v2" ? "v2 · Pure-JS 5-stack" :
-                   contract === "capsid-perf-lane-v1" ? "v1 · Cross-language" :
-                   "Unverified observation";
+  var matrixChip = contract === "capsid-perf-lane-v3" ? "v3 · 7-stack JS" :
+                   contract === "capsid-perf-lane-v2" ? "v2 · 5-stack JS" :
+                   contract === "capsid-perf-lane-v1" ? "v1 · Cross-lang" :
+                   "Unverified";
+  var recordChip = P
+    ? (VERIFIED && P.git && P.git.tag ? P.git.tag + " · verified" :
+       VERIFIED ? P.version + " · " + String(P.git && P.git.commit || "").slice(0, 7) :
+       P.release + " · unverified")
+    : "—";
   var tags = [
-    [P ? pointLabel(P) : "—", VERIFIED ? "verified measured source, not necessarily a release" : "unverified historical observation", VERIFIED ? "live" : "warn"],
+    [recordChip, P ? pointLabel(P) : "—", VERIFIED ? "live" : "warn"],
     [matrixChip, "benchmark matrix contract", VERIFIED ? "live" : "warn"],
     [cpu + " \u00b7 " + lane, "cpu \u00b7 lane", ""],
-    ["Strict Linux sandbox", "namespaces + landlock + seccomp", ""]
+    ["Linux sandbox", "namespaces + landlock + seccomp", ""]
   ];
   $("hero-tags").innerHTML = tags.map(function (t) {
     return '<span class="tag' + (t[2] ? " " + t[2] : "") + '" title="' +
@@ -2010,7 +2092,9 @@ function renderHero() {
   }).join("");
 
   var navMeta = $("nav-meta");
-  navMeta.textContent = P ? pointLabel(P) + " · " + P.date : "";
+  var navMetaText = P ? pointLabel(P) + " · " + P.date : "";
+  navMeta.textContent = navMetaText;
+  navMeta.title = navMetaText;
   navMeta.className = "nav-meta " + (VERIFIED ? "is-verified" : "is-unverified");
 
   var q = P && P.qps, c = P && P.coldStart, d = P && P.density;
@@ -2036,21 +2120,25 @@ function renderHero() {
   var dwWk = d && d.workerd && d.workerd["warm@10k"];
 
   /* Update live stage, story & use-case callout metrics */
+  var engineName = engineNameFor(P);
+  if ($("stage-engine-name")) $("stage-engine-name").textContent = engineName;
+  if ($("story-engine-name")) $("story-engine-name").textContent = engineName;
+  if ($("qs-engine-name")) $("qs-engine-name").textContent = engineName;
   var stageStat = $("stage-worker-stat");
   if (stageStat && capSrv > 0 && bc1m) {
     stageStat.textContent = fmt(capSrv, 1) + " MiB \u00b7 " + fmt(bc1m.totalMs, 1) + " ms";
   }
   var storyCold = $("story-cold-val");
   if (storyCold && bc10 && bc1m) {
-    storyCold.textContent = fmt(bc10.totalMs, 1) + " ms / " + fmt(bc1m.totalMs, 1) + " ms";
+    storyCold.textContent = fmt(bc10.totalMs, 1) + " / " + fmt(bc1m.totalMs, 1) + " ms";
   }
   var storyDens = $("story-dens-val");
   if (storyDens && dwCap) {
     storyDens.textContent = fmt(dwCap.count, 0) + " " + (dwCap.unit || "workers");
   }
-  if ($("uc-cold-10k") && bc10) $("uc-cold-10k").textContent = fmt(bc10.totalMs, 1) + " ms cold start (10 KiB)";
-  if ($("uc-dens-2g") && dwCap) $("uc-dens-2g").textContent = fmt(dwCap.count, 0) + " warm " + (dwCap.unit || "workers") + " / 2 GiB";
-  if ($("uc-mem-tree") && capSrv > 0) $("uc-mem-tree").textContent = fmt(capSrv, 1) + " MiB loaded tree";
+  if ($("uc-cold-10k") && bc10) $("uc-cold-10k").textContent = fmt(bc10.totalMs, 1) + " ms cold (10 KiB)";
+  if ($("uc-dens-2g") && dwCap) $("uc-dens-2g").textContent = fmt(dwCap.count, 0) + " " + (dwCap.unit || "workers") + " / 2 GiB";
+  if ($("uc-mem-tree") && capSrv > 0) $("uc-mem-tree").textContent = fmt(capSrv, 1) + " MiB tree";
   if ($("uc-eff-qps") && cap1k && capSrv > 0) $("uc-eff-qps").textContent = fmt(cap1k.qps / capSrv, 0) + " QPS / MiB";
 
   var cards = "";
@@ -2059,27 +2147,27 @@ function renderHero() {
   if (dwCap) {
     var dCold = d.capsid["cold@10k"];
     var retention = dCold && dCold.count > 0 ? Math.round((dwCap.count / dCold.count) * 100) : null;
-    var densBadge = retention != null ? retention + "% warm fit" : "2048 MiB";
-    var densSub = "<b>10 KiB warmed</b> (100 req each, strict sandbox)";
-    if (dwWk) densSub += " · vs <b>" + fmt(dwWk.count, 0) + "</b> workerd cells";
-    if (ndSrv > 0) densSub += " · vs <b>\u2264" + fmt(Math.floor(2048 / ndSrv), 0) + "</b> Node proc*";
+    var densBadge = retention != null ? retention + "% warm" : "2 GiB";
+    var densParts = ["<b>10 KiB</b>"];
+    if (dwWk) densParts.push("<b>" + fmt(dwWk.count, 0) + "</b> workerd");
+    if (ndSrv > 0) densParts.push("<b>\u2264" + fmt(Math.floor(2048 / ndSrv), 0) + "</b> Node*");
     cards +=
-      '<div class="kpi hero-kpi"><div class="k-top"><div class="k-label">2 GiB Warmed Pool</div>' +
+      '<div class="kpi hero-kpi"><div class="k-top"><div class="k-label">2 GiB Warm Pool</div>' +
       '<span class="k-badge">' + esc(densBadge) + '</span></div>' +
       '<div class="k-value">' + fmt(dwCap.count, 0) + '<small>' + esc(dwCap.unit || "workers") + '</small></div>' +
-      '<div class="k-sub">' + densSub + "</div></div>";
+      '<div class="k-sub">' + densParts.join(" · ") + "</div></div>";
   }
 
   /* KPI 2: 1 MiB Bytecode Cold Start */
   if (bc1m) {
     var coldParts = [];
-    if (wk1m) coldParts.push("<b>" + fmt(wk1m.totalMs / bc1m.totalMs, 1) + "\u00d7 faster</b> than workerd");
-    if (dn1m) coldParts.push("<b>" + fmt(dn1m.totalMs / bc1m.totalMs, 1) + "\u00d7</b> vs Deno");
-    if (bn1m) coldParts.push("<b>" + fmt(bn1m.totalMs / bc1m.totalMs, 1) + "\u00d7</b> vs Bun");
-    if (nd1m) coldParts.push("<b>" + fmt(nd1m.totalMs / bc1m.totalMs, 1) + "\u00d7</b> vs Node");
-    if (bc1m.pssMb != null) coldParts.push(fmt(bc1m.pssMb, 1) + " MiB PSS");
+    if (wk1m) coldParts.push("<b>" + fmt(wk1m.totalMs / bc1m.totalMs, 1) + "\u00d7</b> workerd");
+    if (dn1m) coldParts.push("<b>" + fmt(dn1m.totalMs / bc1m.totalMs, 1) + "\u00d7</b> Deno");
+    else if (bn1m) coldParts.push("<b>" + fmt(bn1m.totalMs / bc1m.totalMs, 1) + "\u00d7</b> Bun");
+    if (nd1m) coldParts.push("<b>" + fmt(nd1m.totalMs / bc1m.totalMs, 1) + "\u00d7</b> Node");
+    if (coldParts.length < 3 && bc1m.pssMb != null) coldParts.push(fmt(bc1m.pssMb, 1) + " MiB PSS");
     cards +=
-      '<div class="kpi"><div class="k-top"><div class="k-label">Cold Start · 1 MiB Bundle</div>' +
+      '<div class="kpi"><div class="k-top"><div class="k-label">1 MiB Cold Start</div>' +
       '<span class="k-badge">#1 Bytecode</span></div>' +
       '<div class="k-value">' + fmt(bc1m.totalMs, 1) + '<small>ms</small></div>' +
       '<div class="k-sub">' + coldParts.join(" · ") + "</div></div>";
@@ -2087,15 +2175,14 @@ function renderHero() {
 
   /* KPI 3: Loaded Serving Memory */
   if (capSrv > 0) {
-    var memBadge = qCount >= 5 && bnSrv > 0 ? "#1 leanest (" + qCount + " stacks)" : (wkSrv > 0 ? fmt(wkSrv / capSrv, 0) + "\u00d7 lighter" : "Host + worker");
+    var memBadge = qCount >= 5 && bnSrv > 0 ? "#1 Leanest" : (wkSrv > 0 ? fmt(wkSrv / capSrv, 0) + "\u00d7 lighter" : "Host + worker");
     var memParts = [];
-    if (bnSrv > 0) memParts.push("<b>" + fmt(bnSrv / capSrv, 1) + "\u00d7 lighter</b> than Bun");
-    if (dnSrv > 0) memParts.push("<b>" + fmt(dnSrv / capSrv, 1) + "\u00d7</b> vs Deno");
-    if (ndSrv > 0) memParts.push("<b>" + fmt(ndSrv / capSrv, 1) + "\u00d7</b> vs Node");
-    if (wkSrv > 0) memParts.push("<b>" + fmt(wkSrv / capSrv, 0) + "\u00d7</b> vs workerd");
-    if (capLow > 0) memParts.push("<b>" + fmt(capLow, 1) + " MiB</b> at 10 req/s");
+    if (bnSrv > 0) memParts.push("<b>" + fmt(bnSrv / capSrv, 1) + "\u00d7</b> &lt; Bun");
+    if (ndSrv > 0) memParts.push("<b>" + fmt(ndSrv / capSrv, 1) + "\u00d7</b> &lt; Node");
+    if (wkSrv > 0) memParts.push("<b>" + fmt(wkSrv / capSrv, 0) + "\u00d7</b> &lt; workerd");
+    if (memParts.length < 2 && capLow > 0) memParts.push("<b>" + fmt(capLow, 1) + " MiB</b> idle");
     cards +=
-      '<div class="kpi"><div class="k-top"><div class="k-label">Serving PSS @ 64 Conns</div>' +
+      '<div class="kpi"><div class="k-top"><div class="k-label">Serving PSS</div>' +
       '<span class="k-badge">' + esc(memBadge) + '</span></div>' +
       '<div class="k-value">' + fmt(capSrv, 1) + '<small>MiB</small></div>' +
       '<div class="k-sub">' + memParts.join(" · ") + "</div></div>";
@@ -2104,22 +2191,21 @@ function renderHero() {
   /* KPI 4: Throughput Efficiency (QPS / MiB) */
   if (cap1k && capSrv > 0) {
     var capEff = cap1k.qps / capSrv;
-    var effSub = "<b>" + fmt(cap1k.qps) + " req/s</b> inside <b>" + fmt(capSrv, 1) + " MiB</b> total PSS";
+    var effParts = ["<b>" + fmt(cap1k.qps) + " req/s</b> in " + fmt(capSrv, 1) + " MiB"];
     var badge = "Efficiency";
     if (wk1k && wkSrv > 0) {
       var wkEff = wk1k.qps / wkSrv;
       var ratio = capEff / wkEff;
-      effSub = "<b>" + fmt(ratio, 1) + "\u00d7</b> vs workerd (" + fmt(wkEff, 1) + "/MiB)";
-      if (nd1k && ndSrv > 0) effSub += " · <b>" + fmt(capEff / (nd1k.qps / ndSrv), 1) + "\u00d7</b> vs Node JIT";
-      else effSub += "; raw QPS differs";
-      if (nj1k && njSrv > 0) effSub += " · <b>" + fmt(capEff / (nj1k.qps / njSrv), 1) + "\u00d7</b> vs Node --jitless";
-      badge = fmt(ratio, 1) + "\u00d7 vs workerd";
+      effParts = ["<b>" + fmt(ratio, 1) + "\u00d7</b> workerd"];
+      if (nd1k && ndSrv > 0) effParts.push("<b>" + fmt(capEff / (nd1k.qps / ndSrv), 1) + "\u00d7</b> Node");
+      if (nj1k && njSrv > 0) effParts.push("<b>" + fmt(capEff / (nj1k.qps / njSrv), 1) + "\u00d7</b> No-JIT");
+      badge = fmt(ratio, 1) + "\u00d7 workerd";
     }
     cards +=
-      '<div class="kpi"><div class="k-top"><div class="k-label">Throughput per MiB</div>' +
+      '<div class="kpi"><div class="k-top"><div class="k-label">QPS per MiB</div>' +
       '<span class="k-badge">' + esc(badge) + '</span></div>' +
       '<div class="k-value">' + fmt(capEff, 0) + '<small>req/s\u00b7MiB</small></div>' +
-      '<div class="k-sub">' + effSub + "</div></div>";
+      '<div class="k-sub">' + effParts.join(" · ") + "</div></div>";
   }
 
   $("hero-kpis").innerHTML = cards;
@@ -2132,7 +2218,9 @@ function renderPackingVisual() {
   if (!el) return;
   var q = P && P.qps, d = P && P.density;
   var dwCap = d && d.capsid && d.capsid["warm@10k"];
+  var dcCap = d && d.capsid && d.capsid["cold@10k"];
   var dwWk = d && d.workerd && d.workerd["warm@10k"];
+  var dcWk = d && d.workerd && d.workerd["cold@10k"];
   if (!dwCap) {
     if (card) card.style.display = "none";
     el.innerHTML = "";
@@ -2140,26 +2228,30 @@ function renderPackingVisual() {
   }
   if (card) card.style.display = "";
 
+  var capRetention = dcCap && dcCap.count > 0 ? Math.round((dwCap.count / dcCap.count) * 100) + "% warm fit" : "measured";
   var rows = [
     {
-      name: "Capsid", sub: "Strict OS Sandbox (measured)", count: dwCap.count,
-      label: fmt(dwCap.count, 0) + " workers", meta: fmt(dwCap.pssMb, 0) + " MiB · 99.5% warm fit",
+      name: "Capsid", sub: "OS Sandbox · measured", count: dwCap.count,
+      label: fmt(dwCap.count, 0) + " workers", meta: fmt(dwCap.pssMb, 0) + " MiB · " + capRetention,
       color: C.capsid, isCap: true
     }
   ];
   if (dwWk) {
+    var wkDrop = dcWk && dcWk.count > 0
+      ? Math.round(((dwWk.count - dcWk.count) / dcWk.count) * 100) + "% vs cold"
+      : "measured";
     rows.push({
-      name: "workerd", sub: "V8 Isolate (measured)", count: dwWk.count,
-      label: fmt(dwWk.count, 0) + " cells", meta: fmt(dwWk.pssMb, 0) + " MiB · -42% vs cold",
+      name: "workerd", sub: "V8 Isolate · measured", count: dwWk.count,
+      label: fmt(dwWk.count, 0) + " cells", meta: fmt(dwWk.pssMb, 0) + " MiB · " + wkDrop,
       color: C.workerd, isCap: false
     });
   }
   var singlePeers = [
-    ["bun-jitless", "Bun (--jitless)", "No sandbox · arithmetic ceiling*"],
-    ["bun", "Bun (JIT)", "No sandbox · arithmetic ceiling*"],
-    ["deno", "Deno", "Perm flags · arithmetic ceiling*"],
-    ["node", "Node.js (JIT)", "No sandbox · arithmetic ceiling*"],
-    ["node-jitless", "Node (--jitless)", "No sandbox · arithmetic ceiling*"]
+    ["bun-jitless", "Bun (--jitless)", "No sandbox · ceiling*"],
+    ["bun", "Bun (JIT)", "No sandbox · ceiling*"],
+    ["deno", "Deno", "Perm flags · ceiling*"],
+    ["node", "Node.js (JIT)", "No sandbox · ceiling*"],
+    ["node-jitless", "Node (--jitless)", "No sandbox · ceiling*"]
   ];
   singlePeers.forEach(function (spec) {
     var st = spec[0];
@@ -2169,7 +2261,7 @@ function renderPackingVisual() {
         var cnt = Math.floor(2048 / srv);
         rows.push({
           name: spec[1], sub: spec[2], count: cnt,
-          label: "\u2264 " + fmt(cnt, 0) + " proc*", meta: fmt(srv, 1) + " MiB / proc loaded",
+          label: "\u2264 " + fmt(cnt, 0) + " proc*", meta: fmt(srv, 1) + " MiB / proc",
           color: C[st] || "#64748b", isCap: false
         });
       }
@@ -2236,10 +2328,10 @@ function renderRadar() {
   var tabsEl = $("radar-tabs");
   if (hasAllFull && (hasTier1Multi || hasSandboxedDens || hasNoJitPeer)) {
     tabsEl.innerHTML =
-      (hasTier1Multi ? '<button type="button" class="pill' + (mode === "isolated" ? " active" : "") + '" id="rtab-isolated">Tier 1 · Sandboxed</button>' : "") +
-      (hasNoJitPeer ? '<button type="button" class="pill' + (mode === "nojit" ? " active" : "") + '" id="rtab-nojit">Tier 2 · No-JIT</button>' : "") +
+      (hasTier1Multi ? '<button type="button" class="pill' + (mode === "isolated" ? " active" : "") + '" id="rtab-isolated">T1 · Isolated</button>' : "") +
+      (hasNoJitPeer ? '<button type="button" class="pill' + (mode === "nojit" ? " active" : "") + '" id="rtab-nojit">T2 · No-JIT</button>' : "") +
       (hasSandboxedDens ? '<button type="button" class="pill' + (mode === "sandboxed" ? " active" : "") + '" id="rtab-sandboxed">2 GiB Pool</button>' : "") +
-      '<button type="button" class="pill' + (mode === "full" ? " active" : "") + '" id="rtab-full">All ' + fullStacks.length + ' Stacks</button>';
+      '<button type="button" class="pill' + (mode === "full" ? " active" : "") + '" id="rtab-full">All ' + fullStacks.length + '</button>';
     var bi = $("rtab-isolated"), bf = $("rtab-full"), bs = $("rtab-sandboxed"), bn = $("rtab-nojit");
     if (bi) bi.onclick = function () { RADAR_MODE = "isolated"; renderRadar(); };
     if (bf) bf.onclick = function () { RADAR_MODE = "full"; renderRadar(); };
@@ -2775,51 +2867,51 @@ function renderScenarioGuide() {
   var dwWk = d && d.workerd && d.workerd["warm@10k"];
 
   var capBullets = [
-    "<b>Mandatory OS isolation:</b> Linux Namespaces + Landlock + Seccomp + default-deny egress per worker, with zero JIT RWX pages.",
+    "<b>OS isolation:</b> Namespaces + Landlock + Seccomp + default-deny egress, zero JIT RWX pages.",
     bc10 && bc1m
-      ? "<b>Scale-to-zero speed:</b> <b>" + fmt(bc10.totalMs, 1) + " ms</b> (10 KiB) / <b>" + fmt(bc1m.totalMs, 1) + " ms</b> (1 MiB bytecode) at <b>" + fmt(bc10.pssMb, 1) + "\u2013" + fmt(bc1m.pssMb, 1) + " MiB</b>."
-      : "<b>Predictable startup &amp; footprint:</b> compact QuickJS-NG bytecode without multi-hundred-MiB JIT warm-up.",
+      ? "<b>Cold start:</b> <b>" + fmt(bc10.totalMs, 1) + " ms</b> (10 KiB) / <b>" + fmt(bc1m.totalMs, 1) + " ms</b> (1 MiB) at <b>" + fmt(bc10.pssMb, 1) + "\u2013" + fmt(bc1m.pssMb, 1) + " MiB</b>."
+      : "<b>Predictable startup:</b> compact " + esc(engineNameFor(P)) + " bytecode without multi-hundred-MiB JIT warm-up.",
     dwCap
-      ? "<b>Multi-tenant density:</b> <b>" + fmt(dwCap.count, 0) + "</b> warmed strict-sandbox workers in 2 GiB (" + fmt(capSrv, 1) + " MiB single-worker tree" + (capDyn ? ", <b>" + fmt(capDyn.qps, 0) + " req/s</b> Dynamic API" : "") + ")."
-      : (cap1k && capSrv > 0 ? "<b>Memory-dense serving:</b> <b>" + fmt(cap1k.qps / capSrv, 0) + " req/s\u00b7MiB</b> inside <b>" + fmt(capSrv, 1) + " MiB</b>." : "")
+      ? "<b>Density:</b> <b>" + fmt(dwCap.count, 0) + "</b> warmed workers in 2 GiB (" + fmt(capSrv, 1) + " MiB tree" + (capDyn ? ", <b>" + fmt(capDyn.qps, 0) + " req/s</b> Dynamic API" : "") + ")."
+      : (cap1k && capSrv > 0 ? "<b>Efficiency:</b> <b>" + fmt(cap1k.qps / capSrv, 0) + " req/s\u00b7MiB</b> inside <b>" + fmt(capSrv, 1) + " MiB</b>." : "")
   ];
 
   var v8Bullets = [
     wk1k && wkSrv > 0
-      ? "<b>workerd (V8 Isolate):</b> <b>" + fmt(wk1k.qps, 0) + " req/s</b> 1k QPS; self-hosted default grows to <b>" + fmt(wkSrv, 1) + " MiB</b> under 64-conn load" + (dwWk ? " (<b>" + fmt(dwWk.count, 0) + "</b> warm 10k cells in 2 GiB)." : ".")
+      ? "<b>workerd:</b> <b>" + fmt(wk1k.qps, 0) + " req/s</b> 1k QPS; default V8 grows to <b>" + fmt(wkSrv, 1) + " MiB</b>" + (dwWk ? " (<b>" + fmt(dwWk.count, 0) + "</b> warm cells / 2 GiB)." : ".")
       : "<b>workerd:</b> Cloudflare Workers V8 isolate compatibility with V8 JIT throughput.",
     dn1k && dnSrv > 0
-      ? "<b>Deno (Permission Sandbox):</b> <b>" + fmt(dn1k.qps, 0) + " req/s</b> at <b>" + fmt(dnSrv, 1) + " MiB</b> with explicit <span class=\"mono\">--allow-net</span> flags (single-process V8)."
-      : "<b>Trade-off:</b> stronger peak single-isolate V8 JIT speed at higher per-instance memory and warm-pool drop.",
-    "<b>Best fit:</b> trusted-tenant Workers/TypeScript ecosystems where V8 JIT throughput matters more than OS-level per-tenant isolation."
+      ? "<b>Deno:</b> <b>" + fmt(dn1k.qps, 0) + " req/s</b> at <b>" + fmt(dnSrv, 1) + " MiB</b> with <span class=\"mono\">--allow-net</span> permission flags."
+      : "<b>Trade-off:</b> stronger single-isolate V8 JIT speed at higher per-instance memory.",
+    "<b>Best fit:</b> trusted Workers/TypeScript apps where V8 JIT outweighs OS per-tenant isolation."
   ];
 
   var ceilingBullets = [
     bn1k && nd1k
-      ? "<b>Single-process peak ceiling:</b> Bun reaches <b>" + fmt(bn1k.qps, 0) + " req/s</b> (" + fmt(bnSrv, 1) + " MiB) and Node.js reaches <b>" + fmt(nd1k.qps, 0) + " req/s</b> (" + fmt(ndSrv, 1) + " MiB) with full JIT and zero sandbox."
-      : "<b>Single-process peak ceiling:</b> full V8/JSC JIT maximizes single-tenant raw QPS without OS isolation or host-worker IPC.",
+      ? "<b>Peak JIT QPS:</b> Bun hits <b>" + fmt(bn1k.qps, 0) + " req/s</b> (" + fmt(bnSrv, 1) + " MiB) and Node hits <b>" + fmt(nd1k.qps, 0) + " req/s</b> (" + fmt(ndSrv, 1) + " MiB) unsandboxed."
+      : "<b>Peak JIT QPS:</b> full V8/JSC JIT maximizes single-tenant QPS without OS isolation.",
     nj1k
-      ? "<b>JIT dependency exposed:</b> disabling JIT drops Node to <b>" + fmt(nj1k.qps, 0) + " req/s</b>" + (bj1k ? " and Bun to <b>" + fmt(bj1k.qps, 0) + " req/s</b>" : "") + " — showing how much peak QPS comes from JIT + skipping isolation."
-      : "<b>Isolation cost:</b> adding OS sandboxes or per-tenant processes on top of single-process runtimes scales memory linearly.",
+      ? "<b>Without JIT:</b> Node drops to <b>" + fmt(nj1k.qps, 0) + " req/s</b>" + (bj1k ? " and Bun to <b>" + fmt(bj1k.qps, 0) + " req/s</b>" : "") + ", showing the JIT gap."
+      : "<b>Isolation cost:</b> adding OS sandboxes or per-tenant processes scales memory linearly.",
     bnSrv > 0 && ndSrv > 0
-      ? "<b>2 GiB single-process limit:</b> at loaded PSS, 2 GiB fits at most <b>~" + fmt(Math.floor(2048 / ndSrv), 0) + " Node</b> or <b>~" + fmt(Math.floor(2048 / bnSrv), 0) + " Bun</b> isolated processes (before container/sandbox overhead)."
-      : "<b>Best fit:</b> single-tenant, self-hosted APIs where all code is first-party and OS sandboxing is handled externally."
+      ? "<b>2 GiB ceiling:</b> at loaded PSS, 2 GiB fits at most <b>~" + fmt(Math.floor(2048 / ndSrv), 0) + " Node</b> or <b>~" + fmt(Math.floor(2048 / bnSrv), 0) + " Bun</b> processes."
+      : "<b>Best fit:</b> single-tenant, first-party APIs where isolation is handled externally."
   ];
 
   el.innerHTML =
     '<div class="scenario-item is-capsid">' +
-      '<div class="sc-head"><h4>Untrusted AI Code &amp; Multi-Tenant</h4><span class="sc-pick">Choose Capsid</span></div>' +
-      '<p>AI tool sandboxes, untrusted user functions, SaaS plugins, and high-density edge pools where OS isolation and memory economics dominate.</p>' +
+      '<div class="sc-head"><span class="sc-pick">Choose Capsid</span><h4>Untrusted AI &amp; Multi-Tenant</h4></div>' +
+      '<p>AI tool sandboxes, user functions, SaaS plugins, and dense edge pools where OS isolation and RAM dominate.</p>' +
       '<ul>' + capBullets.filter(Boolean).map(function (b) { return "<li>" + b + "</li>"; }).join("") + '</ul>' +
     '</div>' +
     '<div class="scenario-item">' +
-      '<div class="sc-head"><h4>V8 Isolate / Permission-Flag Web APIs</h4><span class="sc-pick">workerd / Deno</span></div>' +
-      '<p>Trusted or semi-trusted Web-Standard services needing V8 JIT throughput with isolate or CLI permission-flag boundaries.</p>' +
+      '<div class="sc-head"><span class="sc-pick">workerd / Deno</span><h4>V8 Isolate &amp; Web APIs</h4></div>' +
+      '<p>Trusted or semi-trusted Web-Standard services needing V8 JIT speed with isolate or CLI permission flags.</p>' +
       '<ul>' + v8Bullets.map(function (b) { return "<li>" + b + "</li>"; }).join("") + '</ul>' +
     '</div>' +
     '<div class="scenario-item">' +
-      '<div class="sc-head"><h4>Single-Tenant Peak Raw QPS</h4><span class="sc-pick">Node.js / Bun (JIT)</span></div>' +
-      '<p>Dedicated first-party services running one trusted app per host/container where maximum single-core JIT throughput is the primary goal.</p>' +
+      '<div class="sc-head"><span class="sc-pick">Node.js / Bun (JIT)</span><h4>Single-Tenant Peak QPS</h4></div>' +
+      '<p>Dedicated first-party services running one trusted app per host where raw single-core JIT speed wins.</p>' +
       '<ul>' + ceilingBullets.map(function (b) { return "<li>" + b + "</li>"; }).join("") + '</ul>' +
     '</div>';
 }
@@ -2930,8 +3022,8 @@ function renderQps() {
     if (!el) return;
     if (!hasTierFilter) { el.innerHTML = ""; return; }
     el.innerHTML =
-      '<button type="button" class="pill' + (tierMode === "fair" ? " active" : "") + '" id="' + prefix + '-fair">Fair Tier (Sandboxed &amp; No-JIT)</button>' +
-      '<button type="button" class="pill' + (tierMode === "all" ? " active" : "") + '" id="' + prefix + '-all">All ' + allSts.length + ' Stacks (+ Unsandboxed JIT Ceiling)</button>';
+      '<button type="button" class="pill' + (tierMode === "fair" ? " active" : "") + '" id="' + prefix + '-fair">Fair Tier (T1 + T2)</button>' +
+      '<button type="button" class="pill' + (tierMode === "all" ? " active" : "") + '" id="' + prefix + '-all">All ' + allSts.length + ' (+ JIT)</button>';
     var bf = $(prefix + "-fair"), ba = $(prefix + "-all");
     if (bf) bf.onclick = function () { QPS_TIER_MODE = "fair"; renderQps(); };
     if (ba) ba.onclick = function () { QPS_TIER_MODE = "all"; renderQps(); };
@@ -2942,13 +3034,13 @@ function renderQps() {
   var effSubEl = $("qps-eff-sub"), rawSubEl = $("qps-raw-sub");
   if (effSubEl) {
     effSubEl.textContent = tierMode === "fair"
-      ? "Showing Tier 1 (Isolated) & Tier 2 (No-JIT) peers for clean scale — switch above to overlay Tier 3 unsandboxed JIT ceilings (always shown in tables below)"
-      : "median QPS divided by each stack's loaded process-tree PSS — higher is better (raw QPS, isolation boundary, and memory all differ across tiers)";
+      ? "Tier 1 (Isolated) & Tier 2 (No-JIT) peers — toggle right to overlay Tier 3 JIT ceilings"
+      : "Median QPS divided by loaded process-tree PSS — higher is better";
   }
   if (rawSubEl) {
     rawSubEl.textContent = tierMode === "fair"
-      ? "Showing Tier 1 (Isolated) & Tier 2 (No-JIT) peers — toggle above to include Tier 3 unsandboxed Node/Bun JIT ceilings"
-      : "median of five 15 s rounds at 64 connections / 64 in-flight — higher is better (includes Tier 3 unsandboxed single-process JIT ceilings)";
+      ? "Tier 1 (Isolated) & Tier 2 (No-JIT) peers — toggle right to include Tier 3 JIT ceilings"
+      : "Median of five 15 s rounds at 64 connections / 64 in-flight — higher is better";
   }
 
   var legHtml = chartSts.map(function (s2) {
