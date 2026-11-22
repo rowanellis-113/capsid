@@ -157,7 +157,7 @@
     "cmake/build_tests.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "2451164fc5d59cb85b2637952d5283a4bcd662b3"
+      "gitObject": "f6d8d06480256d91ca9dae14af500f883fc7ce68"
     },
     "cmake/build_worker.cmake": {
       "mode": "100644",
@@ -707,7 +707,7 @@
     "patches/txiki/0079-quickjs-turbo-integration.patch": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c7ae54454a246f1eab2b46cea33ffc4c33a4d407"
+      "gitObject": "037bd06213f231e444c888537e393a931b49778a"
     },
     "patches/web-streams/0001-workerd-byte-profile.patch": {
       "mode": "100644",
@@ -1372,12 +1372,12 @@
     "src/worker_main.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "28488ea39576734425c8031cff04a8825c06f726"
+      "gitObject": "db571a4a168b43b438f35119f873d9f709a13f2b"
     },
     "src/worker_runtime.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "229fb1403d6185d4e13b412e9ca66ec04677240b"
+      "gitObject": "13040ab944386e1791e6b747126c07a77d19b9c4"
     },
     "src/worker_runtime.h": {
       "mode": "100644",
@@ -1517,7 +1517,7 @@
     "vendor/quickjs-turbo": {
       "mode": "160000",
       "kind": "commit",
-      "gitObject": "f0a10640033a024213fb77333e6c84367a81ab26"
+      "gitObject": "ebcd33096549b73708297dbf17d12caec84de4bf"
     },
     "vendor/txiki.js": {
       "mode": "160000",
@@ -3110,7 +3110,7 @@
       "ruff": "0.17.5"
     },
     "releaseQualificationInherited": false,
-    "changeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.4 integration with density defaults (QJS_DISABLE_NATIVE_OWN_BYTECODE + QJS_DISABLE_PROPERTY_IC), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
+    "changeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.6 integration via quickjs-turbo::qjs (local LTO isolation, Linux x86-64/ARM64 + macOS x86-64 + Windows x86-64 WIN_X86_64 native ASM VMs), explicit C API defaults (QJS_SetTurboDefaults with own_bytecode_tail=OFF PIC-only + property_ic_warmup=12, pre-READY JS_PurgePropertyIC, QJS_GetTurboInfo integration test), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
     "buildInputChanges": {
       "CMakeLists.txt": {
         "qualifiedGitObject": "9671a096c72e8142ec939ccc54bfb043826ec177",
@@ -3150,7 +3150,7 @@
       },
       "cmake/build_tests.cmake": {
         "qualifiedGitObject": "5922883fb2ea6a77dbd41d0128e62dd710399830",
-        "currentGitObject": "2451164fc5d59cb85b2637952d5283a4bcd662b3"
+        "currentGitObject": "f6d8d06480256d91ca9dae14af500f883fc7ce68"
       },
       "cmake/build_worker.cmake": {
         "qualifiedGitObject": "835fe8a6629217083865717108594237fc25d2ca",
@@ -3160,17 +3160,21 @@
     "runtimeInputChanges": {
       "src/worker_main.cc": {
         "qualifiedGitObject": "ca11b33af2ef4c135f4ab7a26cd0268152309264",
-        "currentGitObject": "28488ea39576734425c8031cff04a8825c06f726"
+        "currentGitObject": "db571a4a168b43b438f35119f873d9f709a13f2b"
+      },
+      "src/worker_runtime.cc": {
+        "qualifiedGitObject": "229fb1403d6185d4e13b412e9ca66ec04677240b",
+        "currentGitObject": "13040ab944386e1791e6b747126c07a77d19b9c4"
       }
     },
     "vendorPatchChanges": {
       "patches/txiki/0079-quickjs-turbo-integration.patch": {
         "qualifiedGitObject": null,
-        "currentGitObject": "c7ae54454a246f1eab2b46cea33ffc4c33a4d407"
+        "currentGitObject": "037bd06213f231e444c888537e393a931b49778a"
       },
       "vendor/quickjs-turbo": {
         "qualifiedGitObject": null,
-        "currentGitObject": "f0a10640033a024213fb77333e6c84367a81ab26"
+        "currentGitObject": "ebcd33096549b73708297dbf17d12caec84de4bf"
       }
     }
   }

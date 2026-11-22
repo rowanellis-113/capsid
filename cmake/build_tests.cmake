@@ -8517,6 +8517,30 @@ if(BUILD_TESTING AND TARGET capsid-worker AND
         TIMEOUT 15 LABELS "worker;abi;lifecycle;allocation")
 endif()
 
+if(BUILD_TESTING AND TARGET tjs)
+    add_executable(test-quickjs-turbo-integration tests/test_quickjs_turbo_integration.cc)
+    target_include_directories(test-quickjs-turbo-integration PRIVATE
+        "${CAPSID_TXIKI_OVERLAY}/src")
+    target_link_libraries(test-quickjs-turbo-integration PRIVATE tjs capsid_sanitizers)
+    if(CAPSID_ENABLE_ASAN OR CAPSID_ENABLE_UBSAN OR CAPSID_ENABLE_TSAN OR CAPSID_BUILD_FUZZERS)
+        target_compile_definitions(test-quickjs-turbo-integration PRIVATE CAPSID_SANITIZER_BUILD=1)
+    endif()
+    set_target_properties(test-quickjs-turbo-integration PROPERTIES
+        CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    if(CAPSID_STRICT_WARNINGS)
+        if(MSVC)
+            target_compile_options(test-quickjs-turbo-integration PRIVATE /W4 /WX)
+        else()
+            target_compile_options(test-quickjs-turbo-integration PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+                "$<$<COMPILE_LANGUAGE:CXX>:-Wno-c99-extensions>")
+        endif()
+    endif()
+    add_test(NAME quickjs_turbo_integration COMMAND test-quickjs-turbo-integration)
+    set_tests_properties(quickjs_turbo_integration PROPERTIES
+        TIMEOUT 30 LABELS "worker;engine;turbo")
+endif()
+
 # These allocation rollback/admission tests replace global new/delete.
 # Clang's static TSan C++ runtime defines those symbols strongly. Use its
 # shared runtime for these tests to retain the allocator probes and race

@@ -20,6 +20,7 @@
 #include "capsid/runtime.h"
 
 extern "C" {
+#include "quickjs-turbo.h"
 #include "tjs.h"
 #include "utils.h"
 #include "uv.h"
@@ -1018,6 +1019,16 @@ class WorkerRuntime {
             send_error(0, load_error);
             flush_blocking();
             return 1;
+        }
+
+        // Reclaim any Property IC slabs allocated during one-shot bootstrap or
+        // module initialization before READY so idle worker PSS stays minimal;
+        // hot request handlers re-warm lazily after READY.
+        JS_PurgePropertyIC(JS_GetRuntime(ctx_));
+        for (size_t i = 0; i < binding_tables_.size(); ++i) {
+            if (binding_tables_[i].ctx != NULL) {
+                JS_PurgePropertyIC(JS_GetRuntime(binding_tables_[i].ctx));
+            }
         }
 
 #if defined(__linux__) && defined(__GLIBC__)

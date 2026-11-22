@@ -1,6 +1,7 @@
 #include "worker_runtime.h"
 
 extern "C" {
+#include "quickjs-turbo.h"
 #include "tjs.h"
 }
 
@@ -22,18 +23,6 @@ extern "C" {
 #endif
 
 namespace {
-
-#if (defined(__linux__) || defined(__APPLE__)) && (defined(__GNUC__) || defined(__clang__))
-__attribute__((constructor(101))) void configure_quickjs_turbo_density_defaults() {
-    // Run before quickjs-turbo's default-priority constructor
-    // (js_linux_property_configure / js_arm_own_startup) so per-function inline
-    // hint tails (~634 KiB/worker across bootstrap.js) and first-touch Property
-    // IC slabs (~196 KiB/worker) are not eagerly allocated at worker startup.
-    // Leave explicit overrides intact via overwrite=0.
-    (void)setenv("QJS_DISABLE_NATIVE_OWN_BYTECODE", "1", 0);
-    (void)setenv("QJS_DISABLE_PROPERTY_IC", "1", 0);
-}
-#endif
 
 void close_unrelated_descriptors(int ipc_fd, int network_namespace_fd) {
 #if defined(__linux__) && defined(__NR_close_range)
@@ -145,13 +134,26 @@ int capsid_worker_main(int argc, char** argv, const CapsidWorkerIo* io) {
     if (close_stdio && !redirect_stdio_to_dev_null()) {
         return 2;
     }
-#if defined(_WIN32)
-    if (std::getenv("QJS_DISABLE_PROPERTY_IC") == nullptr) {
-        (void)_putenv_s("QJS_DISABLE_PROPERTY_IC", "1");
+    // Configure quickjs-turbo via explicit C API before runtime creation (no
+    // constructor priority race or process-environment mutation):
+    // - own_bytecode_tail = OFF keeps native ASM Property IC active (PIC-only
+    //   mode) while avoiding ~634 KiB/worker of eager inline-hint tail copies.
+    // - property_ic = ON with warmup = 12 avoids ~196 KiB/worker of cold-start
+    //   IC slabs across bootstrap.js while hot request handlers warm lazily.
+    // Respect explicit operator environment overrides if already set.
+    QJSTurboOptions turbo_opts;
+    QJS_TurboOptionsInit(&turbo_opts);
+    if (std::getenv("QJS_DISABLE_OWN_BYTECODE_TAIL") == nullptr &&
+        std::getenv("QJS_DISABLE_NATIVE_OWN_BYTECODE") == nullptr) {
+        turbo_opts.own_bytecode_tail = QJS_TURBO_OFF;
     }
-#elif !defined(__linux__)
-    (void)setenv("QJS_DISABLE_PROPERTY_IC", "1", 0);
-#endif
+    if (std::getenv("QJS_DISABLE_PROPERTY_IC") == nullptr) {
+        turbo_opts.property_ic = QJS_TURBO_ON;
+    }
+    if (std::getenv("QJS_PROPERTY_IC_WARMUP") == nullptr) {
+        turbo_opts.property_ic_warmup = 12;
+    }
+    (void)QJS_SetTurboDefaults(&turbo_opts);
     TJS_Initialize(argc, argv);
     return capsid_run_worker(ipc_fd, network_namespace_fd, io);
 }

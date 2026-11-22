@@ -41,7 +41,7 @@ window.CAPSID_SITE_STATUS = {
         "qualifiedGitObject": "b9efe575c80b3e96719e48ca688c46cd329c7f25"
       },
       "cmake/build_tests.cmake": {
-        "currentGitObject": "2451164fc5d59cb85b2637952d5283a4bcd662b3",
+        "currentGitObject": "f6d8d06480256d91ca9dae14af500f883fc7ce68",
         "qualifiedGitObject": "5922883fb2ea6a77dbd41d0128e62dd710399830"
       },
       "cmake/build_worker.cmake": {
@@ -49,7 +49,7 @@ window.CAPSID_SITE_STATUS = {
         "qualifiedGitObject": "835fe8a6629217083865717108594237fc25d2ca"
       }
     },
-    "changeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.4 integration with density defaults (QJS_DISABLE_NATIVE_OWN_BYTECODE + QJS_DISABLE_PROPERTY_IC), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
+    "changeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.6 integration via quickjs-turbo::qjs (local LTO isolation, Linux x86-64/ARM64 + macOS x86-64 + Windows x86-64 WIN_X86_64 native ASM VMs), explicit C API defaults (QJS_SetTurboDefaults with own_bytecode_tail=OFF PIC-only + property_ic_warmup=12, pre-READY JS_PurgePropertyIC, QJS_GetTurboInfo integration test), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
     "formatters": {
       "clang-format": "23.1.5",
       "prettier": "3.8.3",
@@ -62,17 +62,21 @@ window.CAPSID_SITE_STATUS = {
     "releaseQualificationInherited": false,
     "runtimeInputChanges": {
       "src/worker_main.cc": {
-        "currentGitObject": "28488ea39576734425c8031cff04a8825c06f726",
+        "currentGitObject": "db571a4a168b43b438f35119f873d9f709a13f2b",
         "qualifiedGitObject": "ca11b33af2ef4c135f4ab7a26cd0268152309264"
+      },
+      "src/worker_runtime.cc": {
+        "currentGitObject": "13040ab944386e1791e6b747126c07a77d19b9c4",
+        "qualifiedGitObject": "229fb1403d6185d4e13b412e9ca66ec04677240b"
       }
     },
     "vendorPatchChanges": {
       "patches/txiki/0079-quickjs-turbo-integration.patch": {
-        "currentGitObject": "c7ae54454a246f1eab2b46cea33ffc4c33a4d407",
+        "currentGitObject": "037bd06213f231e444c888537e393a931b49778a",
         "qualifiedGitObject": null
       },
       "vendor/quickjs-turbo": {
-        "currentGitObject": "f0a10640033a024213fb77333e6c84367a81ab26",
+        "currentGitObject": "ebcd33096549b73708297dbf17d12caec84de4bf",
         "qualifiedGitObject": null
       }
     }
@@ -333,7 +337,7 @@ window.CAPSID_SITE_STATUS = {
     "negotiatedWireVersion": 4,
     "protocolSHA256": "2c7a5fb6eb02fafcf30df741a1be6d742c17d9a3d2a1a58c563bc35f1c438bcf",
     "publicAbi": 7,
-    "quickjsCommit": "f0a10640033a024213fb77333e6c84367a81ab26",
+    "quickjsCommit": "ebcd33096549b73708297dbf17d12caec84de4bf",
     "sdkPatchCount": 79,
     "sourceCommit": "c7a80b9bdafe36d415a440be7ed3384f7830d4f8",
     "sourceManifest": "docs/data/runtime-source-manifest.json",
@@ -360,7 +364,7 @@ window.CAPSID_SITE_STATUS = {
     "version": "0.3.1"
   },
   "schema": 1,
-  "sourceChangeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.4 integration with density defaults (QJS_DISABLE_NATIVE_OWN_BYTECODE + QJS_DISABLE_PROPERTY_IC), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
+  "sourceChangeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.6 integration via quickjs-turbo::qjs (local LTO isolation, Linux x86-64/ARM64 + macOS x86-64 + Windows x86-64 WIN_X86_64 native ASM VMs), explicit C API defaults (QJS_SetTurboDefaults with own_bytecode_tail=OFF PIC-only + property_ic_warmup=12, pre-READY JS_PurgePropertyIC, QJS_GetTurboInfo integration test), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
   "stable": {
     "githubLatest": false,
     "prerelease": false,
