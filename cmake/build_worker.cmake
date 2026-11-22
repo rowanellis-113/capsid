@@ -159,8 +159,8 @@ if(CAPSID_BUILD_WORKER)
     # are enabled so test-tjs-http-short-write's --wrap=lws_ssl_capable_write
     # intercepts calls deterministically regardless of LTO partitioning.
     if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-        set_source_files_properties(
-            "${CAPSID_TXIKI_OVERLAY}/deps/libwebsockets/lib/tls/mbedtls/mbedtls-ssl.c"
+        set_property(
+            SOURCE "${CAPSID_TXIKI_OVERLAY}/deps/libwebsockets/lib/tls/mbedtls/mbedtls-ssl.c"
             TARGET_DIRECTORY websockets
             APPEND PROPERTY COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:-fno-lto>")
     endif()
