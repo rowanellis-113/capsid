@@ -12,15 +12,16 @@ in separate `quickjs-turbo` (QuickJS-NG 0.15.1-derived) worker processes; the
 Host owns listeners, routing, capabilities, resource limits and worker lifetime.
 
 - **Zero-JIT native VM (`dev/v0.3.1`)**: powered by `quickjs-turbo`
-  (`v0.15.1-turbo.7`) with native register-frame interpreters on Linux x86-64/ARM64,
+  (`v0.15.1-turbo.8`) with native register-frame interpreters on Linux x86-64/ARM64,
   macOS Intel and Windows x86-64 (portable C fallback on Apple Silicon/sanitizers)
   and explicit density-preserving Property IC defaults (`QJS_SetTurboDefaults` +
   pre-`READY` `JS_PurgePropertyIC`).
 - **Hard Linux OS isolation**: per-worker Linux Namespaces, Landlock and Seccomp
   with default-deny egress (`egress_policy == NULL`) and zero JIT RWX pages.
-- **Micro-container density**: **729** warmed 10 KiB strict-sandbox workers in
-  2 GiB RAM and **18.5 MiB** total host + worker PSS under 64-connection load.
-- **Sub-20 ms cold starts**: **6.9 ms** (10 KiB) / **18.6 ms** (1 MiB) with
+- **Micro-container density**: **715** warmed 10 KiB strict-sandbox workers in
+  2 GiB RAM (99.2% warm retention) and **19.6 MiB** total host + worker PSS
+  under 64-connection load.
+- **Fast cold starts**: **8.7 ms** (10 KiB) / **20.2 ms** (1 MiB) with
   precompiled trusted bytecode.
 - **Embeddable C11 / C++11 SDK**: stable `<capsid/runtime.h>` (ABI v7) with
   non-blocking IPC, streaming, WebSocket v4 and trusted Host Bindings.
@@ -32,7 +33,7 @@ Host owns listeners, routing, capabilities, resource limits and worker lifetime.
 > and Windows support is for trusted development and integration.
 >
 > Documentation/data reviewed **2026-11-22** for `dev/v0.3.1` (`quickjs-turbo`
-> `v0.15.1-turbo.7` integration; the published `v0.3.0-beta.5` release retains
+> `v0.15.1-turbo.8` integration; the published `v0.3.0-beta.5` release retains
 > QuickJS-NG 0.15.1).
 > [Current status and data scope](docs/current-status.md) separates the published
 > beta, current source interface, measured development snapshot and dated history.
@@ -191,25 +192,17 @@ The ordinary suite is not represented as all-passing.
   their recorded source, build, machine and protocol. Historical v0.2.2 numbers
   are not 0.3.0-beta measurements.
 
-**Latest accepted local measurement:** `v0.3.0-beta.5` (`c7a80b9`), rebuilt
-locally under WSL2 on an i5-12400F, 2026-11-21 (`capsid-perf-lane-v3` seven-stack
-pure-JS matrix). This measures the local Release/LTO build, **not the
-distributed packages**.
+**Latest accepted local measurement:** `v0.3.1-beta.1` (`6d4cc61`, powered by
+`quickjs-turbo`), rebuilt locally under WSL2 on an i5-12400F, 2026-11-22
+(`capsid-perf-lane-v3` seven-stack pure-JS matrix). This measures the local
+Release/LTO build, **not the distributed packages**.
 
 | Dimension | Capsid (Strict Linux Sandbox) | Notes |
 | --- | --- | --- |
-| **2 GiB warmed pool** | **729 / 503 / 128** workers | 10 KiB / 100 KiB / 1 MiB (100 req/worker) |
-| **Cold start (1 MiB bytecode)** | **18.64 ms** (`16.0 MiB` PSS) | **6.9 ms** at 10 KiB bytecode |
-| **Serving memory (PSS)** | **15.0 MiB** (10 req/s) · **18.5 MiB** (64-conn) | Complete host + strict worker tree |
-| **Sustained throughput** | **21,746.6 / 14,194.6 / 10,649.7 / 9,808.1** QPS | JSON 1 KiB / 16 KiB / stream / dynamic API (**1,175 QPS/MiB** on 1 KiB) |
-
-> **`dev/v0.3.1` (`quickjs-turbo v0.15.1-turbo.6`) local observation** (single-stack
-> WSL2 Release/LTO observation, 2026-11-22 — not yet a full seven-stack sealed
-> publication archive): **23,682.7 / 14,549.3 / 11,075.2 / 14,101.9** QPS
-> (**+43.8%** on `dynamic-api`, **+8.9%** on JSON 1 KiB, **1,190 QPS/MiB**),
-> **15.5 MiB** low-QPS / **19.9 MiB** loaded PSS, and **721/715** (`10 KiB`),
-> **497/496** (`100 KiB`), **127/127** (`1 MiB`) cold/warm workers in 2 GiB
-> (**99.2%–100%** warm retention). See [performance methodology](docs/performance-benchmarks.md).
+| **2 GiB warmed pool** | **715 / 496 / 127** workers | 10 KiB / 100 KiB / 1 MiB (99.2%–100% warm retention; 100 req/worker) |
+| **Cold start (1 MiB bytecode)** | **20.24 ms** (`16.0 MiB` PSS) | **8.66 ms** at 10 KiB bytecode (`7.2 MiB` PSS) |
+| **Serving memory (PSS)** | **15.7 MiB** (10 req/s) · **19.6 MiB** (64-conn) | Complete host + strict worker tree (**26.6×** smaller than `workerd` under load) |
+| **Sustained throughput** | **24,186.0 / 14,441.4 / 11,153.2 / 14,421.9** QPS | JSON 1 KiB / 16 KiB / stream / dynamic API (**+47.0%** `dynamic-api` vs `v0.3.0-beta.5`; **1,234 QPS/MiB** on 1 KiB) |
 
 Interactive charts, three-tier peer comparisons and SHA-256 replayable archives
 are published at the [Capsid Site & Benchmark Hub](https://rowanellis-113.github.io/capsid/);

@@ -13,7 +13,7 @@ pinned `vendor/txiki.js` (`v26.6.0`, QuickJS-NG 0.15.1, 78 SDK patches).
 
 The current `dev/v0.3.1` checkout is an `engine-integration-successor`
 (`releaseQualificationInherited:false`) that integrates `vendor/quickjs-turbo`
-(`v0.15.1-turbo.7`, commit `2c1c49b294b3cb75353b2b5d0db301860513d1a7`) through
+(`v0.15.1-turbo.8`, commit `8fcb4751a66986bd42b11de3012e967d77790923`) through
 `patches/txiki/0079-quickjs-turbo-integration.patch` (79 SDK patches total)
 while keeping the public C ABI v7 and FetchRPC v3/v4 wire protocol unchanged.
 Via the upstream `quickjs-turbo::qjs` CMake target (with local LTO isolation),
@@ -35,10 +35,9 @@ high-density worker packing and native Property IC performance coexist. Tag
 `v0.3.1-beta.1` is reserved for all-platform prerelease validation and
 packaging (`release.yml`); until its artifacts are reviewed and published,
 `v0.3.0-beta.5` remains the published GitHub Prerelease. The
-derived release qualification and sealed benchmark records below
-describe the tagged `v0.3.0-beta.5` release, not new qualification for
-`dev/v0.3.1` commits (single-stack `turbo.6` local QPS/PSS/density observations
-are documented separately in [performance methodology](performance-benchmarks.md)).
+derived release qualification record below describes the published
+`v0.3.0-beta.5` release, while the latest accepted local performance record
+measures a clean local WSL2 Release/LTO rebuild of `v0.3.1-beta.1` (`6d4cc61`).
 See [source formatting](formatting.md) for exact-byte
 exclusions and [package architecture](releases.md#development-package-matrix)
 for the five-platform archive matrix.
@@ -55,7 +54,7 @@ for the five-platform archive matrix.
 | Qualified beta source | `c7a80b9bdafe36d415a440be7ed3384f7830d4f8` | Tree `876e29c2792899b654310fea72aac979bd8bb48f`; 5469 frozen git entries |
 | Public interface | C ABI v7; capability policy v2 | Existing layouts remain frozen; new interfaces are additive |
 | Protocol | FetchRPC v3 by default; explicit negotiated v4 | Never mix versions on one connection |
-| Pinned vendor (`dev/v0.3.1`) | txiki.js `v26.6.0` + quickjs-turbo `v0.15.1-turbo.7` (`2c1c49b2`), 79 SDK patches | Published `v0.3.0-beta.5` retains txiki.js `v26.6.0` (QuickJS-NG 0.15.1), 78 SDK patches |
+| Pinned vendor (`dev/v0.3.1`) | txiki.js `v26.6.0` + quickjs-turbo `v0.15.1-turbo.8` (`8fcb4751`), 79 SDK patches | Published `v0.3.0-beta.5` retains txiki.js `v26.6.0` (QuickJS-NG 0.15.1), 78 SDK patches |
 
 The [read-only release capture](data/release-status.json) records its actual UTC
 observation, 11 asset IDs/sizes/digests and stable/beta flags. The
@@ -121,34 +120,35 @@ reported as complete WPT, browser or workerd conformance.
 
 ## Latest Accepted Local Performance Record
 
-The latest accepted session was measured on **2026-11-21** using a clean local
-Release/LTO rebuild of [`v0.3.0-beta.5`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5)
-(`c7a80b9bdafe36d415a440be7ed3384f7830d4f8`). It matches the prerelease **source**; it does not measure
-the distributed binaries. It uses `capsid-perf-lane-v3` (pure-JS seven-stack
-matrix across three reference tiers plus `dynamic-api`).
+The latest accepted session was measured on **2026-11-22** using a clean local
+Release/LTO rebuild of `v0.3.1-beta.1` (`6d4cc616619dfd1ada0e484c2c47b79046d680dc`,
+`quickjs-turbo` native register-frame VM). It does **not** measure the
+distributed release binaries (`v0.3.0-beta.5` remains the published GitHub
+Prerelease). It uses `capsid-perf-lane-v3` (pure-JS seven-stack matrix across
+three reference tiers plus `dynamic-api`).
 
 | Metric | Recorded Capsid value |
 | --- | ---: |
-| JSON 1 KiB QPS | 21,746.6 |
-| JSON 16 KiB QPS | 14,194.6 |
-| Stream 1 KiB QPS | 10,649.7 |
-| Dynamic API QPS | 9,808.1 |
-| Low-load service-tree PSS | 15.0 MiB |
-| Loaded service-tree PSS | 18.5 MiB |
-| Warm workers at 10 KiB / 100 KiB / 1 MiB, 2048 MiB budget | 729 / 503 / 128 |
+| JSON 1 KiB QPS | 24,186.0 |
+| JSON 16 KiB QPS | 14,441.4 |
+| Stream 1 KiB QPS | 11,153.2 |
+| Dynamic API QPS | 14,421.9 |
+| Low-load service-tree PSS | 15.7 MiB |
+| Loaded service-tree PSS | 19.6 MiB |
+| Warm workers at 10 KiB / 100 KiB / 1 MiB, 2048 MiB budget | 715 / 496 / 127 |
 
-Session: `local-wsl-beta5-v3-20261121T064717Z-c7a80b9`. Machine: i5-12400F, 12 logical CPUs, measured set 0–3
-under WSL2. Cold, QPS, density and whole-session replay all passed (`4546`
+Session: `local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61`. Machine: i5-12400F, 12 logical CPUs, measured set 0–3
+under WSL2. Cold, QPS, density and whole-session replay all passed (`4481`
 evidence files). Physical Windows-host exclusivity is **not** claimed.
 
-The untagged beta.4 `v3` snapshot (`82eaab9`) and the archived `v1` baseline
-(`485b29b`) are preserved unchanged. The historical `v0.2.2` observation
-remains unverified under the current archive contract. Different reference
-versions, different matrix contracts and unverified historical points do not
-support a formal paired trend.
+The earlier `v0.3.0-beta.5` (`c7a80b9`, QuickJS-NG 0.15.1), untagged beta.4 `v3`
+snapshot (`82eaab9`) and archived `v1` baseline (`485b29b`) are preserved
+unchanged. The historical `v0.2.2` observation remains unverified under the
+current archive contract. Different reference versions, different matrix
+contracts and unverified historical points do not support a formal paired trend.
 
 See the [performance reference](performance-benchmarks.md),
-[session review](data/performance-review-v030-beta5.json), [measured source manifest](data/performance-source-manifest-v030-beta5.json)
+[session review](data/performance-review-v031-beta1.json), [measured source manifest](data/performance-source-manifest-v031-beta1.json)
 and [site/transport instructions](../perf-site/README.md).
 
 ## Documentation Coverage and Historical Records

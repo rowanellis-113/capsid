@@ -184,10 +184,70 @@
       "prefix": "bench/results/local-wsl-beta5-v3-20261121T064717Z-c7a80b9-qps",
       "sha256": "a4d1fdc693470028f67de034b57bbfc99c44b0409eadc79a33dd4e2b66987f40",
       "uncompressedBytes": 2356496
+    },
+    {
+      "bytes": 1366570,
+      "files": 1214,
+      "lane": "cold-start",
+      "parts": [
+        {
+          "bytes": 1366570,
+          "path": "perf-site/archives/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-cold.tar.gz",
+          "sha256": "af25f042e6f79b10947842c6657cc4ad5240b5a217c7380bc76e1db3c220e92f"
+        }
+      ],
+      "prefix": "bench/results/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-cold",
+      "sha256": "af25f042e6f79b10947842c6657cc4ad5240b5a217c7380bc76e1db3c220e92f",
+      "uncompressedBytes": 50804427
+    },
+    {
+      "bytes": 162692066,
+      "files": 2691,
+      "lane": "density",
+      "parts": [
+        {
+          "bytes": 41943040,
+          "path": "perf-site/archives/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-density.tar.gz.part001",
+          "sha256": "7b3a12ecf982b58d8cf8296ca85e64ed3002062667f9ec8bfb562e5a23e3e3f0"
+        },
+        {
+          "bytes": 41943040,
+          "path": "perf-site/archives/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-density.tar.gz.part002",
+          "sha256": "1b05c1868713bc12b5f323d7ed30d7de83be5248d985ed5def639a427cb0d2c4"
+        },
+        {
+          "bytes": 41943040,
+          "path": "perf-site/archives/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-density.tar.gz.part003",
+          "sha256": "c3615cc5f2f4188b9ae028e3d3eb2fed25b675714770740424f97f5e25f81b8f"
+        },
+        {
+          "bytes": 36862946,
+          "path": "perf-site/archives/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-density.tar.gz.part004",
+          "sha256": "4dd00250730ee7d17f733c91751ad3239f276566c46b86eb50640d30c993fe1a"
+        }
+      ],
+      "prefix": "bench/results/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-density",
+      "sha256": "ad697fa753bdcbf1df372c2027ca527834dd9638f5d2a315d4e5bc0601cea927",
+      "uncompressedBytes": 2613469371
+    },
+    {
+      "bytes": 369774,
+      "files": 576,
+      "lane": "qps",
+      "parts": [
+        {
+          "bytes": 369774,
+          "path": "perf-site/archives/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-qps.tar.gz",
+          "sha256": "257316e1668d89611e79545be9129d7d560c64dd3fa52cdb2e8114e9e7c15f78"
+        }
+      ],
+      "prefix": "bench/results/local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61-qps",
+      "sha256": "257316e1668d89611e79545be9129d7d560c64dd3fa52cdb2e8114e9e7c15f78",
+      "uncompressedBytes": 2357147
     }
   ],
   "contract": "capsid-perf-packed-archives-v1",
-  "measurementCommit": "c7a80b9bdafe36d415a440be7ed3384f7830d4f8",
+  "measurementCommit": "6d4cc616619dfd1ada0e484c2c47b79046d680dc",
   "schema": 1,
-  "session": "local-wsl-beta5-v3-20261121T064717Z-c7a80b9"
+  "session": "local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61"
 }

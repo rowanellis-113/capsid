@@ -23,7 +23,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "7460f6d09d9260a6a7d03413247d1a161f84d24d51a2fc504e9efe6cb5c95ff1",
+      "sha256": "6c58d4cf48c5738b19a90fe2273f2248ca07e8898dc90cc0ad5eb15ba7bf19d1",
       "review": "Product, public beta.5 download, unchanged GitHub Latest and explicit stable channel, security defaults, compatibility and source-bound performance evidence."
     },
     {
@@ -143,7 +143,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "6dc27ef8276095b46aefa171aa4c2a291460b47c8f5a92179741fab0d5d05fcc",
+      "sha256": "849dfa328bff39c9764afaf789ef15f2048c52148092a3cf1b9238ea5e13df0a",
       "review": "Exact beta.5 source and five-platform release evidence, distinct GitHub Latest, non-inheritance, five raw WPT failures and source-bound measurements."
     },
     {
@@ -583,7 +583,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "50ee42c226d82e76a6591d36032cffafb4e80599a3bcb84e9481929fb064f147",
+      "sha256": "e4596cd21bad1d82d22d01d585a60db9d05e16d852ed72ef74479cc46146a9f0",
       "review": "Accepted 82eaab9 source/CPU/protocol evidence, unchanged historical records and no claim of beta.5 performance or formal paired improvement."
     },
     {
@@ -767,7 +767,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "c0d71a12dc03a2e7e95448f8d513cd01250fa96e7d589249b2c6d7b41eb8777b",
+      "sha256": "f8ec1922503f77c531841d81312daa53dd9781c40b90b155e5c24c0c829f52cc",
       "review": "Generated files, verified archive replay, current prerelease versus measured source boundaries and deployment requirements."
     },
     {

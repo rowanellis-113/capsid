@@ -379,14 +379,14 @@ assert.deepEqual(
 assert.equal(currentStatus.qualification.ordinarySuitePassed, false);
 assert.equal(currentStatus.qualification.standardsConformanceClaimed, false);
 assert.equal(currentStatus.performance.measurementBuild, 'local-rebuild');
-assert.equal(currentStatus.performance.matchesPublishedBetaSource, true);
-assert.equal(currentStatus.performance.sourceCommit, currentStatus.prerelease.sourceCommit);
-assert.equal(currentStatus.performance.sourceTag, currentStatus.prerelease.tag);
+assert.equal(currentStatus.performance.matchesPublishedBetaSource, false);
+assert.equal(currentStatus.performance.sourceCommit, '6d4cc616619dfd1ada0e484c2c47b79046d680dc');
+assert.equal(currentStatus.performance.sourceTag, 'v0.3.1-beta.1');
 assert.equal(currentStatus.performance.representsPublishedRelease, false);
 assert.equal(
   currentStatus.performance.publishedBetaPerformanceMeasured,
   false,
-  'a matching source tag does not prove that the distributed binaries were measured',
+  'the dev/v0.3.1 measurement is not relabeled as a published release asset benchmark',
 );
 assert.ok(documents.get('docs/conformance.md').includes('workerd-default-profile-v2.json'));
 assert.ok(documents.get('docs/host-integration.md').includes('capsid_worker_channel_confirm'));

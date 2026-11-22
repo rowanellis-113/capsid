@@ -34,7 +34,7 @@ def derive(root):
     reference = load(root / "tests/wpt/workerd-default-profile-v2.json")
     capability = load(root / "docs/capability-manifest.json")
     baseline = load(root / "docs/txiki-upgrade-baseline.json")
-    review_path = "docs/data/performance-review-v030-beta5.json"
+    review_path = "docs/data/performance-review-v031-beta1.json"
     review = load(root / review_path)
     measured_source = load(root / review["measuredSourceManifest"])
     header = (root / "include/capsid/runtime.h").read_text(encoding="utf-8")

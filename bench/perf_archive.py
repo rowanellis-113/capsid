@@ -15,9 +15,9 @@ import tarfile
 
 from perf_evidence import EvidenceError, SHA256, is_link, need, object_pairs, relative_name, sha256
 
-MAX_FILES = 20000
+MAX_FILES = 40000
 MAX_MEMBER_BYTES = 256 * 1024 * 1024
-MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+MAX_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
 MAX_TRANSPORT_BYTES = 512 * 1024 * 1024
 
 

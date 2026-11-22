@@ -2,9 +2,10 @@
 
 The [performance site](https://rowanellis-113.github.io/capsid/) defaults to the
 latest verified point: a local WSL2 Release/LTO rebuild of the exact
-`v0.3.0-beta.5` tag (`c7a80b9`, 2026-11-21). Its results do **not** measure the
-distributed packages. The earlier untagged beta.4 `v3` point, archived `v1`
-cross-language point and unverified `v0.2.2` observation remain selectable.
+`v0.3.1-beta.1` tag (`6d4cc61`, 2026-11-22, `quickjs-turbo`). Its results do
+**not** measure the distributed packages. The earlier `v0.3.0-beta.5` (`c7a80b9`),
+untagged beta.4 `v3` point (`82eaab9`), archived `v1` cross-language point and
+unverified `v0.2.2` observation remain selectable.
 See [current status](../docs/current-status.md) and
 [performance methodology/data](../docs/performance-benchmarks.md).
 
@@ -14,16 +15,16 @@ See [current status](../docs/current-status.md) and
 | --- | --- |
 | `index.html` | Product landing page and verifiable benchmark hub: Dark/Light themes, Quick Start timeline, self-contained SVG charts, three-tier reference UX, scenario guide and explicit source/verification labels |
 | `logo.png` | Repository brand artwork staged for OpenGraph / social sharing previews |
-| `data.js` | Collector-generated points: two verified `v3` points, archived verified `v1`, and one unverified historical observation |
+| `data.js` | Collector-generated points: three verified `v3` points, archived verified `v1`, and one unverified historical observation |
 | `status.js` | Generated release/source/measurement context from `tools/refresh-documentation-data.py` |
 | `archive-index.json` / generated `archive-index.js` | Hashed compressed transport/part index and its UI projection for complete sealed evidence |
 | `archives/` | Full original lane bytes in deterministic gzip/TAR transports, split `<= 40 MiB` |
 
-Beta.5 has a matching Git source tag; beta.4 development snapshot `82eaab9`
-has archive label `v0.3.0-beta.4` and an empty `sourceTag`. Neither represents
-a measurement of the distributed binaries. Do not draw a paired trend from
-separate sessions with different reference versions, contracts or unverified
-historical records.
+`v0.3.1-beta.1` and `v0.3.0-beta.5` have matching Git source tags; beta.4
+development snapshot `82eaab9` has archive label `v0.3.0-beta.4` and an empty
+`sourceTag`. None represents a measurement of the distributed binaries. Do not
+draw a paired trend from separate sessions with different reference versions,
+contracts or unverified historical records.
 
 ## Prepare the Site
 
@@ -35,9 +36,9 @@ python3 tests/test_perf_archive.py
 python3 bench/prepare-perf-site.py --repo . --output /path/to/new-site-output
 ```
 
-The output must be new and outside `perf-site`. Allow at least 10 GiB of scratch:
-replaying `14202` evidence files plus 9 checksum manifests takes about
-`7.76 GiB` of raw bytes, transported in about `472 MiB` across 9 bundles.
+The output must be new and outside `perf-site`. Allow at least 14 GiB of scratch:
+replaying `18671` evidence files plus 12 checksum manifests (`18683` files total)
+takes about `10.25 GiB` of raw bytes, transported in about `629 MiB` across 12 bundles.
 Compression does not reduce the number of samples.
 The stager restores the original portable namespace and invokes the ordinary
 complete lane/point validators for every verified point. It checks
@@ -62,15 +63,17 @@ This is **replay**, not a new measurement:
 ```sh
 python3 bench/perf_archive.py --repo . --output /path/to/new-archive-root
 ARCHIVES=/path/to/new-archive-root
-SESSION=local-wsl-beta5-v3-20261121T064717Z-c7a80b9
+SESSION=local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 bench/collect-perf-point.py --repo "$ARCHIVES" \
   --cold-start "$ARCHIVES/bench/results/${SESSION}-cold" \
   --qps "$ARCHIVES/bench/results/${SESSION}-qps" \
   --density "$ARCHIVES/bench/results/${SESSION}-density" \
-  --version 0.3.0-beta.5 --release v0.3.0-beta.5 --generated-at "$GENERATED_AT" --check
+  --version 0.3.1-beta.1 --release v0.3.1-beta.1 --generated-at "$GENERATED_AT" --check
 ```
 
+For `v0.3.0-beta.5`, use `SESSION=local-wsl-beta5-v3-20261121T064717Z-c7a80b9`,
+`--version 0.3.0-beta.5` and `--release v0.3.0-beta.5`.
 For the earlier `v3` point, use `SESSION=local-wsl-v030-beta4-v3-20261120T052109Z-82eaab99`,
 `--version 0.3.0-beta.4` and `--release v0.3.0-beta.4`.
 To replay the archived `v1` cross-language point, pass

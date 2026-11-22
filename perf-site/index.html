@@ -2026,7 +2026,7 @@ function renderReleaseContext() {
     " Latest accepted local measurement: <b>" + esc(s.performance.displayLabel) + "</b>, " + esc(s.performance.date) + "." +
     (s.performance.publishedBetaPerformanceMeasured ? "" : s.performance.matchesPublishedBetaSource ?
       " <b>The prerelease source was rebuilt locally; the distributed binaries were not measured.</b>" :
-      " <b>Published " + esc(s.prerelease.tag) + " has no matching complete performance measurement.</b>") +
+      " <b>The measured local rebuild does not measure distributed release binaries.</b>") +
     " The archival v0.3.0 label is not a stable-release claim. " +
     '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/current-status.md">Sources and limits</a>' +
     " · status captured " + esc(s.asOfUTC.slice(0, 10)) + ".";
