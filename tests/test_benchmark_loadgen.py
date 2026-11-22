@@ -171,8 +171,13 @@ class LoadgenTests(unittest.TestCase):
     def test_valid_frozen_payloads_and_independent_byte_claims(self):
         for workload in ("matrix-json-1k", "matrix-json-16k", "stream", "dynamic-api"):
             with self.subTest(workload=workload):
-                run, rows, verdict, _, observed = self.run_fixture(workload=workload, warm=1)
-                self.assertEqual(0, run.returncode, run.stderr.decode(errors="replace"))
+                run, rows, verdict, _, observed = self.run_fixture(
+                    workload=workload,
+                    warm=1,
+                    extra={"CAPSID_BENCH_TIMEOUT_MS": "500"},
+                )
+                stderr = run.stderr.decode(errors="replace")
+                self.assertEqual(0, run.returncode, f"stderr={stderr} verdict={verdict}")
                 self.assertEqual(["warmup", "measured"], [r["phase"] for r in rows])
                 self.assertTrue(verdict["ok"])
                 for item in [*rows, verdict]:

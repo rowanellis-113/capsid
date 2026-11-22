@@ -11,32 +11,32 @@ provide that production isolation boundary.
 
 ## 1. Obtain the Tools
 
-These commands target the **`v0.3.0-beta.5`** prerelease. Install that exact tag
-via the [releases and installation](releases.md) guide or follow
+These commands target the **`v0.3.1-beta.1`** prerelease (also GitHub `Latest`).
+Install that tag via the [releases and installation](releases.md) guide or follow
 [building from source](building.md). Stable `v0.2.2` remains
 available as an explicit tag; this tutorial does not requalify `v0.2.2`.
 
 Linux or macOS:
 
 ```sh
-curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.0-beta.5
+curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1
 ```
 
 Windows PowerShell (`x86_64`):
 
 ```powershell
-$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5'
-$zip  = '.\capsid-0.3.0-windows-x86_64.zip'
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip" -OutFile $zip
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip.sha256" -OutFile "$zip.sha256"
+$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1'
+$zip  = '.\capsid-0.3.1-windows-x86_64.zip'
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip" -OutFile $zip
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip.sha256" -OutFile "$zip.sha256"
 $exp = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
 if ((Get-FileHash $zip -Algorithm SHA256).Hash -ine $exp) { throw 'SHA-256 mismatch' }
 Expand-Archive -LiteralPath $zip -DestinationPath "$HOME\capsid-beta" -Force
 ```
 
 Or download any `.tar.gz` / `.zip` archive and its `.sha256` sidecar directly
-from the [`v0.3.0-beta.5` Release](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5)
+from the [`v0.3.1-beta.1` Release](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1)
 (for example with `wget` or a browser; see [releases and installation](releases.md)
 for manual SHA-256 verification).
 

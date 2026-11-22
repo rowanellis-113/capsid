@@ -203,7 +203,7 @@ for (const [documentName, content] of [
   ['SECURITY.md', securityPolicy],
 ]) {
   assert.ok(
-    content.includes('`0.2.2`') && content.includes('`0.3.0-beta`'),
+    content.includes('`0.2.2`') && content.includes('`0.3.1-beta`'),
     `${documentName} must distinguish stable from the experimental prerelease`,
   );
 }
@@ -331,12 +331,12 @@ const profileV2 = JSON.parse(
   await readFile(path.join(root, 'tests/wpt/workerd-default-profile-v2.json'), 'utf8'),
 );
 assert.equal(currentStatus.developmentBranch, 'dev/v0.3.1');
-assert.equal(currentStatus.prerelease.channel, '0.3.0-beta');
-assert.equal(currentStatus.prerelease.tag, 'v0.3.0-beta.5');
+assert.equal(currentStatus.prerelease.channel, '0.3.1-beta');
+assert.equal(currentStatus.prerelease.tag, 'v0.3.1-beta.1');
 assert.equal(currentStatus.prerelease.draft, false);
-assert.equal(currentStatus.prerelease.prerelease, true);
-assert.equal(currentStatus.prerelease.githubLatest, false);
-assert.equal(currentStatus.githubLatest.tag, 'v0.3.0-beta.3');
+assert.equal(currentStatus.prerelease.prerelease, false);
+assert.equal(currentStatus.prerelease.githubLatest, true);
+assert.equal(currentStatus.githubLatest.tag, 'v0.3.1-beta.1');
 for (const [label, release] of [
   ['Stable', currentStatus.stable],
   ['Prerelease', currentStatus.prerelease],
@@ -360,17 +360,19 @@ assert.equal(currentStatus.runtime.sourceCommit, currentStatus.prerelease.source
 assert.equal(currentStatus.runtime.sourceTree, currentStatus.prerelease.sourceTree);
 assert.equal(currentStatus.runtime.publicAbi, 7);
 assert.equal(currentStatus.runtime.defaultWireVersion, 3);
-assert.equal(currentStatus.checkout.kind, 'engine-integration-successor');
+assert.equal(currentStatus.checkout.kind, 'test-harness-successor');
 assert.equal(currentStatus.checkout.baseCommit, currentStatus.prerelease.sourceCommit);
-assert.ok(Object.keys(currentStatus.checkout.buildInputChanges).length > 0);
-assert.ok(Object.keys(currentStatus.checkout.runtimeInputChanges).length > 0);
-assert.ok(Object.keys(currentStatus.checkout.vendorPatchChanges).length > 0);
+assert.deepEqual(Object.keys(currentStatus.checkout.buildInputChanges), [
+  'cmake/build_tests.cmake',
+]);
+assert.equal(Object.keys(currentStatus.checkout.runtimeInputChanges).length, 0);
+assert.equal(Object.keys(currentStatus.checkout.vendorPatchChanges).length, 0);
 assert.equal(
   currentStatus.checkout.releaseQualificationInherited,
   false,
-  'engine integration successors do not inherit binary qualification beyond the tagged release',
+  'test-harness successors do not inherit binary qualification beyond the tagged release',
 );
-assert.match(currentStatus.runtime.sourceScope, /qualified 0\.3\.0-beta interface baseline/);
+assert.match(currentStatus.runtime.sourceScope, /qualified 0\.3\.1-beta interface baseline/);
 assert.equal(currentStatus.conformance.referenceProfile, profileV2.id);
 assert.deepEqual(
   currentStatus.conformance.rawFailingFiles.map((value) => value.path),

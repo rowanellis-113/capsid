@@ -4,7 +4,7 @@ Capsid runs application code in separate worker processes, but process isolation
 
 ## Supported Scope
 
-The stable release line is `0.2.2`; `0.3.0-beta` is an experimental prerelease (public C ABI v7), not a stable-production recommendation. Security fixes target the latest code line, with no commitment to long-term security maintenance for older versions. See [release channels](docs/releases.md) for artifact selection and source-bound qualification.
+The stable release line is `0.2.2`; `0.3.1-beta` is an experimental prerelease (public C ABI v7), not a stable-production recommendation. Security fixes target the latest code line, with no commitment to long-term security maintenance for older versions. See [release channels](docs/releases.md) for artifact selection and source-bound qualification.
 
 The local `capsid-host` modes are development/integration/benchmark tools, not production isolation recipes. Linux managed mode is the first-party production path, but its deployment interface remains experimental. The Linux strict sandbox is the production isolation target; macOS native-dev, Windows native-dev, and any non-isolated mode must not be used to run untrusted code. Successful CI or a beta release does not remove these restrictions. For platform differences, see [platform support overview](docs/platform-support.md).
 

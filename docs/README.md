@@ -5,11 +5,11 @@ references define its contracts; dated reviews preserve what was observed for
 specific inputs. A historical review is not a current deployment instruction.
 
 The stable release is [`v0.2.2`](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2);
-[`v0.3.0-beta.5`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5) is the current experimental prerelease.
+[`v0.3.1-beta.1`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) is the current experimental prerelease (and GitHub `Latest`).
 [Current status and data scope](current-status.md) is the maintained entry point
 for delivered scope, source identities and the latest accepted measurement.
-[Release selection](releases.md) explains the channels. The
-[qualification record](v0.3.0-current-qualification.md) binds beta acceptance to
+[Release selection](releases.md) explains the channels. The preserved
+[v0.3.0 qualification record](v0.3.0-current-qualification.md) binds earlier `0.3.0-beta` acceptance to
 its exact source and artifacts without claiming full standards conformance.
 
 ## Run an Application
@@ -20,7 +20,7 @@ its exact source and artifacts without claiming full standards conformance.
 | Select stable or beta; verify downloaded assets | [Releases and installation](releases.md) |
 | Choose Linux, macOS or Windows | [Platform support](platform-support.md) |
 | Request modules, egress and worker resources | [capsid.json guide](capsid-json.md) |
-| Select a Host mode or configure managed applications | [Host configuration reference](host-config.md) |
+| Select a Host mode or configure managed applications | [Host configuration reference](host-config.md) · [Config v2 design](config-v2-design.md) |
 | Use a Web-standard framework | [Framework compatibility](framework-compatibility/README.md) |
 
 ## Integrate and Secure a Host

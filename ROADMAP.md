@@ -1,7 +1,7 @@
 # Capsid Roadmap: Progressive workerd Compatibility
 
-> Updated 2026-11-22 against `dev/v0.3.1` (`quickjs-turbo` integration) and the
-> published `0.3.0-beta` source. Stable is `v0.2.2`; this roadmap separates
+> Updated 2026-11-22 against published `0.3.1-beta` (`v0.3.1-beta.1`, `quickjs-turbo`
+> integration). Stable is `v0.2.2`; this roadmap separates
 > delivered beta scope from future milestones and does not claim complete
 > workerd/Cloudflare parity. See [current status](docs/current-status.md).
 

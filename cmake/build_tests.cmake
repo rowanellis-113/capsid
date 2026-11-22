@@ -3211,7 +3211,7 @@ if(BUILD_TESTING)
                             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_loadgen.py"
                             --loadgen "${CAPSID_BENCH_LOADGEN}")
                     set_tests_properties(benchmark_loadgen_correctness PROPERTIES
-                        LABELS "host;benchmark;correctness" TIMEOUT 90)
+                        LABELS "host;benchmark;correctness" TIMEOUT 90 RUN_SERIAL TRUE)
                     add_test(NAME benchmark_qps_probe
                         COMMAND "${CAPSID_PYTHON3_EXECUTABLE}" -B
                             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_qps_probe.py"

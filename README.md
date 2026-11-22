@@ -1,7 +1,7 @@
 ![Capsid](logo.png)
 
 [![Testing validity](https://github.com/rowanellis-113/capsid/actions/workflows/testing-validity.yml/badge.svg)](https://github.com/rowanellis-113/capsid/actions/workflows/testing-validity.yml)
-[![Prerelease v0.3.0-beta.5](https://img.shields.io/badge/prerelease-v0.3.0--beta.5-orange)](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5)
+[![Prerelease v0.3.1-beta.1](https://img.shields.io/badge/prerelease-v0.3.1--beta.1-orange)](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1)
 [![Site & Benchmarks](https://img.shields.io/badge/site%20%26%20benchmarks-live-00b4e6)](https://rowanellis-113.github.io/capsid/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -26,15 +26,15 @@ Host owns listeners, routing, capabilities, resource limits and worker lifetime.
 - **Embeddable C11 / C++11 SDK**: stable `<capsid/runtime.h>` (ABI v7) with
   non-blocking IPC, streaming, WebSocket v4 and trusted Host Bindings.
 
-> **Prerelease**: [`v0.3.0-beta.5`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5).
+> **Prerelease**: [`v0.3.1-beta.1`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) (also GitHub `Latest`).
 > **Stable**: [`v0.2.2`](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2). Public C ABI v7.
 > The beta is experimental, not a stable-production recommendation. Only Linux
 > strict sandboxing provides the production isolation boundary; native macOS
 > and Windows support is for trusted development and integration.
 >
-> Documentation/data reviewed **2026-11-22** for `dev/v0.3.1` (`quickjs-turbo`
-> `v0.15.1-turbo.8` integration; the published `v0.3.0-beta.5` release retains
-> QuickJS-NG 0.15.1).
+> Documentation/data reviewed **2026-11-22** for published `v0.3.1-beta.1`
+> (`quickjs-turbo` `v0.15.1-turbo.8` integration; earlier `v0.3.0-beta.5`
+> retained QuickJS-NG 0.15.1).
 > [Current status and data scope](docs/current-status.md) separates the published
 > beta, current source interface, measured development snapshot and dated history.
 
@@ -47,23 +47,22 @@ Host owns listeners, routing, capabilities, resource limits and worker lifetime.
 - **Embed in your own C/C++ Host:** [Host integration](docs/host-integration.md).
 - **Find a reference or design record:** [Documentation index](docs/README.md).
 
-Select `v0.3.0-beta.5` explicitly rather than relying on GitHub's default
-`latest` download.
+Install `v0.3.1-beta.1` (pinned explicitly below; also published as GitHub `Latest`):
 
 **Linux or macOS** (installer script):
 
 ```sh
-curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.0-beta.5
+curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1
 ```
 
 **Windows PowerShell** (`x86_64` archive + SHA-256 verification):
 
 ```powershell
-$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5'
-$zip  = '.\capsid-0.3.0-windows-x86_64.zip'
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip" -OutFile $zip
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip.sha256" -OutFile "$zip.sha256"
+$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1'
+$zip  = '.\capsid-0.3.1-windows-x86_64.zip'
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip" -OutFile $zip
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip.sha256" -OutFile "$zip.sha256"
 $exp = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
 if ((Get-FileHash $zip -Algorithm SHA256).Hash -ine $exp) { throw 'SHA-256 mismatch' }
 Expand-Archive -LiteralPath $zip -DestinationPath "$HOME\capsid-beta" -Force
@@ -71,7 +70,7 @@ Expand-Archive -LiteralPath $zip -DestinationPath "$HOME\capsid-beta" -Force
 
 **Direct archives (no `curl | bash` / `wget` / offline)**: download any native
 `.tar.gz` or `.zip` and its `.sha256` sidecar directly from the
-[`v0.3.0-beta.5` Release](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5)
+[`v0.3.1-beta.1` Release](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1)
 for Linux musl (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`) or Windows
 (`x86_64`). See the [installation guide](docs/releases.md) for `wget` / manual
 tarball verification, channel selection and package contents.

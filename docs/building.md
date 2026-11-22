@@ -26,10 +26,10 @@ See [testing](testing-guide.md) and the
 
 ## 1. Prepare a Checkout
 
-For the published `v0.3.0-beta.5` source:
+For the published `v0.3.1-beta.1` source:
 
 ```sh
-git clone --branch v0.3.0-beta.5 --recurse-submodules \
+git clone --branch v0.3.1-beta.1 --recurse-submodules \
   https://github.com/rowanellis-113/capsid.git
 cd capsid
 ```
@@ -187,13 +187,13 @@ each build you want to keep. CPack emits the configured archive
 and SHA-256 sidecar; use the [release guide](releases.md) to understand package
 identity, SBOM scope and supported published architectures. Current Linux package
 names contain both libc and target CPU, for example
-`capsid-0.3.0-linux-musl-x86_64.tar.gz` and
-`capsid-0.3.0-linux-musl-arm64.tar.gz` (local glibc builds use `linux-gnu-<arch>`).
+`capsid-0.3.1-linux-musl-x86_64.tar.gz` and
+`capsid-0.3.1-linux-musl-arm64.tar.gz` (local glibc builds use `linux-gnu-<arch>`).
 CMake canonicalizes `AMD64`/`x86_64` and `aarch64`/`arm64` from the target
 processor, not the build host. The Release workflow uses native runners for both
 Linux CPUs and both macOS CPUs, and retains validation-before-packaging.
-macOS Intel emits `capsid-0.3.0-darwin-x86_64.tar.gz`; Apple Silicon keeps
-`capsid-0.3.0-darwin-arm64.tar.gz`. These are distinct native archives, not
+macOS Intel emits `capsid-0.3.1-darwin-x86_64.tar.gz`; Apple Silicon keeps
+`capsid-0.3.1-darwin-arm64.tar.gz`. These are distinct native archives, not
 universal binaries.
 
 The examples use single-configuration Ninja. With a supported multi-config

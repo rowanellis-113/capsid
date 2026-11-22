@@ -1001,10 +1001,10 @@
             <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-win">Windows</button>
             <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-manual">Tarball</button>
           </div>
-          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5" target="_blank" rel="noopener">v0.3.0-beta.5 assets &rarr;</a>
+          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1 assets &rarr;</a>
         </div>
         <div class="install-bar">
-          <code><span class="prompt" id="install-prompt">$</span><span id="install-cmd">curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.0-beta.5</span></code>
+          <code><span class="prompt" id="install-prompt">$</span><span id="install-cmd">curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1</span></code>
           <button type="button" class="copy-btn" id="copy-install-btn">Copy</button>
         </div>
       </div>
@@ -1393,11 +1393,11 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         <div class="qs-info">
           <div class="qs-badge"><span class="qs-idx">01</span>Install binaries</div>
           <h3>Download &amp; verify the native release</h3>
-          <p>Downloads the prebuilt <span class="mono">v0.3.0-beta.5</span> archive for your OS/CPU, verifies its SHA-256
+          <p>Downloads the prebuilt <span class="mono">v0.3.1-beta.1</span> archive for your OS/CPU, verifies its SHA-256
              sidecar, and unpacks <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>, and
              <span class="mono">capsid-bytecode-compile</span>. Prefer manual/offline download? Grab any <span class="mono">.tar.gz</span> /
              <span class="mono">.zip</span> + <span class="mono">.sha256</span> directly from
-             <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5" target="_blank" rel="noopener">Releases</a>.</p>
+             <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">Releases</a>.</p>
           <div class="qs-meta"><span>SHA-256 verified</span><span>Linux · macOS · Windows</span></div>
         </div>
         <div class="qs-term">
@@ -1406,12 +1406,12 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
             <button type="button" class="step-copy" id="copy-step-1">Copy</button>
           </div>
           <pre class="qs-code" id="step-code-1-unix">curl -fsSL \
-  https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.0-beta.5</pre>
-          <pre class="qs-code is-hidden" id="step-code-1-win">$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5'
-$zip  = '.\capsid-0.3.0-windows-x86_64.zip'
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip" -OutFile $zip
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip.sha256" -OutFile "$zip.sha256"
+  https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1</pre>
+          <pre class="qs-code is-hidden" id="step-code-1-win">$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1'
+$zip  = '.\capsid-0.3.1-windows-x86_64.zip'
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip" -OutFile $zip
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip.sha256" -OutFile "$zip.sha256"
 $exp = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
 $got = (Get-FileHash $zip -Algorithm SHA256).Hash
 if ($got -ine $exp) { throw 'SHA-256 mismatch' }
@@ -1887,15 +1887,15 @@ function initInteractiveChrome() {
   var HERO_INST_CMDS = {
     unix: {
       prompt: "$",
-      cmd: "curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.0-beta.5"
+      cmd: "curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1"
     },
     win: {
       prompt: "PS>",
-      cmd: "$u='https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/capsid-0.3.0-windows-x86_64.zip'; Invoke-WebRequest $u -OutFile capsid.zip; Invoke-WebRequest \"$u.sha256\" -OutFile capsid.zip.sha256; if ((Get-FileHash capsid.zip -Algorithm SHA256).Hash -ine ((Get-Content capsid.zip.sha256 -Raw).Trim() -split '\\s+')[0]) { throw 'SHA-256 mismatch' }; Expand-Archive capsid.zip \"$HOME\\capsid-beta\" -Force"
+      cmd: "$u='https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-windows-x86_64.zip'; Invoke-WebRequest $u -OutFile capsid.zip; Invoke-WebRequest \"$u.sha256\" -OutFile capsid.zip.sha256; if ((Get-FileHash capsid.zip -Algorithm SHA256).Hash -ine ((Get-Content capsid.zip.sha256 -Raw).Trim() -split '\\s+')[0]) { throw 'SHA-256 mismatch' }; Expand-Archive capsid.zip \"$HOME\\capsid-beta\" -Force"
     },
     manual: {
       prompt: "$",
-      cmd: "wget -q https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/capsid-0.3.0-linux-musl-x86_64.tar.gz{,.sha256} && sha256sum -c capsid-0.3.0-linux-musl-x86_64.tar.gz.sha256 && tar -xzf capsid-0.3.0-linux-musl-x86_64.tar.gz"
+      cmd: "wget -q https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-x86_64.tar.gz{,.sha256} && sha256sum -c capsid-0.3.1-linux-musl-x86_64.tar.gz.sha256 && tar -xzf capsid-0.3.1-linux-musl-x86_64.tar.gz"
     }
   };
   function syncHeroInstall() {

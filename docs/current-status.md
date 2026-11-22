@@ -7,15 +7,17 @@ measurement archives. Historical reviews retain their original dates and values.
 
 ## Development Checkout
 
-The published prerelease `v0.3.0-beta.5` (`c7a80b9`) includes the pure-JS
-hot-path changes in `js/bootstrap.js`, `js/fetch.js` and `js/url.js` on top of
-pinned `vendor/txiki.js` (`v26.6.0`, QuickJS-NG 0.15.1, 78 SDK patches).
-
-The current `dev/v0.3.1` checkout is an `engine-integration-successor`
-(`releaseQualificationInherited:false`) that integrates `vendor/quickjs-turbo`
-(`v0.15.1-turbo.8`, commit `8fcb4751a66986bd42b11de3012e967d77790923`) through
-`patches/txiki/0079-quickjs-turbo-integration.patch` (79 SDK patches total)
-while keeping the public C ABI v7 and FetchRPC v3/v4 wire protocol unchanged.
+The published prerelease `v0.3.1-beta.1` (`845ae5d`, also set as GitHub `Latest`)
+integrates `vendor/quickjs-turbo` (`v0.15.1-turbo.8`, commit
+`8fcb4751a66986bd42b11de3012e967d77790923`) on top of pinned `vendor/txiki.js`
+(`v26.6.0`) through `patches/txiki/0079-quickjs-turbo-integration.patch`
+(79 SDK patches total) while keeping the public C ABI v7 and FetchRPC v3/v4 wire
+protocol unchanged. The current `dev/v0.3.1` checkout is a `test-harness-successor`
+(`releaseQualificationInherited:false`) that updates release publication
+metadata, documentation, `perf-site` installation commands and the
+`benchmark_loadgen_correctness` CTest serialization/timeout guard
+(`cmake/build_tests.cmake`, `tests/test_benchmark_loadgen.py`) on top of
+`845ae5d` with identical runtime and vendor inputs.
 Via the upstream `quickjs-turbo::qjs` CMake target (with local LTO isolation),
 non-sanitizer builds auto-enable the zero-JIT native register-frame interpreter
 across all four source-level native backends supported by `quickjs-turbo`:
@@ -31,13 +33,12 @@ backports) on Apple Silicon and sanitizers. Worker startup configures
 eager inline-hint tails) and `property_ic = QJS_TURBO_ON` with
 `property_ic_warmup = 12` (lazy warmup allocation, overridable via environment),
 plus a pre-`READY` `JS_PurgePropertyIC(rt)` pass in `src/worker_runtime.cc` so
-high-density worker packing and native Property IC performance coexist. Tag
-`v0.3.1-beta.1` is reserved for all-platform prerelease validation and
-packaging (`release.yml`); until its artifacts are reviewed and published,
-`v0.3.0-beta.5` remains the published GitHub Prerelease. The
+high-density worker packing and native Property IC performance coexist. The
 derived release qualification record below describes the published
-`v0.3.0-beta.5` release, while the latest accepted local performance record
-measures a clean local WSL2 Release/LTO rebuild of `v0.3.1-beta.1` (`6d4cc61`).
+`v0.3.1-beta.1` (`845ae5d`) release, while the latest accepted local performance
+record measures the clean local WSL2 Release/LTO rebuild of `6d4cc61` (tagged
+prior to the Alpine musl build-script fix in `v0.15.1-turbo.8` and docs/archive
+packaging in `845ae5d`).
 See [source formatting](formatting.md) for exact-byte
 exclusions and [package architecture](releases.md#development-package-matrix)
 for the five-platform archive matrix.
@@ -46,15 +47,15 @@ for the five-platform archive matrix.
 
 | Item | Current recorded value | Boundary |
 | --- | --- | --- |
-| Development branch | `dev/v0.3.1` | Engine-integration successor; does not inherit `v0.3.0-beta.5` binary qualification |
-| Experimental prerelease | [v0.3.0-beta.5](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5) | Current beta (QuickJS-NG 0.15.1); install by tag |
-| GitHub Latest (recorded default) | [v0.3.0-beta.3](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.3) | Earlier release, not the current beta or stable line |
+| Development branch | `dev/v0.3.1` | Post-release docs successor; does not inherit `v0.3.1-beta.1` binary qualification |
+| Experimental prerelease | [v0.3.1-beta.1](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) | Current `0.3.1-beta` (`quickjs-turbo` `v0.15.1-turbo.8`); also GitHub `Latest` |
+| GitHub Latest (recorded default) | [v0.3.1-beta.1](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) | Experimental prerelease default download, not the `0.2.x` stable line |
 | Stable `0.2.x` release | [v0.2.2](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2) | Install by tag |
-| Beta runtime version | `0.3.0` | An archive/runtime string, not a stable-channel claim |
-| Qualified beta source | `c7a80b9bdafe36d415a440be7ed3384f7830d4f8` | Tree `876e29c2792899b654310fea72aac979bd8bb48f`; 5469 frozen git entries |
+| Beta runtime version | `0.3.1` | An archive/runtime string, not a stable-channel claim |
+| Qualified beta source | `845ae5dee5833c1bed1c2630cfb65e6ed76af7d7` | Tree `7894f8a984c7344a904ac0e08c6099e282036b1a`; 5480 frozen git entries |
 | Public interface | C ABI v7; capability policy v2 | Existing layouts remain frozen; new interfaces are additive |
 | Protocol | FetchRPC v3 by default; explicit negotiated v4 | Never mix versions on one connection |
-| Pinned vendor (`dev/v0.3.1`) | txiki.js `v26.6.0` + quickjs-turbo `v0.15.1-turbo.8` (`8fcb4751`), 79 SDK patches | Published `v0.3.0-beta.5` retains txiki.js `v26.6.0` (QuickJS-NG 0.15.1), 78 SDK patches |
+| Pinned vendor (`v0.3.1-beta.1`) | txiki.js `v26.6.0` + quickjs-turbo `v0.15.1-turbo.8` (`8fcb4751`), 79 SDK patches | Earlier `v0.3.0-beta.5` retained txiki.js `v26.6.0` (QuickJS-NG 0.15.1), 78 SDK patches |
 
 The [read-only release capture](data/release-status.json) records its actual UTC
 observation, 11 asset IDs/sizes/digests and stable/beta flags. The
@@ -86,18 +87,20 @@ All of these bind to the beta source above, not to a later docs/data commit:
 
 | Required scope | Actual GitHub Actions run |
 | --- | --- |
-| Full Release/LTO, sanitizer/provider, native platform, fuzz/index qualification | [44778427101, attempt 2](https://github.com/rowanellis-113/capsid/actions/runs/44778427101/attempts/2) |
-| Pinned formatter and protected-input controls | [44778427087](https://github.com/rowanellis-113/capsid/actions/runs/44778427087) |
-| Five-platform tag Release validation and native packaging (all 13 jobs passed, attempt 1) | [44851404278](https://github.com/rowanellis-113/capsid/actions/runs/44851404278) |
+| Full Release/LTO, sanitizer/provider, native platform, fuzz/index qualification (via Release `validation`) | [45008292926](https://github.com/rowanellis-113/capsid/actions/runs/45008292926) |
+| Pinned formatter and protected-input controls | [45008288654](https://github.com/rowanellis-113/capsid/actions/runs/45008288654) |
+| Five-platform tag Release validation and native packaging (all 13 jobs passed, attempt 1) | [45008292926](https://github.com/rowanellis-113/capsid/actions/runs/45008292926) |
 
-All 11 published `v0.3.0-beta.5` assets match the five original archives and
-sidecars from run `44851404278` plus `install.sh` at `c7a80b9`, as recorded
-in [the final publication review](evidence/v0.3.0/2026-11-21-beta5-publication/beta5-publication-final-r1.json).
+All 11 published `v0.3.1-beta.1` assets match the five original archives and
+sidecars from run `45008292926` plus `install.sh` at `845ae5d`, as recorded
+in [the final publication review](evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json).
+Branch [Testing validity](https://github.com/rowanellis-113/capsid/actions/runs/45008288717) attempt 1 is retained.
 
-`v0.3.0-beta.4` remains tagged at `07db439` with no published Release.
-[`v0.3.0-beta.3`'s record](evidence/v0.3.0/2026-11-18-beta3-publication/beta3-publication-final-r1.json) remains separate.
-Other earlier beta tags are preserved: `v0.3.0-beta.2`
-(`87ed4630fa57e360ac0a3a8158218398250c8035`, marked Pre-release, with
+Earlier `0.3.0-beta` records are preserved unchanged:
+[`v0.3.0-beta.5` (`c7a80b9`)](evidence/v0.3.0/2026-11-21-beta5-publication/beta5-publication-final-r1.json),
+`v0.3.0-beta.4` (`07db439`, no published Release),
+[`v0.3.0-beta.3`](evidence/v0.3.0/2026-11-18-beta3-publication/beta3-publication-final-r1.json),
+`v0.3.0-beta.2` (`87ed4630fa57e360ac0a3a8158218398250c8035`, marked Pre-release, with
 [beta2-publication-final-r1.json](evidence/v0.3.0/2026-11-13-ci-resumption/beta2-publication-final-r1.json))
 and the failed `v0.3.0-beta.1` tag (`16f4354d353e6ab044394efe85438f040741c033`,
 whose checkout failed before product builds/tests).
@@ -121,10 +124,10 @@ reported as complete WPT, browser or workerd conformance.
 ## Latest Accepted Local Performance Record
 
 The latest accepted session was measured on **2026-11-22** using a clean local
-Release/LTO rebuild of `v0.3.1-beta.1` (`6d4cc616619dfd1ada0e484c2c47b79046d680dc`,
-`quickjs-turbo` native register-frame VM). It does **not** measure the
-distributed release binaries (`v0.3.0-beta.5` remains the published GitHub
-Prerelease). It uses `capsid-perf-lane-v3` (pure-JS seven-stack matrix across
+Release/LTO rebuild of `6d4cc616619dfd1ada0e484c2c47b79046d680dc` (`quickjs-turbo`
+native register-frame VM, recorded prior to the `v0.15.1-turbo.8` Alpine musl
+build-script fix in published `v0.3.1-beta.1` `845ae5d`). It does **not** measure
+the distributed release binaries directly. It uses `capsid-perf-lane-v3` (pure-JS seven-stack matrix across
 three reference tiers plus `dynamic-api`).
 
 | Metric | Recorded Capsid value |

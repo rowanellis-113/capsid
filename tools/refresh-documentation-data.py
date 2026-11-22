@@ -71,6 +71,7 @@ def derive(root):
         "docs-successor",
         "formatting-successor",
         "packaging-successor",
+        "test-harness-successor",
         "runtime-optimization-successor",
         "engine-integration-successor",
     }
@@ -107,6 +108,15 @@ def derive(root):
             "engine-integration-successor requires explicit buildInputChanges"
         )
         assert checkout.get("changeScope"), "engine integration scope must be described"
+    elif checkout["kind"] == "test-harness-successor":
+        assert not declared_runtime_changes, "test harness changes cannot change runtime inputs"
+        assert not declared_vendor_patch_changes, (
+            "test harness changes cannot change vendor/patch inputs"
+        )
+        assert set(declared_build_changes) == {"cmake/build_tests.cmake"}, (
+            "test harness changes are restricted to cmake/build_tests.cmake"
+        )
+        assert checkout.get("changeScope"), "test harness scope must be described separately"
     else:
         assert not declared_runtime_changes, "packaging cannot change runtime inputs"
         assert not declared_vendor_patch_changes, "packaging cannot change vendor/patch inputs"
@@ -220,7 +230,7 @@ def derive(root):
         "capabilityPolicyVersion": capability["policy_version"],
         "headerSHA256": source_manifest["qualifiedReleaseDigests"]["headerSHA256"],
         "protocolSHA256": source_manifest["qualifiedReleaseDigests"]["protocolSHA256"],
-        "sourceScope": f"qualified 0.3.0-beta interface baseline ({beta['tag']}); "
+        "sourceScope": f"qualified {beta['channel']} interface baseline ({beta['tag']}); "
         + (
             "current checkout has declared engine, build, and runtime changes"
             if actual_vendor_patch_changes

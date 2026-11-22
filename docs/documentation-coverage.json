@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "reviewedDate": "2026-11-22",
-  "sourceBaseline": "af8acc1a7710b6344bdf85d1f6b0b067e0fabe89",
+  "sourceBaseline": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
   "meaning": "Reviewed means current maintained claims or explicit historical disposition reviewed; not every page rewritten, every command executed, or historical result requalified.",
   "counts": {
-    "current-reference": 46,
+    "current-reference": 47,
     "historical-plan-or-journal": 13,
     "immutable-evidence": 37,
-    "release-history": 6
+    "release-history": 8
   },
   "documents": [
     {
@@ -15,7 +15,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "a5f53684e11b6a28854ff4e70e73c84d9bef56a87adec44c242a678edadb70e3",
+      "sha256": "2300de32d8c879f0deb363b8771ff7ed61ce8569a8f365924686375bf911f957",
       "review": "Clean isolated source/build practice, scopes, current docs/data/workflow checks and immutable evidence requirements. Formatting setup and qualified-release versus formatting-checkout boundary reviewed."
     },
     {
@@ -23,7 +23,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "6c58d4cf48c5738b19a90fe2273f2248ca07e8898dc90cc0ad5eb15ba7bf19d1",
+      "sha256": "a7b90bec989c5b5179c588f19177c06213d0ea51d33fe5d5f0ecc38891b918fb",
       "review": "Product, public beta.5 download, unchanged GitHub Latest and explicit stable channel, security defaults, compatibility and source-bound performance evidence."
     },
     {
@@ -31,7 +31,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "13efc71c79cf64d81e963288c4bf78a286c4361002a96215ac54170f7259d0e9",
+      "sha256": "a4c288a2ab3d98f4d36c8d21b787ea86458b3a74e02d7ebdae8b27512ea36b88",
       "review": "Delivered negotiated-v4/WebSocket foundation separated from future waitUntil/Binding-v2/Wrangler work; connection owner is not general background authority."
     },
     {
@@ -39,7 +39,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "85970e9d0c40572c7a716803ba78944045c77fa9c7032b28e5903e65019c4658",
+      "sha256": "a763e952cb7b8c6e837046ad91f2b0467c5fca687fa8585e2d5d1cfa690f96c4",
       "review": "Linux-only strict production boundary, native trusted-dev limits, credential reporting and recognized-but-unenforced App PID field."
     },
     {
@@ -71,7 +71,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "978b04a1f9df1bd31fab9098fea48b8ece26ab48a4dd92c71ba49c99293e7756",
+      "sha256": "30ec8281414b9c5477e745bbe270f299ac15f607954f204d30110f6ab396a84f",
       "review": "Task navigation, current status entry, per-file review and exact historical sources; no journal treated as a current procedure. Formatting setup and qualified-release versus formatting-checkout boundary reviewed."
     },
     {
@@ -111,7 +111,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "ca29c4f2500d165ca40b7e42b438f827ceea04b350f023a2c44395c9df231819",
+      "sha256": "8bcd90e7219316b8010d7ea70c9efdbf3d899abfa0beaaf9e3c76a94ab5d0318",
       "review": "Pinned beta.5 source checkout, native toolchains, development versus clean Release builds, package CPU distinctions and installed SDK targets."
     },
     {
@@ -131,6 +131,14 @@
       "review": "Actual local/managed configuration authority, optional-document denial, schema fields, resource mapping/limits and ineffective pidsMax."
     },
     {
+      "path": "docs/config-v2-design.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "ea05a91dd5b207083baeeb30e7e10bdd6b62c660fd49b5682b81618e3c8be452",
+      "review": "Comprehensive architecture and configuration evolution proposal covering Phase 1 orthogonal Config v2 + managed-isomorphic local CLI and Phase 2 v0.3.2 multi-tenant elastic worker pools with two-phase fair-share memory LRU; marked not yet implemented in v0.3.1-beta."
+    },
+    {
       "path": "docs/conformance.md",
       "kind": "current-reference",
       "reviewed": true,
@@ -143,7 +151,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "849dfa328bff39c9764afaf789ef15f2048c52148092a3cf1b9238ea5e13df0a",
+      "sha256": "8150aaac09fbf3a6ecde6286a6b094109977132f878ca2ae529679fa5fa0b6c8",
       "review": "Exact beta.5 source and five-platform release evidence, distinct GitHub Latest, non-inheritance, five raw WPT failures and source-bound measurements."
     },
     {
@@ -408,7 +416,7 @@
       "reviewed": true,
       "hashMode": "canonical-lf-text",
       "review": "Pinned formatters, exact-byte exclusions and capture archives, beta.5 qualification boundary and clean Release checks.",
-      "sha256": "c8f2cb7a0526b0a3b25f1de9a02c950c403d32c34d600c8d17c471e85a9c7b2a"
+      "sha256": "23b040e2b4129e540bf2f423c6102e11c06323bf5563b46ca08d6af0f9c839af"
     },
     {
       "path": "docs/framework-compatibility/README.md",
@@ -455,7 +463,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "012b1ce658de87ce5be2e0da7587519285b5c476e6a315aefeeb8e3ad5ba8267",
+      "sha256": "e6565e7e42c8b8432e2ef4c55f4a9c8fed9672c13587e27200f3500c9cd5a440",
       "review": "Complete trusted-local CLI/app/policy/READY/request; unchanged commands match prior actual Windows/Linux published-binary smoke, not macOS execution."
     },
     {
@@ -535,7 +543,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "538cadbf5cc151cfadd7bc8294893ef5c41275dee8d370e5b2055c0fd254a51e",
+      "sha256": "419290c1c5f207d28b3987ea45faec2b88a5caa47677cd89a9e2d71a76d964ce",
       "review": "Current Host architecture/ownership/authority, experimental deployment and separate build/test/performance qualification scopes."
     },
     {
@@ -599,7 +607,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "52ba4d72f3a0b0dfa69f879068d654974e02665d8117b7803e06a336961efe82",
+      "sha256": "341a89cac24547af618682d2e68b3fbe8d954349b38dc1191e65fd8d59462a8a",
       "review": "Public beta.5 with unchanged GitHub Latest and stable channel, exact asset inventory, explicit installer tag, checksums and build identity limits."
     },
     {
@@ -828,11 +836,19 @@
     },
     {
       "path": "release-notes/v0.3.0-beta.5.md",
-      "kind": "current-reference",
+      "kind": "release-history",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
       "sha256": "a8c9e425693e77b787ce06fa7cb1f0ecb105fb670a891c04ebec96541aad2265",
       "review": "Current experimental release notes with canonical repository links, explicit tag selection, exact source and package hashes, and separate conformance and performance claims."
+    },
+    {
+      "path": "release-notes/v0.3.1-beta.1.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "7024edb1ae00f3297033b595cbe3c62e5103bd7d0af9e06cb96849f12a7fc537",
+      "review": "Current experimental v0.3.1-beta.1 (Latest) release notes with quickjs-turbo v0.15.1-turbo.8 integration, exact source and five-platform SHA-256 table, and explicit conformance/benchmark boundaries."
     }
   ]
 }

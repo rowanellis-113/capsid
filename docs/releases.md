@@ -5,37 +5,36 @@ the stable channel's support or isolation guarantees.
 
 ## Release Channels
 
-As recorded by the 2026-11-21 release capture:
+As recorded by the 2026-11-22 release capture:
 
 | Channel | Version | Meaning |
 | --- | --- | --- |
-| Experimental prerelease | [v0.3.0-beta.5](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.0-beta.5) | Select this tag explicitly. Public C ABI v7; runtime version `0.3.0`. |
+| Experimental prerelease (`Latest`) | [v0.3.1-beta.1](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) | Current `0.3.1-beta` release (also set as GitHub `Latest`). Public C ABI v7; runtime version `0.3.1`. |
 | Stable | [v0.2.2](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2) | Stable `0.2.x` line; select this tag explicitly. |
 
-GitHub's [Latest](https://github.com/rowanellis-113/capsid/releases/latest) is a separate default download, not a
-selector for either channel above. See [current status](current-status.md#release-and-development-channels)
-for its recorded value. The qualified product commit for `v0.3.0-beta.5` is
-`c7a80b9bdafe36d415a440be7ed3384f7830d4f8`.
-See the [release notes](../release-notes/v0.3.0-beta.5.md),
-[qualification record](v0.3.0-current-qualification.md) and
-[final verification](evidence/v0.3.0/2026-11-21-beta5-publication/beta5-publication-final-r1.json) for the exact gates, verified assets and earlier
+GitHub's [Latest](https://github.com/rowanellis-113/capsid/releases/latest) currently points to `v0.3.1-beta.1`; passing the explicit tag in automation keeps scripts deterministic across future releases. See [current status](current-status.md#release-and-development-channels)
+for its recorded value. The qualified product commit for `v0.3.1-beta.1` is
+`845ae5dee5833c1bed1c2630cfb65e6ed76af7d7`.
+See the [release notes](../release-notes/v0.3.1-beta.1.md),
+[final verification](evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json) and the preserved
+[v0.3.0 qualification record](v0.3.0-current-qualification.md) for the exact gates, verified assets and earlier
 records. A later documentation edit does not qualify a new binary.
 
 ## Published Packages
 
-`0.3.0-beta` (`v0.3.0-beta.5`) carries five native archives, each with its
+`0.3.1-beta` (`v0.3.1-beta.1`) carries five native archives, each with its
 original `.sha256` sidecar, plus `install.sh` (11 verified assets total):
 
 | Platform | Archive | Scope |
 | --- | --- | --- |
-| Linux x86_64 | `capsid-0.3.0-linux-musl-x86_64.tar.gz` | Fully static musl package; Linux isolation still requires the documented kernel/delegation prerequisites |
-| Linux arm64 | `capsid-0.3.0-linux-musl-arm64.tar.gz` | Fully static musl package on native ARM64; Linux isolation still requires the documented kernel/delegation prerequisites |
-| macOS arm64 | `capsid-0.3.0-darwin-arm64.tar.gz` | Native Apple Silicon development/integration, not Linux strict sandboxing |
-| macOS x86_64 | `capsid-0.3.0-darwin-x86_64.tar.gz` | Native Intel development/integration, not Linux strict sandboxing |
-| Windows x86_64 | `capsid-0.3.0-windows-x86_64.zip` | Native MSVC/static-CRT development/integration |
+| Linux x86_64 | `capsid-0.3.1-linux-musl-x86_64.tar.gz` | Fully static musl package; Linux isolation still requires the documented kernel/delegation prerequisites |
+| Linux arm64 | `capsid-0.3.1-linux-musl-arm64.tar.gz` | Fully static musl package on native ARM64; Linux isolation still requires the documented kernel/delegation prerequisites |
+| macOS arm64 | `capsid-0.3.1-darwin-arm64.tar.gz` | Native Apple Silicon development/integration, not Linux strict sandboxing |
+| macOS x86_64 | `capsid-0.3.1-darwin-x86_64.tar.gz` | Native Intel development/integration, not Linux strict sandboxing |
+| Windows x86_64 | `capsid-0.3.1-windows-x86_64.zip` | Native MSVC/static-CRT development/integration |
 
-The archive filename contains runtime version `0.3.0`; the Release tag selects
-`v0.3.0-beta.5`. Do not infer a `0.3.0` stable-production channel from that
+The archive filename contains runtime version `0.3.1`; the Release tag selects
+`v0.3.1-beta.1`. Do not infer a `0.3.1` stable-production channel from that
 filename.
 
 <a id="development-package-matrix"></a>
@@ -88,18 +87,18 @@ SHA-256 sidecar and installs under `$HOME/.local` by default. The examples
 specify both the current repository and a release tag so they do not rely on
 an older installer's repository default or GitHub's `latest` selection.
 
-Current experimental prerelease (`v0.3.0-beta.5`):
+Current experimental prerelease (`v0.3.1-beta.1`):
 
 ```sh
-curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.0-beta.5
+curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1
 ```
 
 Custom prefix:
 
 ```sh
-curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- --prefix "$HOME/opt/capsid-beta" v0.3.0-beta.5
+curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- --prefix "$HOME/opt/capsid-beta" v0.3.1-beta.1
 ```
 
 Explicit stable `v0.2.2`:
@@ -115,9 +114,9 @@ without `curl | bash` (for example with `wget` or a browser):
 
 ```sh
 # Example: Linux musl x86_64 manual download and verification
-wget -q https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5/capsid-0.3.0-linux-musl-x86_64.tar.gz{,.sha256}
-sha256sum -c capsid-0.3.0-linux-musl-x86_64.tar.gz.sha256
-tar -xzf capsid-0.3.0-linux-musl-x86_64.tar.gz
+wget -q https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-x86_64.tar.gz{,.sha256}
+sha256sum -c capsid-0.3.1-linux-musl-x86_64.tar.gz.sha256
+tar -xzf capsid-0.3.1-linux-musl-x86_64.tar.gz
 ```
 
 The checksum sidecar detects archive mismatch; it is not a separate
@@ -133,11 +132,11 @@ Download the ZIP and its `.sha256` sidecar from the chosen Release, verify the
 SHA-256 digest in PowerShell and extract into a new destination:
 
 ```powershell
-$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.0-beta.5'
-$archive = '.\capsid-0.3.0-windows-x86_64.zip'
+$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1'
+$archive = '.\capsid-0.3.1-windows-x86_64.zip'
 $sidecar = "$archive.sha256"
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip" -OutFile $archive
-Invoke-WebRequest "$base/capsid-0.3.0-windows-x86_64.zip.sha256" -OutFile $sidecar
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip" -OutFile $archive
+Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip.sha256" -OutFile $sidecar
 $expected = ((Get-Content -LiteralPath $sidecar -Encoding UTF8 -Raw).Trim() -split '\s+')[0]
 $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
 if ($actual -ine $expected) { throw 'SHA-256 mismatch' }
@@ -165,7 +164,7 @@ build provenance; see [Host integration](host-integration.md).
 
 ## What Release Acceptance Means
 
-The `0.3.0-beta` release passed its declared source-specific CI and
+The `0.3.1-beta` release passed its declared source-specific CI and
 five-platform package review. Its published 11 assets—the five archives,
 five checksum sidecars and installer—were verified against their remote digests.
 
