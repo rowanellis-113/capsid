@@ -5,10 +5,10 @@
     "commit": "1a230d31183f062fae7a6c4fd2cff466cecc1787"
   },
   "quickjs": {
-    "commit": "ebcd33096549b73708297dbf17d12caec84de4bf"
+    "commit": "2c1c49b294b3cb75353b2b5d0db301860513d1a7"
   },
   "overlay": {
-    "key": "c3dd0037bde836415542ad07d25b56421ed8e9a221f19298b56eebc5d63eef1f",
+    "key": "e2f2611cbca6603a22fd9f901334c0f6ee4bd4cd1e6e5055a4c314e5bec053be",
     "manifest": "946207f4c351971e6b4981122e2e87514a8c4db54ffea400b1dc355763962d9d"
   },
   "conformance_deviations": {

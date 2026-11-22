@@ -23,7 +23,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "c88ef0b429ad003fcaa1f3d950c93b5dba6a3c76cf2cd37ad1999c2cc01789df",
+      "sha256": "7460f6d09d9260a6a7d03413247d1a161f84d24d51a2fc504e9efe6cb5c95ff1",
       "review": "Product, public beta.5 download, unchanged GitHub Latest and explicit stable channel, security defaults, compatibility and source-bound performance evidence."
     },
     {
@@ -31,7 +31,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "25b874f67220a030fb3f45cae3bfb4f100a9d2ad1feca89b706ca71cd4fccfd8",
+      "sha256": "13efc71c79cf64d81e963288c4bf78a286c4361002a96215ac54170f7259d0e9",
       "review": "Delivered negotiated-v4/WebSocket foundation separated from future waitUntil/Binding-v2/Wrangler work; connection owner is not general background authority."
     },
     {
@@ -143,7 +143,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "b8af62d33fae5abee10c434954fc289004bd85dd1495523feca3b1245cfa9854",
+      "sha256": "6dc27ef8276095b46aefa171aa4c2a291460b47c8f5a92179741fab0d5d05fcc",
       "review": "Exact beta.5 source and five-platform release evidence, distinct GitHub Latest, non-inheritance, five raw WPT failures and source-bound measurements."
     },
     {
@@ -583,7 +583,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "a70fd2b316689224431dbc38e5ead08958a27f923b72fa28dcc5007da6c089ca",
+      "sha256": "50ee42c226d82e76a6591d36032cffafb4e80599a3bcb84e9481929fb064f147",
       "review": "Accepted 82eaab9 source/CPU/protocol evidence, unchanged historical records and no claim of beta.5 performance or formal paired improvement."
     },
     {
@@ -591,7 +591,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "f29d259cc91d8517fd565ff3953320e3b6af00e9687c556a8ed526ff108f0017",
+      "sha256": "73e49cf76ac1bdc9b25dcd8a70d94915e26adcd7b121cba9767aee02b13d0ff9",
       "review": "Native versus Linux production isolation, supported assets, local modes, trusted Binding owners and platform-specific resource semantics. Development packaging CPU split and non-inheritance of existing release qualification reviewed. Native Intel/Apple-Silicon package split and exact macOS CPU selection reviewed; existing Releases unchanged."
     },
     {
@@ -727,7 +727,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "7fbbe74ab231bad2ec317bf5f79fa10129f19fa8136e77a7f7fbb6ed7225946b",
+      "sha256": "25c271d46438ce347243c80e7af11a301fc056443e07e0d0d81351d48093fa63",
       "review": "MSVC/static CRT/vcpkg/source prerequisites, native exits, genuine skips and SID/ACL/reparse/hard-link ownership boundary."
     },
     {

@@ -18,7 +18,7 @@ Being able to build does not mean being able to isolate in production. Native bu
 Unified commitments:
 
 - Runtime C ABI (spawn/request/credit/streaming) ✅
-- `capsid-worker` (txiki.js + restricted core) ✅
+- `capsid-worker` (txiki.js + `quickjs-turbo` + restricted core) ✅
 - `capsid-bytecode-compile` (trusted bytecode) ✅
 - Host `--mode single-worker` ✅
 - Host `--mode static-pool` (single / multi shard) ✅

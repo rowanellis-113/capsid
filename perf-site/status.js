@@ -49,7 +49,7 @@ window.CAPSID_SITE_STATUS = {
         "qualifiedGitObject": "835fe8a6629217083865717108594237fc25d2ca"
       }
     },
-    "changeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.6 integration via quickjs-turbo::qjs (local LTO isolation, Linux x86-64/ARM64 + macOS x86-64 + Windows x86-64 WIN_X86_64 native ASM VMs), explicit C API defaults (QJS_SetTurboDefaults with own_bytecode_tail=OFF PIC-only + property_ic_warmup=12, pre-READY JS_PurgePropertyIC, QJS_GetTurboInfo integration test), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
+    "changeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.7 integration via quickjs-turbo::qjs (local LTO isolation, Linux x86-64/ARM64 + macOS x86-64 + Windows x86-64 WIN_X86_64 native ASM VMs with UTF-8 Win64 codegen), explicit C API defaults (QJS_SetTurboDefaults with own_bytecode_tail=OFF PIC-only + property_ic_warmup=12, pre-READY JS_PurgePropertyIC, QJS_GetTurboInfo integration test), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
     "formatters": {
       "clang-format": "23.1.5",
       "prettier": "3.8.3",
@@ -76,7 +76,7 @@ window.CAPSID_SITE_STATUS = {
         "qualifiedGitObject": null
       },
       "vendor/quickjs-turbo": {
-        "currentGitObject": "ebcd33096549b73708297dbf17d12caec84de4bf",
+        "currentGitObject": "2c1c49b294b3cb75353b2b5d0db301860513d1a7",
         "qualifiedGitObject": null
       }
     }
@@ -337,7 +337,7 @@ window.CAPSID_SITE_STATUS = {
     "negotiatedWireVersion": 4,
     "protocolSHA256": "2c7a5fb6eb02fafcf30df741a1be6d742c17d9a3d2a1a58c563bc35f1c438bcf",
     "publicAbi": 7,
-    "quickjsCommit": "ebcd33096549b73708297dbf17d12caec84de4bf",
+    "quickjsCommit": "2c1c49b294b3cb75353b2b5d0db301860513d1a7",
     "sdkPatchCount": 79,
     "sourceCommit": "c7a80b9bdafe36d415a440be7ed3384f7830d4f8",
     "sourceManifest": "docs/data/runtime-source-manifest.json",
@@ -364,7 +364,7 @@ window.CAPSID_SITE_STATUS = {
     "version": "0.3.1"
   },
   "schema": 1,
-  "sourceChangeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.6 integration via quickjs-turbo::qjs (local LTO isolation, Linux x86-64/ARM64 + macOS x86-64 + Windows x86-64 WIN_X86_64 native ASM VMs), explicit C API defaults (QJS_SetTurboDefaults with own_bytecode_tail=OFF PIC-only + property_ic_warmup=12, pre-READY JS_PurgePropertyIC, QJS_GetTurboInfo integration test), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
+  "sourceChangeScope": "dev/v0.3.1 quickjs-turbo v0.15.1-turbo.7 integration via quickjs-turbo::qjs (local LTO isolation, Linux x86-64/ARM64 + macOS x86-64 + Windows x86-64 WIN_X86_64 native ASM VMs with UTF-8 Win64 codegen), explicit C API defaults (QJS_SetTurboDefaults with own_bytecode_tail=OFF PIC-only + property_ic_warmup=12, pre-READY JS_PurgePropertyIC, QJS_GetTurboInfo integration test), build/overlay/SBOM wiring, workerd_reader_scope_contract_controls timeout increase, and workflow branch transition; tagged v0.3.0-beta.5 binaries and measurements remain unchanged",
   "stable": {
     "githubLatest": false,
     "prerelease": false,

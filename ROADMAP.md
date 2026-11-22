@@ -1,8 +1,9 @@
 # Capsid Roadmap: Progressive workerd Compatibility
 
-> Updated 2026-11-18 against the published 0.3.0-beta source. Stable is v0.2.2;
-> this roadmap separates delivered beta scope from future milestones and does
-> not claim complete workerd/Cloudflare parity. See [current status](docs/current-status.md).
+> Updated 2026-11-22 against `dev/v0.3.1` (`quickjs-turbo` integration) and the
+> published `0.3.0-beta` source. Stable is `v0.2.2`; this roadmap separates
+> delivered beta scope from future milestones and does not claim complete
+> workerd/Cloudflare parity. See [current status](docs/current-status.md).
 
 ## Purpose
 
@@ -11,7 +12,8 @@ Worker Runtime semantics, Web Standards, Web Platform APIs, and the main local
 development workflows associated with Wrangler. The goal is useful, measured
 compatibility rather than complete workerd or Cloudflare platform parity.
 
-Capsid will retain QuickJS-ng, its process-isolation model, and its
+Capsid will retain the QuickJS engine family (`quickjs-turbo`, QuickJS-NG
+0.15.1-derived), its process-isolation model, and its
 deny-by-default capability boundary. The roadmap prioritizes:
 
 1. stable Host/Worker and cross-runtime protocol foundations;
@@ -30,7 +32,7 @@ The stable channel is `0.2.2`. Experimental `0.3.0-beta` adds the delivered
 FetchRPC v4/WebSocket foundation while retaining ABI v7 and the legacy v3 entry.
 The shared HTTP runtime contains:
 
-- a pinned txiki.js, QuickJS-ng, and WAMR stack;
+- a pinned txiki.js, `quickjs-turbo` (QuickJS-NG 0.15.1-derived), and WAMR stack;
 - self-contained ESM bundles with `default.fetch(request)` or a named `fetch`;
 - Fetch, Headers, Request, Response, Streams, URL, Encoding, Crypto,
   Compression, MessageChannel, and a WebAssembly subset;
@@ -104,8 +106,9 @@ wire format or one trust boundary.
 
 ### Engine strategy
 
-- QuickJS-ng remains the JavaScript engine; V8 migration and a dual-engine
-  architecture are out of scope.
+- `quickjs-turbo` (QuickJS-NG 0.15.1-derived, zero-JIT native register-frame VM
+  with portable C fallback) remains the JavaScript engine; V8 migration and a
+  dual-engine architecture are out of scope.
 - Engine compatibility means a tested ECMAScript syntax and behavior subset,
   measured with selected Test262 cases, WPT, and workerd differential tests.
 - V8-specific behavior, JIT characteristics, GC details, and differences that

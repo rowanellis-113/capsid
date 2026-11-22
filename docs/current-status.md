@@ -13,7 +13,7 @@ pinned `vendor/txiki.js` (`v26.6.0`, QuickJS-NG 0.15.1, 78 SDK patches).
 
 The current `dev/v0.3.1` checkout is an `engine-integration-successor`
 (`releaseQualificationInherited:false`) that integrates `vendor/quickjs-turbo`
-(`v0.15.1-turbo.6`, commit `ebcd33096549b73708297dbf17d12caec84de4bf`) through
+(`v0.15.1-turbo.7`, commit `2c1c49b294b3cb75353b2b5d0db301860513d1a7`) through
 `patches/txiki/0079-quickjs-turbo-integration.patch` (79 SDK patches total)
 while keeping the public C ABI v7 and FetchRPC v3/v4 wire protocol unchanged.
 Via the upstream `quickjs-turbo::qjs` CMake target (with local LTO isolation),
@@ -31,10 +31,15 @@ backports) on Apple Silicon and sanitizers. Worker startup configures
 eager inline-hint tails) and `property_ic = QJS_TURBO_ON` with
 `property_ic_warmup = 12` (lazy warmup allocation, overridable via environment),
 plus a pre-`READY` `JS_PurgePropertyIC(rt)` pass in `src/worker_runtime.cc` so
-high-density worker packing and native Property IC performance coexist. The
+high-density worker packing and native Property IC performance coexist. Tag
+`v0.3.1-beta.1` is reserved for all-platform prerelease validation and
+packaging (`release.yml`); until its artifacts are reviewed and published,
+`v0.3.0-beta.5` remains the published GitHub Prerelease. The
 derived release qualification and sealed benchmark records below
 describe the tagged `v0.3.0-beta.5` release, not new qualification for
-`dev/v0.3.1` commits. See [source formatting](formatting.md) for exact-byte
+`dev/v0.3.1` commits (single-stack `turbo.6` local QPS/PSS/density observations
+are documented separately in [performance methodology](performance-benchmarks.md)).
+See [source formatting](formatting.md) for exact-byte
 exclusions and [package architecture](releases.md#development-package-matrix)
 for the five-platform archive matrix.
 
@@ -50,7 +55,7 @@ for the five-platform archive matrix.
 | Qualified beta source | `c7a80b9bdafe36d415a440be7ed3384f7830d4f8` | Tree `876e29c2792899b654310fea72aac979bd8bb48f`; 5469 frozen git entries |
 | Public interface | C ABI v7; capability policy v2 | Existing layouts remain frozen; new interfaces are additive |
 | Protocol | FetchRPC v3 by default; explicit negotiated v4 | Never mix versions on one connection |
-| Pinned vendor (`dev/v0.3.1`) | txiki.js `v26.6.0` + quickjs-turbo `v0.15.1-turbo.6` (`ebcd3309`), 79 SDK patches | Published `v0.3.0-beta.5` retains txiki.js `v26.6.0` (QuickJS-NG 0.15.1), 78 SDK patches |
+| Pinned vendor (`dev/v0.3.1`) | txiki.js `v26.6.0` + quickjs-turbo `v0.15.1-turbo.7` (`2c1c49b2`), 79 SDK patches | Published `v0.3.0-beta.5` retains txiki.js `v26.6.0` (QuickJS-NG 0.15.1), 78 SDK patches |
 
 The [read-only release capture](data/release-status.json) records its actual UTC
 observation, 11 asset IDs/sizes/digests and stable/beta flags. The

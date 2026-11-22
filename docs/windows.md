@@ -173,7 +173,7 @@ Configuration notes:
 | Capability | Linux | macOS | Windows |
 | --- | --- | --- | --- |
 | Runtime C ABI (spawn/request/credit/streaming) | ✅ | ✅ | ✅ |
-| `capsid-worker` (txiki.js + restricted core) | ✅ | ✅ | ✅ |
+| `capsid-worker` (txiki.js + `quickjs-turbo` `WIN_X86_64` + restricted core) | ✅ | ✅ | ✅ |
 | `capsid-bytecode-compile` (M1D trusted bytecode) | ✅ | ✅ | ✅ |
 | Host `--mode single-worker` / `static-pool` | ✅ | ✅ | ✅ (multi-shard via pool-level acceptor) |
 | Host `--mode managed` (coordinator/Admin/multiple Apps) | ✅ | ❌ (runtime notice) | ❌ (runtime notice) |

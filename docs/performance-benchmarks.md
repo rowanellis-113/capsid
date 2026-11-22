@@ -88,6 +88,28 @@ These sampled windows do not prove long-duration memory retention or universal
 maximum density. Heap diagnostics, service-tree PSS, individual worker cost and
 pool counts are different metrics and must not be substituted for each other.
 
+## Development Observation (`dev/v0.3.1` / `quickjs-turbo v0.15.1-turbo.6`)
+
+Observed 2026-11-22 on the same WSL2 host (local Release/LTO build,
+`LINUX_X86_64` native register-frame backend, `QJS_SetTurboDefaults` PIC-only
+`own_bytecode_tail=OFF` + `property_ic_warmup=12` + pre-`READY`
+`JS_PurgePropertyIC`). This is a single-stack Capsid **observation**
+(`profile: observation`, `publicationEligible: false`) and does **not** replace
+the sealed seven-stack `v0.3.0-beta.5` archive above.
+
+| Dimension | `v0.3.0-beta.5` (QuickJS-NG) | `dev/v0.3.1` (`turbo.6` obs.) | Delta |
+| --- | ---: | ---: | ---: |
+| `dynamic-api` QPS (64 conn) | 9,808.1 | **14,101.9** (`p50 4.42 / p95 5.96 ms`) | **+43.8%** |
+| `matrix-json-1k` QPS (64 conn) | 21,746.6 | **23,682.7** (`p50 2.65 / p95 4.16 ms`) | **+8.9%** |
+| `matrix-json-16k` QPS (64 conn) | 14,194.6 | **14,549.3** (`p50 4.26 / p95 7.00 ms`) | **+2.5%** |
+| `stream` QPS (64 conn) | 10,649.7 | **11,075.2** (`p50 5.48 / p95 7.77 ms`) | **+4.0%** |
+| Trickle PSS (10 req/s) | 15.0 MiB (`8.3 / 6.7`) | **15.5 MiB** (`8.0 / 7.5`) | +0.5 MiB |
+| Loaded PSS (64 conn) | 18.5 MiB (`9.5 / 9.0`) | **19.9 MiB** (`10.1 / 9.8`) | +1.4 MiB |
+| 1K QPS / MiB | 1,175.5 | **1,190.1** | **+1.2%** |
+| 2 GiB Density `10k` (cold / warm) | 735 / 729 | **721 / 715** (99.2% warm) | -1.9% |
+| 2 GiB Density `100k` (cold / warm) | 503 / 503 | **497 / 496** (99.8% warm) | -1.2% / -1.4% |
+| 2 GiB Density `1m` (cold / warm) | 128 / 128 | **127 / 127** (100.0% warm) | -0.8% |
+
 ## Evidence and Replay
 
 The [session review](data/performance-review-v030-beta5.json) binds the three successful

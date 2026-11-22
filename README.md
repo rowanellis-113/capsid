@@ -11,6 +11,11 @@ Capsid runs self-contained ESM applications exporting a Web-standard
 in separate `quickjs-turbo` (QuickJS-NG 0.15.1-derived) worker processes; the
 Host owns listeners, routing, capabilities, resource limits and worker lifetime.
 
+- **Zero-JIT native VM (`dev/v0.3.1`)**: powered by `quickjs-turbo`
+  (`v0.15.1-turbo.7`) with native register-frame interpreters on Linux x86-64/ARM64,
+  macOS Intel and Windows x86-64 (portable C fallback on Apple Silicon/sanitizers)
+  and explicit density-preserving Property IC defaults (`QJS_SetTurboDefaults` +
+  pre-`READY` `JS_PurgePropertyIC`).
 - **Hard Linux OS isolation**: per-worker Linux Namespaces, Landlock and Seccomp
   with default-deny egress (`egress_policy == NULL`) and zero JIT RWX pages.
 - **Micro-container density**: **729** warmed 10 KiB strict-sandbox workers in
@@ -27,7 +32,7 @@ Host owns listeners, routing, capabilities, resource limits and worker lifetime.
 > and Windows support is for trusted development and integration.
 >
 > Documentation/data reviewed **2026-11-22** for `dev/v0.3.1` (`quickjs-turbo`
-> `v0.15.1-turbo.6` integration; the published `v0.3.0-beta.5` release retains
+> `v0.15.1-turbo.7` integration; the published `v0.3.0-beta.5` release retains
 > QuickJS-NG 0.15.1).
 > [Current status and data scope](docs/current-status.md) separates the published
 > beta, current source interface, measured development snapshot and dated history.
@@ -197,6 +202,14 @@ distributed packages**.
 | **Cold start (1 MiB bytecode)** | **18.64 ms** (`16.0 MiB` PSS) | **6.9 ms** at 10 KiB bytecode |
 | **Serving memory (PSS)** | **15.0 MiB** (10 req/s) · **18.5 MiB** (64-conn) | Complete host + strict worker tree |
 | **Sustained throughput** | **21,746.6 / 14,194.6 / 10,649.7 / 9,808.1** QPS | JSON 1 KiB / 16 KiB / stream / dynamic API (**1,175 QPS/MiB** on 1 KiB) |
+
+> **`dev/v0.3.1` (`quickjs-turbo v0.15.1-turbo.6`) local observation** (single-stack
+> WSL2 Release/LTO observation, 2026-11-22 — not yet a full seven-stack sealed
+> publication archive): **23,682.7 / 14,549.3 / 11,075.2 / 14,101.9** QPS
+> (**+43.8%** on `dynamic-api`, **+8.9%** on JSON 1 KiB, **1,190 QPS/MiB**),
+> **15.5 MiB** low-QPS / **19.9 MiB** loaded PSS, and **721/715** (`10 KiB`),
+> **497/496** (`100 KiB`), **127/127** (`1 MiB`) cold/warm workers in 2 GiB
+> (**99.2%–100%** warm retention). See [performance methodology](docs/performance-benchmarks.md).
 
 Interactive charts, three-tier peer comparisons and SHA-256 replayable archives
 are published at the [Capsid Site & Benchmark Hub](https://rowanellis-113.github.io/capsid/);
