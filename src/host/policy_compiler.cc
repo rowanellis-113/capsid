@@ -2,7 +2,9 @@
 
 #include "host/policy_compiler.h"
 
-#include <openssl/evp.h>
+#include "host/json_codec.h"
+#include "json_escape.h"
+#include "net_target.h"
 
 #include <algorithm>
 #include <cctype>
@@ -34,23 +36,6 @@ std::vector<FetchTarget> canonical_fetch_targets(const std::vector<FetchTarget>&
         result.push_back(std::move(item.second));
     }
     return result;
-}
-
-std::string sha256_hex(const std::string& data) {
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_size = 0;
-    if (EVP_Digest(data.data(), data.size(), digest, &digest_size, EVP_sha256(), nullptr) != 1 ||
-        digest_size != 32) {
-        return "";
-    }
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(64);
-    for (unsigned int i = 0; i < digest_size; ++i) {
-        out.push_back(kHex[digest[i] >> 4]);
-        out.push_back(kHex[digest[i] & 0x0f]);
-    }
-    return out;
 }
 
 // Stable non-zero rule id: FNV-1a 32-bit of the normalized rule label, with
@@ -156,37 +141,7 @@ bool valid_env_pattern(const std::string& pattern) {
     return star == pattern.size() - 1 && pattern.find('*', star + 1) == std::string::npos;
 }
 
-std::string json_escape(const std::string& value) {
-    std::ostringstream out;
-    for (const char c : value) {
-        switch (c) {
-        case '"':
-            out << "\\\"";
-            break;
-        case '\\':
-            out << "\\\\";
-            break;
-        case '\n':
-            out << "\\n";
-            break;
-        case '\r':
-            out << "\\r";
-            break;
-        case '\t':
-            out << "\\t";
-            break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buffer[8];
-                std::snprintf(buffer, sizeof(buffer), "\\u%04x", c);
-                out << buffer;
-            } else {
-                out << c;
-            }
-        }
-    }
-    return out.str();
-}
+using capsid::json_escape;
 
 } // namespace
 
@@ -367,7 +322,7 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     for (const FetchTarget& target : requested_fetch) {
         bool covered = false;
         for (const FetchTarget& allowed : allowed_fetch) {
-            if (allowed.host != target.host) {
+            if (!capsid::net_host_contained(target.host, allowed.host)) {
                 continue;
             }
             if (allowed.ports.empty()) {
@@ -449,20 +404,34 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     }
 
     // worker/request/resource: app must not exceed host maximums; a Host
-    // maximum of 0 means unlimited. The memory permit is the largest stated
-    // ceiling, so a sub-resource (jsHeap/processAddressSpace) can never
-    // sneak past the Host per-worker budget while memoryMax stays small.
-    if (host.max_requests_per_worker != 0 &&
-        app.requests_per_worker > host.max_requests_per_worker) {
-        result.error = "request rate exceeds the Host maximum";
+    // maximum of 0 means unlimited. Omitted App values (0) inherit Host
+    // defaults when configured.
+    const auto resolve_u64_tier = [&](std::uint64_t app_value, std::uint64_t host_default,
+                                      std::uint64_t host_max, const char* default_error,
+                                      const char* max_error, std::uint64_t* out_value) -> bool {
+        if (host_max != 0 && host_default > host_max) {
+            result.error = default_error;
+            return false;
+        }
+        const std::uint64_t effective = app_value != 0 ? app_value : host_default;
+        if (host_max != 0 && effective > host_max) {
+            result.error = max_error;
+            return false;
+        }
+        *out_value = effective;
+        return true;
+    };
+    if (!resolve_u64_tier(
+            app.requests_per_worker, host.default_requests_per_worker, host.max_requests_per_worker,
+            "default request rate exceeds the Host maximum",
+            "request rate exceeds the Host maximum", &result.effective.requests_per_worker)) {
         return result;
     }
-    if (app.requests_per_worker >
+    if (result.effective.requests_per_worker >
         static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
         result.error = "request rate exceeds the worker limit";
         return result;
     }
-    result.effective.requests_per_worker = app.requests_per_worker;
     if (host.max_request_timeout_ms != 0 &&
         host.default_request_timeout_ms > host.max_request_timeout_ms) {
         result.error = "default request timeout exceeds the Host maximum";
@@ -484,56 +453,68 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
         return result;
     }
     result.effective.request_timeout_ms = request_timeout;
-    // E-1 admission-queue maximums (§10.3): the same intersection shape as
-    // requests_per_worker — the App queue must not exceed the Host caps,
-    // and a Host maximum of 0 means no cap (queueing stays App-decided).
-    if (host.max_queue_requests != 0 && app.queue_requests > host.max_queue_requests) {
-        result.error = "queue depth exceeds the Host maximum";
+    // E-1 admission-queue maximums (§10.3): the App queue inherits Host
+    // defaults when omitted (0) and must not exceed Host maximums.
+    if (!resolve_u64_tier(app.queue_requests, host.default_queue_requests, host.max_queue_requests,
+                          "default queue depth exceeds the Host maximum",
+                          "queue depth exceeds the Host maximum",
+                          &result.effective.queue_requests) ||
+        !resolve_u64_tier(
+            app.queue_header_bytes, host.default_queue_header_bytes, host.max_queue_header_bytes,
+            "default queue header bytes exceed the Host maximum",
+            "queue header bytes exceed the Host maximum", &result.effective.queue_header_bytes) ||
+        !resolve_u64_tier(
+            app.queue_timeout_ms, host.default_queue_timeout_ms, host.max_queue_timeout_ms,
+            "default queue timeout exceeds the Host maximum",
+            "queue timeout exceeds the Host maximum", &result.effective.queue_timeout_ms)) {
         return result;
     }
-    if (host.max_queue_header_bytes != 0 && app.queue_header_bytes > host.max_queue_header_bytes) {
-        result.error = "queue header bytes exceed the Host maximum";
+    // E-2 SSE-permit maximums (§9.3) & E-3 slow-client write deadline (§9.2).
+    if (!resolve_u64_tier(app.max_streaming_inflight_per_worker,
+                          host.default_max_streaming_inflight_per_worker,
+                          host.max_streaming_inflight_per_worker,
+                          "default streaming permit exceeds the Host maximum",
+                          "streaming permit exceeds the Host maximum",
+                          &result.effective.max_streaming_inflight_per_worker) ||
+        !resolve_u64_tier(app.stream_idle_timeout_ms, host.default_stream_idle_timeout_ms,
+                          host.max_stream_idle_timeout_ms,
+                          "default stream idle timeout exceeds the Host maximum",
+                          "stream idle timeout exceeds the Host maximum",
+                          &result.effective.stream_idle_timeout_ms) ||
+        !resolve_u64_tier(
+            app.write_timeout_ms, host.default_write_timeout_ms, host.max_write_timeout_ms,
+            "default write timeout exceeds the Host maximum",
+            "write timeout exceeds the Host maximum", &result.effective.write_timeout_ms)) {
         return result;
     }
-    if (host.max_queue_timeout_ms != 0 && app.queue_timeout_ms > host.max_queue_timeout_ms) {
-        result.error = "queue timeout exceeds the Host maximum";
+    if (!resolve_u64_tier(app.js_heap_bytes, host.default_js_heap_bytes, host.max_js_heap_bytes,
+                          "default worker jsHeap exceeds the Host maximum",
+                          "worker jsHeap exceeds the Host maximum",
+                          &result.effective.js_heap_bytes) ||
+        !resolve_u64_tier(app.file_descriptors, host.default_file_descriptors,
+                          host.max_file_descriptors,
+                          "default worker fileDescriptors exceeds the Host maximum",
+                          "worker fileDescriptors exceeds the Host maximum",
+                          &result.effective.file_descriptors)) {
         return result;
     }
-    result.effective.queue_requests = app.queue_requests;
-    result.effective.queue_header_bytes = app.queue_header_bytes;
-    result.effective.queue_timeout_ms = app.queue_timeout_ms;
-    // E-2 SSE-permit maximums (§9.3): the same cap-only intersection as the
-    // queue maximums — a Host maximum of 0 imposes no ceiling; the 1/1
-    // boundary rule is enforced at the shard, not here.
-    if (host.max_streaming_inflight_per_worker != 0 &&
-        app.max_streaming_inflight_per_worker > host.max_streaming_inflight_per_worker) {
-        result.error = "streaming permit exceeds the Host maximum";
+    if (host.max_worker_memory_bytes != 0 &&
+        host.default_worker_memory_bytes > host.max_worker_memory_bytes) {
+        result.error = "default worker memory exceeds the Host maximum";
         return result;
     }
-    if (host.max_stream_idle_timeout_ms != 0 &&
-        app.stream_idle_timeout_ms > host.max_stream_idle_timeout_ms) {
-        result.error = "stream idle timeout exceeds the Host maximum";
-        return result;
-    }
-    // E-3 slow-client write deadline (§9.2): cap-only, like the maximums
-    // above; 0 imposes no ceiling.
-    if (host.max_write_timeout_ms != 0 && app.write_timeout_ms > host.max_write_timeout_ms) {
-        result.error = "write timeout exceeds the Host maximum";
-        return result;
-    }
-    result.effective.max_streaming_inflight_per_worker = app.max_streaming_inflight_per_worker;
-    result.effective.stream_idle_timeout_ms = app.stream_idle_timeout_ms;
-    result.effective.write_timeout_ms = app.write_timeout_ms;
-    result.effective.js_heap_bytes = app.js_heap_bytes;
+    const std::uint64_t base_memory =
+        app.memory_bytes != 0 ? app.memory_bytes : host.default_worker_memory_bytes;
     result.effective.process_address_bytes = app.process_address_bytes;
-    result.effective.file_descriptors = app.file_descriptors;
     result.effective.memory_bytes =
-        std::max(app.memory_bytes, std::max(app.js_heap_bytes, app.process_address_bytes));
+        std::max(base_memory,
+                 std::max(result.effective.js_heap_bytes, result.effective.process_address_bytes));
     if (host.max_worker_memory_bytes != 0 &&
         result.effective.memory_bytes > host.max_worker_memory_bytes) {
         result.error = "worker memory exceeds the Host maximum";
         return result;
     }
+    result.effective.health_check = app.health_check;
     // The process-memory ceiling — the most restrictive stated ceiling
     // among processAddressSpace/memoryMax — must never sit below the JS
     // heap: the Runtime's HELLO validation rejects
@@ -781,7 +762,12 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
          << ",\"fileDescriptors\":" << result.effective.file_descriptors
          << ",\"workers\":" << result.effective.workers
          << ",\"minReady\":" << result.effective.min_ready
-         << ",\"strictSandbox\":" << (result.effective.strict_sandbox ? "true" : "false") << "}";
+         << ",\"strictSandbox\":" << (result.effective.strict_sandbox ? "true" : "false");
+    if (result.effective.health_check.configured) {
+        json << ",\"healthCheck\":{\"path\":\"" << json_escape(result.effective.health_check.path)
+             << "\",\"timeoutMs\":" << result.effective.health_check.timeout_ms << '}';
+    }
+    json << "}";
     result.effective.effective_json = json.str();
 
     // App digest: the normalized request the operator approved.
@@ -825,8 +811,11 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
                << ";idle:" << app.stream_idle_timeout_ms << ";wtimeout:" << app.write_timeout_ms
                << ";mem:" << app.memory_bytes << ";heap:" << app.js_heap_bytes
                << ";addr:" << app.process_address_bytes << ";fds:" << app.file_descriptors;
-    result.effective.app_config_digest = sha256_hex(app_stream.str());
-    result.effective.effective_digest = sha256_hex(result.effective.effective_json);
+    if (app.health_check.configured) {
+        app_stream << ";hc:" << app.health_check.path << ':' << app.health_check.timeout_ms;
+    }
+    result.effective.app_config_digest = sha256_raw_hex(app_stream.str());
+    result.effective.effective_digest = sha256_raw_hex(result.effective.effective_json);
 
     result.ok = true;
     return result;

@@ -2,6 +2,8 @@
 
 #include "host/artifact_safe_read.h"
 
+#include <jansson.h>
+
 #include <cerrno>
 #include <cstring>
 
@@ -412,9 +414,32 @@ SafeReadResult safe_read_version_artifacts(int root_fd, std::string_view app,
         return true;
     };
 
-    // Required files with per-file limits.
-    if (!collect("capsid.json", &capsid_json, kMaxConfigFileBytes) ||
-        !collect("bundle.mjs", &bundle, kMaxBundleFileBytes)) {
+    // Required files with per-file limits. Read capsid.json first so a custom
+    // "entry" path is collected instead of hardcoding "bundle.mjs".
+    if (!collect("capsid.json", &capsid_json, kMaxConfigFileBytes)) {
+        return result;
+    }
+    std::string entry_name = "bundle.mjs";
+    {
+        json_error_t parse_error;
+        json_t* root = json_loadb(reinterpret_cast<const char*>(capsid_json.bytes.data()),
+                                  capsid_json.bytes.size(), 0, &parse_error);
+        if (root != nullptr) {
+            if (json_is_object(root)) {
+                json_t* entry = json_object_get(root, "entry");
+                if (entry != nullptr) {
+                    if (!json_is_string(entry) || json_string_value(entry)[0] == '\0' ||
+                        !valid_relative_path(json_string_value(entry))) {
+                        json_decref(root);
+                        return fail_result(SafeReadErrorCode::kInvalidPath, "invalid entry path");
+                    }
+                    entry_name = json_string_value(entry);
+                }
+            }
+            json_decref(root);
+        }
+    }
+    if (!collect(entry_name.c_str(), &bundle, kMaxBundleFileBytes)) {
         return result;
     }
 

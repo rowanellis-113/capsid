@@ -14,6 +14,7 @@
 
 #include "egress_policy.h"
 #include "ipc_validation.h"
+#include "json_escape.h"
 #include "outbound_buffer.h"
 #include "protocol.h"
 #include "sandbox.h"
@@ -550,11 +551,12 @@ struct RequestToken {
     // finalizers are two-phase). The first reclaim after a cancel defers
     // unconditionally; poison decisions resume on the next round.
     bool reclaim_grace;
+    uint32_t inflight_binding_calls;
 
     RequestToken(uint64_t gen, uint64_t id, uint64_t deadline)
         : generation(gen), request_id(id), deadline_ns(deadline), terminal(false), refs(1),
           job_refs(0), async_refs(0), last_reclaim_refs_(0), reclaim_deadline_ns(0),
-          reclaim_grace(false) {}
+          reclaim_grace(false), inflight_binding_calls(0) {}
 
     ~RequestToken() {
         if (promise_creation_scope) {
@@ -697,7 +699,7 @@ class WorkerRuntime {
         PendingBindingCall()
             : request_id(0), deadline_ns(0), user_resolve(JS_UNDEFINED), user_reject(JS_UNDEFINED),
               abort_controller(JS_UNDEFINED), binding_result(JS_UNDEFINED),
-              binding_error(JS_UNDEFINED), state(BindingCallState::kQueued) {}
+              binding_error(JS_UNDEFINED), state(BindingCallState::kQueued), owner_scope(NULL) {}
         std::string binding_id;
         size_t table_index = 0;
         std::string method;
@@ -710,6 +712,7 @@ class WorkerRuntime {
         JSValue binding_result;   // binding ctx (fulfillment value)
         JSValue binding_error;    // binding ctx (rejection reason)
         BindingCallState state;
+        PromiseCreationScope* owner_scope;
     };
     // Clears the Binding dispatch identity on every exit path from
     // pump_binding_calls, including interrupt-driven JS exceptions.
@@ -736,8 +739,8 @@ class WorkerRuntime {
   public:
     WorkerRuntime(int fd, int network_namespace_fd, const CapsidWorkerIo* io)
         : fd_(fd), network_namespace_fd_(network_namespace_fd), io_(io), runtime_(NULL), ctx_(NULL),
-          poll_started_(false), deadline_timer_started_(false), poll_events_(0),
-          pump_in_progress_(false), diag_samples_(0), flush_syscall_samples_(0),
+          poll_started_(false), deadline_timer_initialized_(false), deadline_timer_started_(false),
+          poll_events_(0), pump_in_progress_(false), diag_samples_(0), flush_syscall_samples_(0),
           flush_syscall_total_(0), bridge_calls_(0), bridge_us_(0), diag_enabled_(false),
           current_phase_(WorkerPhase::kIdle), phase_counts_(), phase_samples_(0),
           shutting_down_(false), bundle_is_trusted_bytecode_(false),
@@ -1020,6 +1023,7 @@ class WorkerRuntime {
             flush_blocking();
             return 1;
         }
+        std::vector<uint8_t>().swap(bundle_);
 
         // Reclaim any Property IC slabs allocated during one-shot bootstrap or
         // module initialization before READY so idle worker PSS stays minimal;
@@ -1030,6 +1034,24 @@ class WorkerRuntime {
                 JS_PurgePropertyIC(JS_GetRuntime(binding_tables_[i].ctx));
             }
         }
+
+        const std::string binding_profile_digest =
+            capsid::compute_binding_profile_digest(bindings_);
+        for (size_t i = 0; i < bindings_.size(); ++i) {
+            for (size_t s = 0; s < bindings_[i].secrets.size(); ++s) {
+                std::vector<uint8_t>& val = bindings_[i].secrets[s].value;
+                for (size_t k = 0; k < val.size(); ++k) {
+                    volatile uint8_t* p = &val[k];
+                    *p = 0;
+                }
+                std::vector<uint8_t>().swap(val);
+            }
+            std::vector<capsid::WorkerBindingSecret>().swap(bindings_[i].secrets);
+            std::vector<uint8_t>().swap(bindings_[i].source);
+            std::string().swap(bindings_[i].config_json);
+        }
+        std::vector<capsid::WorkerBindingDescriptor>().swap(bindings_);
+        startup_state_.clear_sensitive_and_release();
 
 #if defined(__linux__) && defined(__GLIBC__)
         // Hand allocator residue from bundle compilation back to the OS
@@ -1050,10 +1072,10 @@ class WorkerRuntime {
             return 1;
         }
         deadline_timer_.data = this;
-        if (uv_timer_start(&deadline_timer_, deadline_timer_callback, 10, 10) != 0) {
-            return 1;
+        deadline_timer_initialized_ = true;
+        if (diag_enabled_ || !is_timer_idle()) {
+            ensure_deadline_timer_armed();
         }
-        deadline_timer_started_ = true;
         update_poll();
         // The READY payload is the 71-byte compatibility ID from the single
         // generated identity source, so a host can compare the running
@@ -1072,7 +1094,7 @@ class WorkerRuntime {
         // from the canonical profile union either way.
         capsid::append_ready_proof(&ready_payload, sandbox_features, sandbox_seccomp_mode,
                                    sandbox_landlock_abi, sandbox_namespace_identity,
-                                   capsid::compute_binding_profile_digest(bindings_));
+                                   binding_profile_digest);
         if (config_.protocol_version == capsid::protocol::kVersionV4) {
             // Channel adapters require the confirmation barrier. Optional
             // fetch metadata is usable only when the Host announces it too;
@@ -1956,6 +1978,7 @@ class WorkerRuntime {
             return;
         }
         poisoned_ = true;
+        ensure_deadline_timer_armed();
         poison_reason_ = reason;
         poison_started_ns_ = uv_hrtime();
         poison_deadline_ns_ = poison_started_ns_ + kPoisonGraceNs;
@@ -2145,6 +2168,7 @@ class WorkerRuntime {
     // Promise-reaction exemption.
     void request_reclaim(RequestToken* token) {
         reclaim_pending_ = true;
+        ensure_deadline_timer_armed();
         if (token != NULL && token->reclaim_deadline_ns == 0) {
             token->reclaim_deadline_ns = uv_hrtime() + kReclaimSettleWindowNs;
         }
@@ -2224,6 +2248,24 @@ class WorkerRuntime {
         responses_.erase(it);
     }
 
+    bool is_timer_idle() const {
+        return responses_.empty() && retained_refs_ == 0 && !reclaim_pending_ && !poisoned_ &&
+               pending_memory_metrics_ == 0 && pending_binding_calls_.empty() &&
+               user_to_binding_.empty() && binding_to_user_.empty() && connections_.empty() &&
+               pending_connections_.empty() && channel_controls_.empty() &&
+               (!channels_ || channels_->idle());
+    }
+
+    void ensure_deadline_timer_armed() {
+        if (!deadline_timer_initialized_ || deadline_timer_started_ || shutting_down_) {
+            return;
+        }
+        channel_clock_ms_ = uv_hrtime() / 1000000;
+        if (uv_timer_start(&deadline_timer_, deadline_timer_callback, 10, 10) == 0) {
+            deadline_timer_started_ = true;
+        }
+    }
+
     static void deadline_timer_callback(uv_timer_t* timer) {
         WorkerRuntime* self = static_cast<WorkerRuntime*>(timer->data);
         if (!self) {
@@ -2276,6 +2318,10 @@ class WorkerRuntime {
         }
         if (!self->diag_enabled_) {
             self->expire_requests();
+            if (!self->shutting_down_ && self->deadline_timer_started_ && self->is_timer_idle()) {
+                uv_timer_stop(&self->deadline_timer_);
+                self->deadline_timer_started_ = false;
+            }
             return;
         }
         const size_t index = static_cast<size_t>(self->current_phase_);
@@ -6515,44 +6561,78 @@ class WorkerRuntime {
     }
 
     static std::string json_escape_fragment(const std::string& value) {
-        static const char kHex[] = "0123456789abcdef";
-        std::string escaped;
-        escaped.reserve(value.size() + 8);
-        for (const unsigned char ch : value) {
-            switch (ch) {
-            case '"':
-                escaped += "\\\"";
-                break;
-            case '\\':
-                escaped += "\\\\";
-                break;
-            case '\b':
-                escaped += "\\b";
-                break;
-            case '\f':
-                escaped += "\\f";
-                break;
-            case '\n':
-                escaped += "\\n";
-                break;
-            case '\r':
-                escaped += "\\r";
-                break;
-            case '\t':
-                escaped += "\\t";
-                break;
-            default:
-                if (ch < 0x20) {
-                    escaped += "\\u00";
-                    escaped.push_back(kHex[(ch >> 4) & 0x0f]);
-                    escaped.push_back(kHex[ch & 0x0f]);
-                } else {
-                    escaped.push_back(static_cast<char>(ch));
-                }
-                break;
-            }
+        return capsid::json_escape(value);
+    }
+
+    static bool decode_hex4(const char* p, uint16_t* out) {
+        uint16_t v = 0;
+        for (int i = 0; i < 4; ++i) {
+            const char c = p[i];
+            int d = -1;
+            if (c >= '0' && c <= '9')
+                d = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                d = 10 + (c - 'a');
+            else if (c >= 'A' && c <= 'F')
+                d = 10 + (c - 'A');
+            else
+                return false;
+            v = static_cast<uint16_t>((v << 4) | static_cast<uint16_t>(d));
         }
-        return escaped;
+        *out = v;
+        return true;
+    }
+
+    // JS_JSONStringify preserves JS unpaired UTF-16 surrogates (either as raw
+    // 3-byte WTF-8 sequences or \ud800..\udfff escapes); normalize any unpaired
+    // surrogate to U+FFFD so emitted log JSON is strictly valid UTF-8.
+    static void sanitize_json_lone_surrogates(std::string* json) {
+        if (!json || json->empty()) {
+            return;
+        }
+        std::string out;
+        out.reserve(json->size());
+        const size_t n = json->size();
+        for (size_t i = 0; i < n;) {
+            const unsigned char b0 = static_cast<unsigned char>((*json)[i]);
+            if (b0 == '\\' && i + 1 < n) {
+                if ((*json)[i + 1] == 'u' && i + 6 <= n) {
+                    uint16_t cp = 0;
+                    if (decode_hex4(&(*json)[i + 2], &cp) && cp >= 0xD800u && cp <= 0xDFFFu) {
+                        if (cp <= 0xDBFFu && i + 12 <= n && (*json)[i + 6] == '\\' &&
+                            (*json)[i + 7] == 'u') {
+                            uint16_t low = 0;
+                            if (decode_hex4(&(*json)[i + 8], &low) && low >= 0xDC00u &&
+                                low <= 0xDFFFu) {
+                                out.append(*json, i, 12);
+                                i += 12;
+                                continue;
+                            }
+                        }
+                        out += "\\ufffd";
+                        i += 6;
+                        continue;
+                    }
+                }
+                out.append(*json, i, 2);
+                i += 2;
+                continue;
+            }
+            if (b0 == 0xEDu && i + 2 < n) {
+                const unsigned char b1 = static_cast<unsigned char>((*json)[i + 1]);
+                const unsigned char b2 = static_cast<unsigned char>((*json)[i + 2]);
+                if (b1 >= 0xA0u && b1 <= 0xBFu && (b2 & 0xC0u) == 0x80u) {
+                    out += "\xEF\xBF\xBD";
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push_back((*json)[i]);
+            ++i;
+        }
+        if (out != *json) {
+            json->swap(out);
+        }
     }
 
     static void replace_all(std::string* text, const std::string& needle, const char* replacement) {
@@ -6637,6 +6717,7 @@ class WorkerRuntime {
             fields.assign(text, length);
             JS_FreeCString(ctx, text);
             JS_FreeValue(ctx, encoded);
+            sanitize_json_lone_surrogates(&fields);
         }
         if (message.size() > kStdioMessageLimit || fields.size() > kStdioMessageLimit) {
             return JS_ThrowRangeError(ctx, "binding log message or fields exceeds 16384 bytes");
@@ -7348,15 +7429,7 @@ class WorkerRuntime {
                                       JS_PROP_C_W_E);
             return rejected_promise(ctx, error);
         }
-        size_t request_calls = 0;
-        for (std::map<uint64_t, PendingBindingCall>::const_iterator it =
-                 self->pending_binding_calls_.begin();
-             it != self->pending_binding_calls_.end(); ++it) {
-            if (it->second.request_id == token->request_id) {
-                ++request_calls;
-            }
-        }
-        if (request_calls >= 64) {
+        if (token->inflight_binding_calls >= 64) {
             JSValue error = JS_NewError(ctx);
             JS_DefinePropertyValueStr(ctx, error, "message",
                                       JS_NewString(ctx, "binding request quota exceeded"),
@@ -7374,6 +7447,12 @@ class WorkerRuntime {
             JS_DefinePropertyValueStr(ctx, error, "message", JS_NewString(ctx, clone_error.c_str()),
                                       JS_PROP_C_W_E);
             return rejected_promise(ctx, error);
+        }
+        if (!token->promise_creation_scope) {
+            token->promise_creation_scope = new (std::nothrow) PromiseCreationScope(token);
+            if (!token->promise_creation_scope) {
+                return JS_ThrowOutOfMemory(ctx);
+            }
         }
 
         JSValue resolving[2];
@@ -7398,9 +7477,13 @@ class WorkerRuntime {
             JS_FreeValue(ctx, promise);
             return JS_ThrowInternalError(ctx, "binding call id space is exhausted");
         }
+        call.owner_scope = token->promise_creation_scope;
+        ++call.owner_scope->refs;
+        ++token->inflight_binding_calls;
         self->pending_binding_calls_[call_id] = call;
         self->user_to_binding_.push_back(call_id);
         ++self->inflight_binding_calls_;
+        self->ensure_deadline_timer_armed();
         return promise;
     }
 
@@ -7461,6 +7544,7 @@ class WorkerRuntime {
         call.binding_error = JS_UNDEFINED;
         call.state = BindingCallState::kSettled;
         self->binding_to_user_.push_back(call_id);
+        self->ensure_deadline_timer_armed();
         return JS_UNDEFINED;
     }
 
@@ -7489,6 +7573,7 @@ class WorkerRuntime {
         call.binding_result = JS_UNDEFINED;
         call.state = BindingCallState::kSettled;
         self->binding_to_user_.push_back(call_id);
+        self->ensure_deadline_timer_armed();
         return JS_UNDEFINED;
     }
 
@@ -7512,6 +7597,7 @@ class WorkerRuntime {
         call.binding_result = JS_UNDEFINED;
         call.state = BindingCallState::kSettled;
         binding_to_user_.push_back(call_id);
+        ensure_deadline_timer_armed();
     }
 
     JSValue take_binding_exception(const BindingRuntimeMethodTable& table, const char* fallback) {
@@ -7746,6 +7832,16 @@ class WorkerRuntime {
         call.user_resolve = JS_UNDEFINED;
         JS_FreeValue(ctx_, call.user_reject);
         call.user_reject = JS_UNDEFINED;
+        if (call.owner_scope != NULL) {
+            if (call.owner_scope->token != NULL &&
+                call.owner_scope->token->inflight_binding_calls > 0) {
+                --call.owner_scope->token->inflight_binding_calls;
+            }
+            if (--call.owner_scope->refs == 0) {
+                delete call.owner_scope;
+            }
+            call.owner_scope = NULL;
+        }
     }
 
     void finish_binding_call(std::map<uint64_t, PendingBindingCall>::iterator found) {
@@ -8066,28 +8162,44 @@ class WorkerRuntime {
             channel_result = channels_->receive(frame, true);
             if (!channel_result.accepted)
                 return false;
-            if (frame.type >= capsid::protocol::kChannelOpen)
-                return handle_channel_frame(frame, channel_result);
+            if (frame.type >= capsid::protocol::kChannelOpen) {
+                const bool ok = handle_channel_frame(frame, channel_result);
+                if (ok && !shutting_down_ && (!is_timer_idle() || diag_enabled_)) {
+                    ensure_deadline_timer_armed();
+                }
+                return ok;
+            }
         }
+        bool ok = false;
         switch (frame.type) {
         case capsid::protocol::kRequestHead:
-            return begin_request(frame);
+            ok = begin_request(frame);
+            break;
         case capsid::protocol::kRequestBody:
-            return request_body(frame);
+            ok = request_body(frame);
+            break;
         case capsid::protocol::kRequestEnd:
-            return end_request(frame.request_id);
+            ok = end_request(frame.request_id);
+            break;
         case capsid::protocol::kWindowUpdate:
-            return add_response_credit(frame);
+            ok = add_response_credit(frame);
+            break;
         case capsid::protocol::kCancel:
-            return cancel_request(frame.request_id);
+            ok = cancel_request(frame.request_id);
+            break;
         case capsid::protocol::kMemoryMetricsRequest:
-            return send_memory_metrics(frame);
+            ok = send_memory_metrics(frame);
+            break;
         case capsid::protocol::kShutdown:
             shutdown();
             return true;
         default:
             return false;
         }
+        if (ok && !shutting_down_ && (!is_timer_idle() || diag_enabled_)) {
+            ensure_deadline_timer_armed();
+        }
+        return ok;
     }
 
     static uint64_t nonnegative_metric(int64_t value) {
@@ -8107,6 +8219,7 @@ class WorkerRuntime {
                 return false;
             }
             ++pending_memory_metrics_;
+            ensure_deadline_timer_armed();
             return true;
         }
         return write_memory_metrics();
@@ -9144,12 +9257,15 @@ class WorkerRuntime {
             }
             poll_started_ = false;
         }
-        if (deadline_timer_started_) {
-            uv_timer_stop(&deadline_timer_);
+        if (deadline_timer_initialized_) {
+            if (deadline_timer_started_) {
+                uv_timer_stop(&deadline_timer_);
+                deadline_timer_started_ = false;
+            }
             if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&deadline_timer_))) {
                 uv_close(reinterpret_cast<uv_handle_t*>(&deadline_timer_), NULL);
             }
-            deadline_timer_started_ = false;
+            deadline_timer_initialized_ = false;
         }
         if (runtime_) {
             TJS_Stop(runtime_);
@@ -9164,6 +9280,7 @@ class WorkerRuntime {
     uv_poll_t poll_;
     bool poll_started_;
     uv_timer_t deadline_timer_;
+    bool deadline_timer_initialized_;
     bool deadline_timer_started_;
     int poll_events_;
     capsid::OutboundBuffer outbound_;

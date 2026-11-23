@@ -12,5 +12,8 @@ bool client_pending_dial(const capsid_worker* worker, uint64_t id, ChannelEntry*
                          bool* cancelled = nullptr, bool* unresolved = nullptr);
 bool client_egress_snapshot(const capsid_worker* worker, EgressPolicy* out);
 bool client_dial_must_reject(const capsid_worker* worker, uint64_t id, uint32_t* reason);
+// Nonblocking variant of capsid_worker_flush: attempts immediate socket writes
+// and returns CAPSID_WOULD_BLOCK without blocking in a 5s poll() wait.
+capsid_result client_flush_nonblocking(capsid_worker* worker);
 }
 #endif

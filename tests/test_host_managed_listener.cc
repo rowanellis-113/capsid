@@ -13,28 +13,48 @@
 // The response events travel pool pump → event_sink → listener io thread,
 // so every HTTP assert here also pins the pump's event dispatch.
 
+#include "win32_compat.h"
 #include "host/generation_pool.h"
 #include "host/host_config_model.h"
 #include "host/managed_listener.h"
 #include "host/routing_snapshot.h"
 #include "host/worker_event_source.h"
 
+#if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <signal.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
+#endif
 
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
+
+#if defined(_WIN32)
+using SocketHandle = SOCKET;
+constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
+void close_socket_handle(SocketHandle handle) { closesocket(handle); }
+bool is_connection_reset_error() {
+    const int err = WSAGetLastError();
+    return err == WSAECONNRESET || err == WSAECONNABORTED;
+}
+#else
+using SocketHandle = int;
+constexpr SocketHandle kInvalidSocket = -1;
+void close_socket_handle(SocketHandle handle) { close(handle); }
+bool is_connection_reset_error() { return errno == ECONNRESET || errno == EPIPE; }
+#endif
 
 using capsid::host::GenerationPool;
 using capsid::host::GenerationPoolOptions;
@@ -74,6 +94,25 @@ const char* kBundleCors = "export default { async fetch(request) {"
                           "  'Access-Control-Allow-Origin': 'http://evil.example',"
                           "  'Access-Control-Allow-Credentials': 'true',"
                           "  'Vary': 'Accept-Encoding' } }); } };\n";
+const char* kBundleDelayed = "export default { async fetch(request) {"
+                             " const url = new URL(request.url);"
+                             " const ms = Number(url.searchParams.get('delay') ?? '0');"
+                             " if (ms > 0) { await new Promise((r) => setTimeout(r, ms)); }"
+                             " return new Response('ok:' + url.searchParams.get('id')); } };\n";
+const char* kBundleSse =
+    "export default { async fetch(request) {"
+    " const url = new URL(request.url);"
+    " const hold = Number(url.searchParams.get('hold') ?? '0');"
+    " const encoder = new TextEncoder();"
+    " const body = new ReadableStream({"
+    "  async start(controller) {"
+    "   controller.enqueue(encoder.encode('data: open\\n\\n'));"
+    "   if (hold > 0) { await new Promise((r) => setTimeout(r, hold)); }"
+    "   controller.enqueue(encoder.encode('data: done\\n\\n'));"
+    "   controller.close();"
+    "  }"
+    " });"
+    " return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }); } };\n";
 
 // Spawn/load/flush (NOT yet READY) — the executor factory contract. The
 // per-test request timeout lets the 504 gate run fast.
@@ -232,15 +271,23 @@ struct HttpResponse {
     bool chunked = false;
 };
 
-HttpResponse http_exchange(int fd, const std::string& request) {
+void send_raw_request(SocketHandle fd, const std::string& request) {
     std::size_t sent = 0;
     while (sent < request.size()) {
+#if defined(_WIN32)
+        const int count =
+            send(fd, request.data() + sent, static_cast<int>(request.size() - sent), 0);
+#else
         const ssize_t count = send(fd, request.data() + sent, request.size() - sent, 0);
+#endif
         if (count <= 0) {
             fail("cannot write the HTTP request");
         }
         sent += static_cast<std::size_t>(count);
     }
+}
+
+HttpResponse read_http_response(SocketHandle fd) {
     std::string wire;
     char buffer[4096];
     bool done = false;
@@ -248,13 +295,17 @@ HttpResponse http_exchange(int fd, const std::string& request) {
     std::int64_t content_length = -1;
     std::string chunked_body; // its de-framed body
     while (!done) {
+#if defined(_WIN32)
+        const int count = recv(fd, buffer, static_cast<int>(sizeof(buffer)), 0);
+#else
         const ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
+#endif
         if (count < 0) {
             // The connection-ceiling listener closes an excess connection
             // immediately, before reading anything: the client sees an
             // RST with zero bytes received. That is the expected outcome
             // of an over-limit connection, not a response error.
-            if (errno == ECONNRESET && wire.empty()) {
+            if (is_connection_reset_error() && wire.empty()) {
                 break;
             }
             fail("cannot read the HTTP response");
@@ -318,8 +369,8 @@ HttpResponse http_exchange(int fd, const std::string& request) {
                 if (wire.size() < line_end + 2 + size + 2) {
                     break; // need more bytes
                 }
-                chunked_body.append(wire, line_end + 2, size);
-                pos = line_end + 2 + size + 2;
+                chunked_body.append(wire, line_end + 2, static_cast<std::size_t>(size));
+                pos = line_end + 2 + static_cast<std::size_t>(size) + 2;
             }
         }
     }
@@ -339,14 +390,30 @@ HttpResponse http_exchange(int fd, const std::string& request) {
     return response;
 }
 
-int connect_listener(std::uint16_t port) {
-    const int fd = socket(AF_INET, SOCK_STREAM, 0);
-    require(fd >= 0, "cannot create the HTTP socket");
+HttpResponse http_exchange(SocketHandle fd, const std::string& request) {
+    send_raw_request(fd, request);
+    return read_http_response(fd);
+}
+
+void set_socket_recv_timeout(SocketHandle fd, int seconds) {
+#if defined(_WIN32)
+    const DWORD timeout_ms = static_cast<DWORD>(seconds * 1000);
+    require(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms),
+                       sizeof(timeout_ms)) == 0,
+            "cannot set the HTTP receive timeout");
+#else
     struct timeval timeout;
-    timeout.tv_sec = 15;
+    timeout.tv_sec = seconds;
     timeout.tv_usec = 0;
     require(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0,
             "cannot set the HTTP receive timeout");
+#endif
+}
+
+SocketHandle connect_listener(std::uint16_t port) {
+    const SocketHandle fd = socket(AF_INET, SOCK_STREAM, 0);
+    require(fd != kInvalidSocket, "cannot create the HTTP socket");
+    set_socket_recv_timeout(fd, 15);
     struct sockaddr_in address;
     std::memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
@@ -355,6 +422,21 @@ int connect_listener(std::uint16_t port) {
             "cannot build the loopback address");
     require(connect(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) == 0,
             "cannot connect to the managed listener");
+    return fd;
+}
+
+SocketHandle connect_listener_v6(std::uint16_t port) {
+    const SocketHandle fd = socket(AF_INET6, SOCK_STREAM, 0);
+    require(fd != kInvalidSocket, "cannot create the IPv6 HTTP socket");
+    set_socket_recv_timeout(fd, 15);
+    struct sockaddr_in6 address;
+    std::memset(&address, 0, sizeof(address));
+    address.sin6_family = AF_INET6;
+    address.sin6_port = htons(port);
+    require(inet_pton(AF_INET6, "::1", &address.sin6_addr) == 1,
+            "cannot build the IPv6 loopback address");
+    require(connect(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) == 0,
+            "cannot connect to the IPv6 managed listener");
     return fd;
 }
 
@@ -372,7 +454,7 @@ void test_routes_two_apps(const std::string& worker_path) {
     require(listener.start(&error), "listener start failed: " + error);
     require(listener.bound_port() != 0, "listener bound no port");
 
-    const int fd = connect_listener(listener.bound_port());
+    const SocketHandle fd = connect_listener(listener.bound_port());
     const HttpResponse first = http_exchange(fd, "GET /@capsid/app-a/welcome HTTP/1.1\r\n"
                                                  "Host: localhost\r\n"
                                                  "Connection: keep-alive\r\n\r\n");
@@ -390,17 +472,17 @@ void test_routes_two_apps(const std::string& worker_path) {
                 second.body + "')");
     require(second.content_length == 11 && !second.chunked,
             "managed close response missed fixed serialization");
-    close(fd);
+    close_socket_handle(fd);
 
     // HEAD consumes the worker body without exposing it.
-    const int head_fd = connect_listener(listener.bound_port());
+    const SocketHandle head_fd = connect_listener(listener.bound_port());
     const HttpResponse head = http_exchange(head_fd, "HEAD /@capsid/app-a/ HTTP/1.1\r\n"
                                                      "Host: localhost\r\n"
                                                      "Connection: close\r\n\r\n");
     require(head.status == 200 && head.body.empty(),
             "HEAD leaked a body (" + std::to_string(head.status) + ")");
     require(head.content_length == 11 && !head.chunked, "managed HEAD missed fixed Content-Length");
-    close(head_fd);
+    close_socket_handle(head_fd);
 
     listener.request_stop();
     listener.wait(&error);
@@ -430,41 +512,41 @@ void test_404_503_504(const std::string& worker_path) {
     require(listener.start(&error), "listener start failed: " + error);
 
     // No /@capsid/ prefix: route-not-found → 404.
-    const int fd = connect_listener(listener.bound_port());
+    const SocketHandle fd = connect_listener(listener.bound_port());
     const HttpResponse missing_prefix = http_exchange(fd, "GET /welcome HTTP/1.1\r\n"
                                                           "Host: localhost\r\n"
                                                           "Connection: close\r\n\r\n");
     require(missing_prefix.status == 404, "missing /@capsid/ prefix did not map to 404 (" +
                                               std::to_string(missing_prefix.status) + ")");
-    close(fd);
+    close_socket_handle(fd);
 
     // App not in the snapshot: the router's 503 point.
-    const int no_route_fd = connect_listener(listener.bound_port());
+    const SocketHandle no_route_fd = connect_listener(listener.bound_port());
     const HttpResponse no_route = http_exchange(no_route_fd, "GET /@capsid/app-absent/ HTTP/1.1\r\n"
                                                              "Host: localhost\r\n"
                                                              "Connection: close\r\n\r\n");
     require(no_route.status == 503,
             "unrouted App did not map to 503 (" + std::to_string(no_route.status) + ")");
-    close(no_route_fd);
+    close_socket_handle(no_route_fd);
 
     // A retired App keeps its route as a tombstone: 404, never the 503
     // reserved for Apps that were never routed (§9.6-6).
-    const int retired_fd = connect_listener(listener.bound_port());
+    const SocketHandle retired_fd = connect_listener(listener.bound_port());
     const HttpResponse retired = http_exchange(retired_fd, "GET /@capsid/app-gone/ HTTP/1.1\r\n"
                                                            "Host: localhost\r\n"
                                                            "Connection: close\r\n\r\n");
     require(retired.status == 404,
             "retired App tombstone did not map to 404 (" + std::to_string(retired.status) + ")");
-    close(retired_fd);
+    close_socket_handle(retired_fd);
 
     // A worker that never answers: the Runtime request timeout → 504.
-    const int timeout_fd = connect_listener(listener.bound_port());
+    const SocketHandle timeout_fd = connect_listener(listener.bound_port());
     const HttpResponse timeout = http_exchange(timeout_fd, "GET /@capsid/app-hang/ HTTP/1.1\r\n"
                                                            "Host: localhost\r\n"
                                                            "Connection: close\r\n\r\n");
     require(timeout.status == 504,
             "worker timeout did not map to 504 (" + std::to_string(timeout.status) + ")");
-    close(timeout_fd);
+    close_socket_handle(timeout_fd);
 
     listener.request_stop();
     listener.wait(&error);
@@ -491,7 +573,7 @@ void test_post_echo_and_ceiling(const std::string& worker_path) {
     // first request keeps the connection alive (HTTP/1.1 default), so the
     // ceiling below is deterministic: the session is still counted when the
     // second connection arrives.
-    const int fd = connect_listener(listener.bound_port());
+    const SocketHandle fd = connect_listener(listener.bound_port());
     const std::string body(64 * 1024, 'x');
     const HttpResponse echo =
         http_exchange(fd, "POST /@capsid/app-echo/ HTTP/1.1\r\n"
@@ -504,14 +586,14 @@ void test_post_echo_and_ceiling(const std::string& worker_path) {
 
     // Connection ceiling 1: while the first connection is still open, a
     // second connection is closed without service.
-    const int ceiling_fd = connect_listener(listener.bound_port());
+    const SocketHandle ceiling_fd = connect_listener(listener.bound_port());
     const HttpResponse refused = http_exchange(ceiling_fd, "GET /@capsid/app-echo/ HTTP/1.1\r\n"
                                                            "Host: localhost\r\n"
                                                            "Connection: close\r\n\r\n");
     require(refused.status == 0 && refused.body.empty(),
             "connection ceiling did not close the excess connection");
-    close(ceiling_fd);
-    close(fd);
+    close_socket_handle(ceiling_fd);
+    close_socket_handle(fd);
 
     listener.request_stop();
     listener.wait(&error);
@@ -538,7 +620,7 @@ void test_big_response_credit(const std::string& worker_path) {
     std::string error;
     require(listener.start(&error), "listener start failed: " + error);
 
-    const int fd = connect_listener(listener.bound_port());
+    const SocketHandle fd = connect_listener(listener.bound_port());
     const HttpResponse big = http_exchange(fd, "GET /@capsid/app-big/ HTTP/1.1\r\n"
                                                "Host: localhost\r\n"
                                                "Connection: close\r\n\r\n");
@@ -549,7 +631,7 @@ void test_big_response_credit(const std::string& worker_path) {
         require(big.body[i] == '\x53',
                 "large response body content mismatch at " + std::to_string(i));
     }
-    close(fd);
+    close_socket_handle(fd);
 
     listener.request_stop();
     listener.wait(&error);
@@ -586,14 +668,14 @@ void test_trusted_header_gate(const std::string& worker_path) {
         ManagedListener listener(options);
         std::string error;
         require(listener.start(&error), "trusted listener start failed: " + error);
-        const int fd = connect_listener(listener.bound_port());
+        const SocketHandle fd = connect_listener(listener.bound_port());
         const HttpResponse routed = http_exchange(fd, "GET /private/ HTTP/1.1\r\n"
                                                       "Host: localhost\r\n"
                                                       "Capsid-App: app-a\r\n"
                                                       "Connection: close\r\n\r\n");
         require(routed.status == 200 && routed.body == "hello-app-a",
                 "header routing did not reach app-a (" + std::to_string(routed.status) + ")");
-        close(fd);
+        close_socket_handle(fd);
         listener.request_stop();
         listener.wait(&error);
     }
@@ -641,7 +723,7 @@ void test_cors_preflight(const std::string& worker_path) {
     // Preflight with a matching origin/method/headers: 204 with the
     // full Access-Control-* set, no routing involved.
     {
-        const int fd = connect_listener(listener.bound_port());
+        const SocketHandle fd = connect_listener(listener.bound_port());
         const HttpResponse preflight =
             http_exchange(fd, "OPTIONS /api/auth/token HTTP/1.1\r\n"
                               "Host: localhost\r\n"
@@ -659,12 +741,12 @@ void test_cors_preflight(const std::string& worker_path) {
                 "preflight missed Allow-Headers");
         require(head_has(preflight.head, "access-control-max-age: 86400"),
                 "preflight missed Max-Age");
-        close(fd);
+        close_socket_handle(fd);
     }
     // A disallowed origin: 403 with NO Access-Control-Allow-* field (the
     // browser reports the CORS failure; the listener leaks nothing).
     {
-        const int fd = connect_listener(listener.bound_port());
+        const SocketHandle fd = connect_listener(listener.bound_port());
         const HttpResponse denied = http_exchange(fd, "OPTIONS /api/auth/token HTTP/1.1\r\n"
                                                       "Host: localhost\r\n"
                                                       "Origin: http://evil.example\r\n"
@@ -675,13 +757,13 @@ void test_cors_preflight(const std::string& worker_path) {
         require(!head_has(denied.head, "access-control-allow-origin:"),
                 "rejected preflight leaked Allow-Origin");
         require(head_has(denied.head, "vary: origin"), "rejected preflight omitted Vary: Origin");
-        close(fd);
+        close_socket_handle(fd);
     }
     // The actual request is routed normally and the worker response carries
     // the listener-owned Allow-Origin. App-owned CORS headers are replaced,
     // not merged; exact allowed origins may keep App credentials.
     {
-        const int fd = connect_listener(listener.bound_port());
+        const SocketHandle fd = connect_listener(listener.bound_port());
         const HttpResponse actual = http_exchange(fd, "GET /private/ HTTP/1.1\r\n"
                                                       "Host: localhost\r\n"
                                                       "Origin: http://localhost:57694\r\n"
@@ -698,12 +780,12 @@ void test_cors_preflight(const std::string& worker_path) {
                 "exact allowed origin lost App-owned credentials");
         require(head_has(actual.head, "vary: accept-encoding, origin"),
                 "Vary must merge Origin with the App's tokens");
-        close(fd);
+        close_socket_handle(fd);
     }
     // A disallowed Origin on an actual response: the request still routes,
     // but both App-owned Allow-Origin and credentials are stripped.
     {
-        const int fd = connect_listener(listener.bound_port());
+        const SocketHandle fd = connect_listener(listener.bound_port());
         const HttpResponse denied = http_exchange(fd, "GET /private/ HTTP/1.1\r\n"
                                                       "Host: localhost\r\n"
                                                       "Origin: http://evil.example\r\n"
@@ -715,12 +797,12 @@ void test_cors_preflight(const std::string& worker_path) {
                 "disallowed actual response leaked Allow-Origin");
         require(!head_has(denied.head, "access-control-allow-credentials:"),
                 "disallowed actual response leaked Allow-Credentials");
-        close(fd);
+        close_socket_handle(fd);
     }
     // Duplicate Origin is malformed control input and fails 400 before
     // routing.
     {
-        const int fd = connect_listener(listener.bound_port());
+        const SocketHandle fd = connect_listener(listener.bound_port());
         const HttpResponse duplicate = http_exchange(fd, "GET /private/ HTTP/1.1\r\n"
                                                          "Host: localhost\r\n"
                                                          "Origin: http://localhost:57694\r\n"
@@ -729,7 +811,7 @@ void test_cors_preflight(const std::string& worker_path) {
                                                          "Connection: close\r\n\r\n");
         require(duplicate.status == 400,
                 "duplicate Origin was not rejected (" + std::to_string(duplicate.status) + ")");
-        close(fd);
+        close_socket_handle(fd);
     }
 
     listener.request_stop();
@@ -769,7 +851,7 @@ void test_cors_wildcard_credentials(const std::string& worker_path) {
     std::string error;
     require(listener.start(&error), "wildcard cors listener start failed: " + error);
 
-    const int fd = connect_listener(listener.bound_port());
+    const SocketHandle fd = connect_listener(listener.bound_port());
     const HttpResponse actual = http_exchange(fd, "GET /private/ HTTP/1.1\r\n"
                                                   "Host: localhost\r\n"
                                                   "Origin: https://any.example\r\n"
@@ -781,12 +863,282 @@ void test_cors_wildcard_credentials(const std::string& worker_path) {
             "wildcard CORS did not reflect the Origin");
     require(!head_has(actual.head, "access-control-allow-credentials:"),
             "wildcard CORS leaked Allow-Credentials");
-    close(fd);
+    close_socket_handle(fd);
 
     listener.request_stop();
     listener.wait(&error);
     pool_cors->stop_and_join();
     std::cout << "PASS: wildcard CORS never carries credentials" << std::endl;
+}
+
+void test_ipv6_and_single_routing(const std::string& worker_path) {
+    std::shared_ptr<GenerationPool> pool_a = make_pool(worker_path, "app-a", kBundleA, 2000);
+    std::shared_ptr<RoutingTable> routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"app-a", pool_a}}));
+
+    // IPv4 single-app routing mounts at "/" without "/@capsid/<app>".
+    {
+        ManagedListenerOptions options;
+        options.config.name = "single-v4";
+        options.config.tcp = "127.0.0.1:0";
+        options.config.routing.mode = "single";
+        options.config.routing.single_app = "app-a";
+        options.routing = routing;
+        ManagedListener listener(options);
+        std::string error;
+        require(listener.start(&error), "single-mode listener start failed: " + error);
+        const SocketHandle fd = connect_listener(listener.bound_port());
+        const HttpResponse reply = http_exchange(fd, "GET /anything/here HTTP/1.1\r\n"
+                                                     "Host: localhost\r\n"
+                                                     "Connection: close\r\n\r\n");
+        require(reply.status == 200 && reply.body == "hello-app-a",
+                "single-mode listener did not mount app-a at /");
+        close_socket_handle(fd);
+        listener.request_stop();
+        listener.wait(&error);
+    }
+
+    // Bracketed IPv6 listener bind ([::1]:0), skipping gracefully only if IPv6 loopback is absent.
+    {
+        ManagedListenerOptions options;
+        options.config.name = "single-v6";
+        options.config.tcp = "[::1]:0";
+        options.config.routing.mode = "single";
+        options.config.routing.single_app = "app-a";
+        options.routing = routing;
+        ManagedListener listener(options);
+        std::string error;
+        if (listener.start(&error)) {
+            const SocketHandle fd = connect_listener_v6(listener.bound_port());
+            const HttpResponse reply = http_exchange(fd, "GET /v6 HTTP/1.1\r\n"
+                                                         "Host: [::1]\r\n"
+                                                         "Connection: close\r\n\r\n");
+            require(reply.status == 200 && reply.body == "hello-app-a",
+                    "IPv6 single-mode listener failed roundtrip");
+            close_socket_handle(fd);
+            listener.request_stop();
+            listener.wait(&error);
+            std::cout << "PASS: IPv6 [::1]:0 and single-app routing" << std::endl;
+        } else {
+            std::cout << "SKIP: IPv6 loopback unavailable (" << error << ")" << std::endl;
+        }
+    }
+
+    pool_a->stop_and_join();
+}
+
+void test_custom_routing_header(const std::string& worker_path) {
+    std::shared_ptr<GenerationPool> pool_a = make_pool(worker_path, "app-a", kBundleA, 2000);
+    std::shared_ptr<RoutingTable> routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"app-a", pool_a}}));
+
+    ManagedListenerOptions options;
+    options.config = path_listener("custom-header");
+    options.config.routing.mode = "header";
+    options.config.routing.header = "X-Tenant-App";
+    options.config.trusted = true;
+    options.routing = routing;
+    ManagedListener listener(options);
+    std::string error;
+    require(listener.start(&error), "custom routing header listener failed: " + error);
+
+    const SocketHandle fd = connect_listener(listener.bound_port());
+    const HttpResponse routed = http_exchange(fd, "GET /check HTTP/1.1\r\n"
+                                                  "Host: localhost\r\n"
+                                                  "X-Tenant-App: app-a\r\n"
+                                                  "Connection: close\r\n\r\n");
+    require(routed.status == 200 && routed.body == "hello-app-a",
+            "custom routing header did not route to app-a (" + std::to_string(routed.status) + ")");
+    close_socket_handle(fd);
+
+    listener.request_stop();
+    listener.wait(&error);
+    pool_a->stop_and_join();
+    std::cout << "PASS: custom routing header" << std::endl;
+}
+
+void test_e1_admission_queue(const std::string& worker_path) {
+    // 1) max_queued_requests = 0 returns 429 when inflight limit (1) is full.
+    {
+        GenerationPoolOptions opts =
+            pool_options(worker_path, "q-disabled", 1, 5000, kBundleDelayed);
+        opts.max_inflight_per_worker = 1;
+        opts.max_queued_requests = 0;
+        std::string error;
+        auto pool = GenerationPool::create_adopted(
+            opts, warm_fleet(worker_path, 1, 5000, kBundleDelayed), &error);
+        require(pool != nullptr, "queue-disabled pool failed: " + error);
+        auto routing = std::make_shared<RoutingTable>();
+        routing->publish(RoutingSnapshot::build({{"q-disabled", pool}}));
+
+        ManagedListenerOptions lopts;
+        lopts.config = path_listener("q0");
+        lopts.routing = routing;
+        ManagedListener listener(lopts);
+        require(listener.start(&error), "q0 listener failed: " + error);
+
+        const SocketHandle fd1 = connect_listener(listener.bound_port());
+        send_raw_request(
+            fd1,
+            "GET /@capsid/q-disabled/?delay=250&id=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        const SocketHandle fd2 = connect_listener(listener.bound_port());
+        const HttpResponse rejected = http_exchange(
+            fd2,
+            "GET /@capsid/q-disabled/?delay=0&id=2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        require(rejected.status == 429,
+                "disabled queue did not return 429 (" + std::to_string(rejected.status) + ")");
+        close_socket_handle(fd2);
+        const HttpResponse ok = read_http_response(fd1);
+        require(ok.status == 200 && ok.body == "ok:1", "inflight request failed");
+        close_socket_handle(fd1);
+
+        listener.request_stop();
+        listener.wait(&error);
+        pool->stop_and_join();
+    }
+
+    // 2) max_queued_requests = 1 serves queued request after slot frees, and rejects 3rd with 429.
+    {
+        GenerationPoolOptions opts = pool_options(worker_path, "q-one", 1, 5000, kBundleDelayed);
+        opts.max_inflight_per_worker = 1;
+        opts.max_queued_requests = 1;
+        opts.queue_timeout_ms = 5000;
+        std::string error;
+        auto pool = GenerationPool::create_adopted(
+            opts, warm_fleet(worker_path, 1, 5000, kBundleDelayed), &error);
+        require(pool != nullptr, "q-one pool failed: " + error);
+        auto routing = std::make_shared<RoutingTable>();
+        routing->publish(RoutingSnapshot::build({{"q-one", pool}}));
+
+        ManagedListenerOptions lopts;
+        lopts.config = path_listener("q1");
+        lopts.routing = routing;
+        ManagedListener listener(lopts);
+        require(listener.start(&error), "q1 listener failed: " + error);
+
+        const SocketHandle fd1 = connect_listener(listener.bound_port());
+        send_raw_request(
+            fd1,
+            "GET /@capsid/q-one/?delay=250&id=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        const SocketHandle fd2 = connect_listener(listener.bound_port());
+        send_raw_request(
+            fd2,
+            "GET /@capsid/q-one/?delay=0&id=2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        const SocketHandle fd3 = connect_listener(listener.bound_port());
+        const HttpResponse full = http_exchange(
+            fd3,
+            "GET /@capsid/q-one/?delay=0&id=3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        require(full.status == 429,
+                "full queue did not return 429 (" + std::to_string(full.status) + ")");
+        close_socket_handle(fd3);
+
+        const HttpResponse r1 = read_http_response(fd1);
+        const HttpResponse r2 = read_http_response(fd2);
+        require(r1.status == 200 && r1.body == "ok:1", "first request failed");
+        require(r2.status == 200 && r2.body == "ok:2",
+                "queued request failed (" + std::to_string(r2.status) + ")");
+        close_socket_handle(fd1);
+        close_socket_handle(fd2);
+
+        listener.request_stop();
+        listener.wait(&error);
+        pool->stop_and_join();
+    }
+
+    // 3) queue_timeout_ms expiry returns 504.
+    {
+        GenerationPoolOptions opts = pool_options(worker_path, "q-to", 1, 5000, kBundleDelayed);
+        opts.max_inflight_per_worker = 1;
+        opts.max_queued_requests = 1;
+        opts.queue_timeout_ms = 80;
+        std::string error;
+        auto pool = GenerationPool::create_adopted(
+            opts, warm_fleet(worker_path, 1, 5000, kBundleDelayed), &error);
+        require(pool != nullptr, "q-to pool failed: " + error);
+        auto routing = std::make_shared<RoutingTable>();
+        routing->publish(RoutingSnapshot::build({{"q-to", pool}}));
+
+        ManagedListenerOptions lopts;
+        lopts.config = path_listener("qto");
+        lopts.routing = routing;
+        ManagedListener listener(lopts);
+        require(listener.start(&error), "qto listener failed: " + error);
+
+        const SocketHandle fd1 = connect_listener(listener.bound_port());
+        send_raw_request(
+            fd1,
+            "GET /@capsid/q-to/?delay=350&id=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const SocketHandle fd2 = connect_listener(listener.bound_port());
+        const HttpResponse timed_out = http_exchange(
+            fd2,
+            "GET /@capsid/q-to/?delay=0&id=2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        require(timed_out.status == 504, "expired queued request did not return 504 (" +
+                                             std::to_string(timed_out.status) + ")");
+        close_socket_handle(fd2);
+        const HttpResponse r1 = read_http_response(fd1);
+        require(r1.status == 200 && r1.body == "ok:1",
+                "active request failed during queue timeout test");
+        close_socket_handle(fd1);
+
+        listener.request_stop();
+        listener.wait(&error);
+        pool->stop_and_join();
+    }
+    std::cout << "PASS: E-1 admission queue (429 / FIFO 200 / 504)" << std::endl;
+}
+
+void test_e2_sse_permit(const std::string& worker_path) {
+    GenerationPoolOptions opts = pool_options(worker_path, "sse-app", 1, 5000, kBundleSse);
+    opts.max_inflight_per_worker = 4;
+    opts.max_streaming_inflight_per_worker = 1;
+    std::string error;
+    auto pool =
+        GenerationPool::create_adopted(opts, warm_fleet(worker_path, 1, 5000, kBundleSse), &error);
+    require(pool != nullptr, "sse pool failed: " + error);
+    auto routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"sse-app", pool}}));
+
+    ManagedListenerOptions lopts;
+    lopts.config = path_listener("sse");
+    lopts.routing = routing;
+    ManagedListener listener(lopts);
+    require(listener.start(&error), "sse listener failed: " + error);
+
+    const SocketHandle fd1 = connect_listener(listener.bound_port());
+    send_raw_request(
+        fd1,
+        "GET /@capsid/sse-app/?hold=350 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    const SocketHandle fd2 = connect_listener(listener.bound_port());
+    const HttpResponse denied = http_exchange(
+        fd2,
+        "GET /@capsid/sse-app/?hold=0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    require(denied.status == 503,
+            "excess SSE stream was not rejected with 503 (" + std::to_string(denied.status) + ")");
+    close_socket_handle(fd2);
+
+    const HttpResponse first = read_http_response(fd1);
+    require(first.status == 200 && first.body.find("data: done") != std::string::npos,
+            "first SSE stream did not complete cleanly");
+    close_socket_handle(fd1);
+
+    // Permit must have been released after completion.
+    const SocketHandle fd3 = connect_listener(listener.bound_port());
+    const HttpResponse after = http_exchange(
+        fd3,
+        "GET /@capsid/sse-app/?hold=0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    require(after.status == 200 && after.body.find("data: done") != std::string::npos,
+            "SSE permit leaked after stream completion");
+    close_socket_handle(fd3);
+
+    listener.request_stop();
+    listener.wait(&error);
+    pool->stop_and_join();
+    std::cout << "PASS: E-2 SSE streaming permit" << std::endl;
 }
 
 } // namespace
@@ -795,6 +1147,9 @@ int main(int argc, char** argv) {
     if (argc != 2) {
         fail("expected capsid-worker path");
     }
+#if defined(_WIN32)
+    require(capsid::win32::ensure_winsock(), "cannot initialize Winsock");
+#endif
     const std::string worker_path = argv[1];
     test_routes_two_apps(worker_path);
     test_404_503_504(worker_path);
@@ -803,6 +1158,10 @@ int main(int argc, char** argv) {
     test_trusted_header_gate(worker_path);
     test_cors_preflight(worker_path);
     test_cors_wildcard_credentials(worker_path);
+    test_ipv6_and_single_routing(worker_path);
+    test_custom_routing_header(worker_path);
+    test_e1_admission_queue(worker_path);
+    test_e2_sse_permit(worker_path);
     std::cout << "PASS: Managed listener data plane (WP-05 §9.2)" << std::endl;
     return 0;
 }

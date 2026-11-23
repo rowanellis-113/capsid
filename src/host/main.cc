@@ -42,7 +42,10 @@
 #endif
 #include "host/structured_log.h"
 #include "host/trusted_key_store.h"
+#include "host/units.h"
 #include "host/worker_supervisor.h"
+#include "json_escape.h"
+#include "net_target.h"
 
 #include <jansson.h>
 
@@ -87,30 +90,7 @@ void fail(const std::string& message) {
     // — one JSON object with the fixed field set, message JSON-escaped.
     // There is no StructuredLog instance yet at this point (a failure may
     // precede its construction), so the line is written directly.
-    std::string escaped;
-    escaped.reserve(message.size());
-    for (const char c : message) {
-        switch (c) {
-        case '"':
-            escaped += "\\\"";
-            break;
-        case '\\':
-            escaped += "\\\\";
-            break;
-        case '\n':
-            escaped += "\\n";
-            break;
-        case '\r':
-            escaped += "\\r";
-            break;
-        case '\t':
-            escaped += "\\t";
-            break;
-        default:
-            escaped.push_back(c);
-            break;
-        }
-    }
+    const std::string escaped = capsid::json_escape(message);
     const std::uint64_t timestamp_ms =
         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::system_clock::now().time_since_epoch())
@@ -193,60 +173,20 @@ std::uint64_t parse_nonnegative_integer(const std::string& value, const char* na
 // "250ms" / "5s" / "1m" style duration (the same grammar the effective
 // config uses for queueTimeout). Unit suffix is required.
 std::uint64_t parse_duration_ms(const std::string& value, const char* name) {
-    std::string::size_type number_end = 0;
-    for (std::string::size_type index = 0; index < value.size(); ++index) {
-        const char c = value[index];
-        if (c < '0' || c > '9') {
-            break;
-        }
-        number_end = index + 1;
+    std::uint64_t parsed = 0;
+    if (!capsid::host::units::parse_duration_ms(value, &parsed, /*allow_hours=*/false) ||
+        parsed == 0) {
+        fail(std::string("--") + name +
+             " requires a positive duration like 250ms, 5s or 1m: " + value);
     }
-    if (number_end == 0 || number_end == value.size()) {
-        fail(std::string("--") + name + " requires a duration like 250ms or 5s: " + value);
-    }
-    const std::string number_text = value.substr(0, number_end);
-    const std::string unit = value.substr(number_end);
-    std::uint64_t multiplier = 0;
-    if (unit == "ms") {
-        multiplier = 1;
-    } else if (unit == "s") {
-        multiplier = 1000;
-    } else if (unit == "m") {
-        multiplier = 60U * 1000U;
-    } else {
-        fail(std::string("--") + name + " requires ms, s or m units: " + value);
-    }
-    errno = 0;
-    char* end = nullptr;
-    const unsigned long long parsed = std::strtoull(number_text.c_str(), &end, 10);
-    if (errno != 0 || end == nullptr || *end != '\0' || parsed == 0 ||
-        parsed > static_cast<unsigned long long>(std::numeric_limits<std::uint64_t>::max() /
-                                                 multiplier)) {
-        fail(std::string("--") + name + " is out of range: " + value);
-    }
-    return static_cast<std::uint64_t>(parsed) * multiplier;
+    return parsed;
 }
 
-// host:port; only decimal ports and non-empty hosts are accepted.
+// host:port or [ipv6]:port; decimal ports in [0, 65535].
 void parse_listen(const std::string& value, std::string* out_address, std::uint16_t* out_port) {
-    const std::size_t colon = value.rfind(':');
-    if (colon == std::string::npos || colon == 0 || colon + 1 == value.size()) {
-        fail("--listen requires host:port");
+    if (!capsid::parse_tcp_endpoint(value, out_address, out_port, /*allow_zero_port=*/true)) {
+        fail("--listen requires host:port with decimal port in [0, 65535]: " + value);
     }
-    *out_address = value.substr(0, colon);
-    const std::string port_text = value.substr(colon + 1);
-    for (const char c : port_text) {
-        if (c < '0' || c > '9') {
-            fail("--listen port must be decimal: " + value);
-        }
-    }
-    errno = 0;
-    char* end = nullptr;
-    const unsigned long parsed = std::strtoul(port_text.c_str(), &end, 10);
-    if (errno != 0 || end == nullptr || *end != '\0' || parsed > 65535) {
-        fail("--listen port must be in [0, 65535]: " + value);
-    }
-    *out_port = static_cast<std::uint16_t>(parsed);
 }
 
 std::vector<std::uint8_t> read_bundle(const std::string& path) {
@@ -274,37 +214,7 @@ std::vector<std::uint8_t> read_bundle(const std::string& path) {
 // coordinator's worker.memoryMax; also used by the single-worker /
 // static-pool CLI, so it stays outside the managed-only section).
 bool parse_size_bytes_text(const std::string& text, std::uint64_t* out) {
-    if (text.empty()) {
-        return false;
-    }
-    char* end = nullptr;
-    errno = 0;
-    const unsigned long long base = std::strtoull(text.c_str(), &end, 10);
-    if (errno != 0 || end == text.c_str()) {
-        return false;
-    }
-    std::uint64_t multiplier = 0;
-    const std::string suffix(end);
-    if (suffix == "KiB") {
-        multiplier = 1024ULL;
-    } else if (suffix == "MiB") {
-        multiplier = 1024ULL * 1024ULL;
-    } else if (suffix == "GiB") {
-        multiplier = 1024ULL * 1024ULL * 1024ULL;
-    } else if (suffix == "KB") {
-        multiplier = 1000ULL;
-    } else if (suffix == "MB") {
-        multiplier = 1000ULL * 1000ULL;
-    } else if (suffix == "GB") {
-        multiplier = 1000ULL * 1000ULL * 1000ULL;
-    } else {
-        return false;
-    }
-    if (base > std::numeric_limits<std::uint64_t>::max() / multiplier) {
-        return false;
-    }
-    *out = static_cast<std::uint64_t>(base) * multiplier;
-    return true;
+    return capsid::host::units::parse_size_bytes(text, out, /*allow_bare_bytes=*/false);
 }
 
 // ---- managed mode: host.json authority, real coordinator, Admin service ----
@@ -625,10 +535,12 @@ std::string read_host_config(const std::string& path) {
     const auto adopt_generation =
         [&](const std::string& application, const std::vector<capsid_worker*>& workers,
             const capsid::host::WorkerExecutor::WorkerFactory& factory, const std::string& version,
-            const std::string& generation_digest) -> std::shared_ptr<capsid::host::GenerationPool> {
+            const std::string& generation_digest, const capsid::host::EffectiveConfig& effective)
+        -> std::shared_ptr<capsid::host::GenerationPool> {
         if (!factory) {
             for (capsid_worker* worker : workers) {
                 capsid_worker_destroy(worker);
+                capsid::host::release_worker_cgroup(worker);
             }
             return nullptr;
         }
@@ -637,6 +549,14 @@ std::string read_host_config(const std::string& path) {
         pool_options.version = version;
         pool_options.generation_digest = generation_digest;
         pool_options.workers = static_cast<std::uint32_t>(workers.size());
+        pool_options.max_inflight_per_worker = effective.requests_per_worker;
+        pool_options.max_queued_requests = effective.queue_requests;
+        pool_options.queue_header_bytes = effective.queue_header_bytes;
+        pool_options.queue_timeout_ms = effective.queue_timeout_ms;
+        pool_options.max_streaming_inflight_per_worker =
+            effective.max_streaming_inflight_per_worker;
+        pool_options.stream_idle_timeout_ms = effective.stream_idle_timeout_ms;
+        pool_options.write_timeout_ms = effective.write_timeout_ms;
         pool_options.factory = factory;
         pool_options.channel_budget = channel_budget;
         pool_options.recovery = recovery_resolved.policy;
@@ -757,7 +677,7 @@ std::string read_host_config(const std::string& path) {
         plan->new_workers = prepared.workers.size();
         std::shared_ptr<capsid::host::GenerationPool> pool =
             adopt_generation(application, prepared.workers, prepared.generation_factory,
-                             prepared.version, prepared.generation_digest);
+                             prepared.version, prepared.generation_digest, prepared.effective);
         if (pool == nullptr) {
             *error = "cannot activate the new generation";
             return nullptr;
@@ -959,7 +879,7 @@ std::string read_host_config(const std::string& path) {
             // nothing further to settle.
             const std::shared_ptr<capsid::host::GenerationPool> pool = adopt_generation(
                 options->application, recovered.workers, recovered.generation_factory,
-                recovered.version, recovered.generation_digest);
+                recovered.version, recovered.generation_digest, recovered.effective);
             if (pool == nullptr) {
                 fail("cannot activate the recovered pool for application " + options->application);
             }
@@ -969,12 +889,12 @@ std::string read_host_config(const std::string& path) {
                 active_pools[options->application] = pool;
                 publish_snapshot();
             }
-        } else {
-            // Durable state but no recovered workers: the App is retired
-            // (or quarantined). Mirror the coordinator's durable tombstone
-            // in the route — the name stays routed with no pool, so the
-            // router keeps answering 404 after restart, exactly as it did
-            // before the restart (§9.6-6). No capacity occupancy.
+        } else if (recovered.recovery_action ==
+                   capsid::host::ActiveStateRecoveryAction::kKeepRetired) {
+            // Durable retired tombstone: mirror the coordinator's tombstone in
+            // the route so requests continue answering 404 after restart
+            // (§9.6-6), with no capacity occupancy. Quarantined or never-
+            // deployed Apps stay unrouted (503).
             {
                 std::lock_guard<std::mutex> lock(pools_mutex);
                 retired_apps.insert(options->application);

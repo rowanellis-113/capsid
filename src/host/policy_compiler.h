@@ -64,7 +64,22 @@ struct HostPolicy {
     // Host-side slow-client write deadline maximum (host.json
     // maximums.request.writeTimeoutMs, E-3 §9.2): 0 = no ceiling.
     std::uint64_t max_write_timeout_ms = 0;
+    std::uint64_t max_js_heap_bytes = 0;
+    std::uint64_t max_file_descriptors = 0;
+    std::uint64_t default_worker_memory_bytes = 0;
+    std::uint64_t default_js_heap_bytes = 0;
+    std::uint64_t default_file_descriptors = 0;
+    std::uint64_t default_requests_per_worker = 0;
+    std::uint32_t default_workers = 0;
+    std::uint64_t default_queue_requests = 0;
+    std::uint64_t default_queue_header_bytes = 0;
+    std::uint64_t default_queue_timeout_ms = 0;
+    std::uint64_t default_max_streaming_inflight_per_worker = 0;
+    std::uint64_t default_stream_idle_timeout_ms = 0;
+    std::uint64_t default_write_timeout_ms = 0;
     bool strict_sandbox = true; // isolation is host-decided only
+    std::vector<std::string> isolation_required;
+    std::string isolation_cgroup_root;
 };
 
 // M2 item 6 (design §7.4): the App's active health probe configuration.
@@ -175,6 +190,7 @@ struct EffectiveConfig {
     std::uint64_t file_descriptors = 0;      // -> Runtime resource_limits
     std::uint32_t workers = 1;
     std::uint32_t min_ready = 1;
+    HealthCheckConfig health_check;
     bool strict_sandbox = true;
 
     // Canonical single-line effective.json (no secret values).

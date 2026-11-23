@@ -151,6 +151,7 @@ bool WorkerExecutor::start(const WorkerFactory& factory, std::string* error) {
         std::unique_lock<std::mutex> lock(mutex_);
         worker_ = worker;
         process_id_.store(capsid_worker_pid(worker));
+        cgroup_lease_ = take_worker_cgroup(worker);
     }
     source_.set_worker(worker);
 
@@ -192,6 +193,7 @@ bool WorkerExecutor::adopt(capsid_worker* worker, std::string* error) {
         std::unique_lock<std::mutex> lock(mutex_);
         worker_ = worker;
         process_id_.store(capsid_worker_pid(worker));
+        cgroup_lease_ = take_worker_cgroup(worker);
         capsid_protocol_info info;
         if (capsid_worker_get_protocol_info(worker, &info, sizeof(info)) == CAPSID_OK)
             effective_channel_caps_ = info.effective_capabilities;
@@ -381,6 +383,11 @@ bool WorkerExecutor::exited() const {
 
 std::uint64_t WorkerExecutor::inflight() const { return inflight_.load(std::memory_order_acquire); }
 
+std::string WorkerExecutor::cgroup_path() const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cgroup_lease_ ? cgroup_lease_->path : std::string();
+}
+
 WorkerExecutor::Metrics& WorkerExecutor::metrics() { return metrics_; }
 
 void WorkerExecutor::set_metrics_enabled(bool enabled) {
@@ -550,15 +557,23 @@ worker_exit:
     }
     source_.set_worker(nullptr);
     const capsid::WorkerExitStatus status = capsid::destroy_worker_with_status(retired_worker);
+    std::shared_ptr<WorkerCgroupLease> retired_cgroup;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         exit_status_ = status;
         worker_ = nullptr;
         destroying_ = false;
         exited_ = true;
+        retired_cgroup = std::move(cgroup_lease_);
         // Every request still owned by this worker is gone with it; the
         // pool sees inflight 0 and routes new work to a replacement.
         inflight_ids_.clear();
+    }
+    // Remove the per-worker leaf cgroup only after wait_for_child() reaped
+    // the worker and cgroup.procs is empty.
+    if (retired_cgroup) {
+        retired_cgroup->release();
+        retired_cgroup.reset();
     }
     retained_contexts_.store(0, std::memory_order_relaxed);
     publish_channels(0);
@@ -922,7 +937,7 @@ bool WorkerExecutor::execute_command(Command command) {
 // produced. It is called once per command drain, not per command, so a
 // batch of N GET requests produces one write syscall instead of N.
 bool WorkerExecutor::batch_flush() {
-    const capsid_result result = capsid_worker_flush(worker_);
+    const capsid_result result = capsid::client_flush_nonblocking(worker_);
     ipc_write_pending_ = result == CAPSID_WOULD_BLOCK;
     if (result == CAPSID_OK || result == CAPSID_WOULD_BLOCK) {
         // WOULD_BLOCK is fine — the frames are in the worker's input buffer;

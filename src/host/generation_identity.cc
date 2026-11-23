@@ -10,9 +10,9 @@
 
 #include "host/config.h"
 #include "host/generation_identity.h"
+#include "host/json_codec.h"
 
 #include <jansson.h>
-#include <openssl/evp.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -24,23 +24,6 @@
 #include <vector>
 
 namespace capsid::host {
-
-std::string sha256_hex(std::span<const std::uint8_t> bytes) {
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_size = 0;
-    if (EVP_Digest(bytes.data(), bytes.size(), digest, &digest_size, EVP_sha256(), nullptr) != 1 ||
-        digest_size != 32) {
-        return {};
-    }
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string result = "sha256:";
-    result.reserve(71);
-    for (unsigned int i = 0; i < digest_size; ++i) {
-        result.push_back(kHex[digest[i] >> 4]);
-        result.push_back(kHex[digest[i] & 0x0f]);
-    }
-    return result;
-}
 
 std::string compute_binding_manifest_digest(std::string_view json) {
     // The schema validation is the gate; the digest is computed over the

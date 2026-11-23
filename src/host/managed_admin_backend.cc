@@ -243,30 +243,13 @@ DeployOutcome ManagedAdminBackend::deploy(const std::string& application,
         }
         return outcome;
     }
-    // The permit is bound to the active App slot: a replacement deploy of
-    // an App that already holds its slot does not acquire again, and the
-    // global capacity is consumed BEFORE any spawn or durable activation.
-    bool newly_acquired = true;
-    if (capacity != nullptr) {
-        newly_acquired = capacity->acquire(application);
-        if (!newly_acquired && !capacity->holds(application)) {
-            DeployOutcome outcome;
-            outcome.error = "worker capacity exceeded";
-            if (status != nullptr) {
-                status->state = OperationState::kFailed;
-                status->error = outcome.error;
-            }
-            return outcome;
-        }
-    }
     // M2 item 5b: the deploy joins the process-global fair startup-permit
-    // queue (design §10.5.6) after acquiring capacity and holds its grant
-    // across the whole pipeline — a crash-looping App cannot persistently
-    // queue ahead of this deploy. The target generation is unknown until
-    // COMPLETE, so the current active generation anchors the request (or
-    // the zero probe when the App was never active); the field only
-    // participates in replacement singleflight matching and identifier
-    // validation, never in fairness.
+    // queue (design §10.5.6) and holds its grant across the whole pipeline —
+    // a crash-looping App cannot persistently queue ahead of this deploy.
+    // The target generation is unknown until COMPLETE, so the current active
+    // generation anchors the request (or the zero probe when the App was
+    // never active); the field only participates in replacement singleflight
+    // matching and identifier validation, never in fairness.
     bool grant_held = false;
     if (startup_permits != nullptr) {
         std::string generation(kStartupPermitProbeGeneration);
@@ -285,9 +268,6 @@ DeployOutcome ManagedAdminBackend::deploy(const std::string& application,
                 status->state = OperationState::kFailed;
                 status->error = outcome.error;
             }
-            if (newly_acquired) {
-                capacity->release(application);
-            }
             return outcome;
         }
         grant_held = true;
@@ -299,18 +279,6 @@ DeployOutcome ManagedAdminBackend::deploy(const std::string& application,
     DeployOutcome outcome = managed_deploy(options, version, status);
     if (grant_held) {
         startup_permits->release_grant();
-    }
-    if (capacity != nullptr) {
-        if (outcome.ok && !outcome.workers.empty()) {
-            // The activated pool HOLDS the slot until its retire; a
-            // replacement keeps its existing slot.
-            capacity->record_success(application);
-        } else if (newly_acquired) {
-            // Only a permit acquired BY THIS DEPLOY is returned when it
-            // settles without a live worker; a failed replacement leaves
-            // the old holder's slot untouched.
-            capacity->release(application);
-        }
     }
     return outcome;
 }

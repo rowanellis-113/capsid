@@ -1416,6 +1416,8 @@ bool Impl::start(const std::vector<std::uint8_t>& bundle, std::string* error) {
         case RequestRoutingMode::kHeader:
             probe_capsid_app = options_.application;
             break;
+        case RequestRoutingMode::kSingle:
+            break;
         }
         std::string probe_error;
         const bool probe_ok =

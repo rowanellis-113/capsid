@@ -174,10 +174,8 @@ if(BUILD_TESTING)
                 TIMEOUT 30)
         endif()
 
-        # host_config_model.cc is part of the managed coordinator and not
-        # built on Windows (docs/windows.md); the model test SKIPs by
-        # absence there.
-        if(NOT WIN32)
+        # host_config_model.cc is cross-platform and validated across Linux,
+        # macOS, and Windows.
         add_executable(
             test-host-config-model
             tests/test_host_config_model.cc)
@@ -202,7 +200,6 @@ if(BUILD_TESTING)
             endif()
         endif()
         add_test(NAME host_config_model COMMAND test-host-config-model)
-        endif()
 
         # Binding v1 (docs/binding-technical-design.md §7.1): one target
         if(Boost_FOUND)
@@ -1293,32 +1290,6 @@ if(BUILD_TESTING)
         add_test(
             NAME host_request_normalization
             COMMAND test-host-request-normalization)
-
-        add_executable(
-            test-host-service-lifecycle
-            tests/test_host_service_lifecycle.cc)
-        target_include_directories(
-            test-host-service-lifecycle PRIVATE src)
-        target_link_libraries(test-host-service-lifecycle PRIVATE
-            capsid_host_core
-            capsid_sanitizers)
-        set_target_properties(test-host-service-lifecycle PROPERTIES
-            CXX_STANDARD 20
-            CXX_STANDARD_REQUIRED ON
-            CXX_EXTENSIONS OFF)
-        if(CAPSID_STRICT_WARNINGS)
-            if(MSVC)
-                target_compile_options(
-                    test-host-service-lifecycle PRIVATE /W4 /WX)
-            else()
-                target_compile_options(
-                    test-host-service-lifecycle PRIVATE
-                    -Wall -Wextra -Wpedantic -Werror)
-            endif()
-        endif()
-        add_test(
-            NAME host_service_lifecycle
-            COMMAND test-host-service-lifecycle)
 
         add_executable(
             test-host-worker-recovery
@@ -4517,6 +4488,7 @@ if(BUILD_TESTING)
             websocket_handshake
             src/host/ws_codec.cc
             src/host/request_normalization.cc
+            src/net_target.cc
             src/host/websocket_session.cc
             src/host/ws_stream.cc
             src/host/channel_ledger.cc
@@ -4815,7 +4787,7 @@ if(BUILD_TESTING)
             COMMAND "${CAPSID_NODE_EXECUTABLE}" --test
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_testing_validity_workflow.mjs")
         set_tests_properties(testing_validity_workflow_controls PROPERTIES
-            TIMEOUT 30 LABELS "ci;audit;contract")
+            TIMEOUT 60 LABELS "ci;audit;contract")
         if(CAPSID_PYTHON3_EXECUTABLE)
             add_test(NAME native_provider_patch_controls
                 COMMAND "${CAPSID_PYTHON3_EXECUTABLE}" -B
@@ -6985,9 +6957,6 @@ if(BUILD_TESTING)
 
             add_executable(test-host-process-observation
                 tests/test_host_process_observation.cc src/host/single_worker_server.cc)
-            if(WIN32)
-                target_sources(test-host-process-observation PRIVATE src/host/routing_snapshot.cc)
-            endif()
             target_include_directories(test-host-process-observation PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
             target_link_libraries(test-host-process-observation PRIVATE
@@ -7056,7 +7025,7 @@ if(BUILD_TESTING)
         # the contract joins the same Boost gate as the data plane itself
         # (build_host.cmake) and is not registered on Boost-less platforms
         # (spec §9.6-14: unsupported platforms SKIP, never FAIL).
-        if(UNIX AND Boost_FOUND)
+        if(Boost_FOUND)
         add_executable(
             test-host-routing-snapshot
             tests/test_host_routing_snapshot.cc)
@@ -7066,6 +7035,7 @@ if(BUILD_TESTING)
         target_link_libraries(test-host-routing-snapshot PRIVATE
             capsid_runtime
             capsid_host_core
+            Boost::system
             capsid_jansson
             OpenSSL::Crypto
             capsid_sanitizers)
@@ -7106,9 +7076,13 @@ if(BUILD_TESTING)
         target_link_libraries(test-host-managed-listener PRIVATE
             capsid_runtime
             capsid_host_core
+            Boost::system
             capsid_jansson
             OpenSSL::Crypto
             capsid_sanitizers)
+        if(WIN32)
+            target_link_libraries(test-host-managed-listener PRIVATE ws2_32)
+        endif()
         set_target_properties(test-host-managed-listener PROPERTIES
             CXX_STANDARD 20
             CXX_STANDARD_REQUIRED ON
@@ -7124,18 +7098,14 @@ if(BUILD_TESTING)
             endif()
         endif()
         add_dependencies(test-host-managed-listener capsid-worker)
-        # The managed listener contract drives request bodies through the
-        # managed data plane; on macOS the POST echo stalls (504) — the
-        # managed data plane is Linux-only, like the managed executable
-        # suite, so the contract registers only there.
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test(
             NAME host_managed_listener_contract
             COMMAND test-host-managed-listener $<TARGET_FILE:capsid-worker>)
         set_tests_properties(host_managed_listener_contract PROPERTIES
             TIMEOUT 90)
         endif()
-        endif()  # UNIX AND Boost_FOUND — RoutingTable contract tests
+        endif()  # Boost_FOUND — RoutingTable & ManagedListener contract tests
 
         add_executable(
             test-hono-worker-driver

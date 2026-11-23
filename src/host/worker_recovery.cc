@@ -67,7 +67,7 @@ bool lifecycle_consistent(const ServiceLifecycleState& lifecycle) {
         return lifecycle.phase == ServiceLifecyclePhase::kAbsent ||
                lifecycle.phase == ServiceLifecyclePhase::kFailedClosed;
     }
-    if (!encode_active_state_json(*lifecycle.document).ok) {
+    if (!validate_active_state_document(*lifecycle.document)) {
         return false;
     }
     switch (lifecycle.phase) {

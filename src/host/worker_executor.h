@@ -33,6 +33,7 @@
 #include "capsid/runtime.h"
 #include "client_ipc_metrics.h"
 #include "host/request_normalization.h"
+#include "host/worker_cgroup.h"
 #include "host/worker_event_source.h"
 #include "ipc_validation.h"
 #include "worker_exit_status.h"
@@ -285,6 +286,14 @@ class WorkerExecutor {
     std::uint64_t connection_owners() const {
         return connection_owners_.load(std::memory_order_acquire);
     }
+    // Combined least-loaded score used by GenerationPool scheduling.
+    std::uint64_t load_score() const noexcept {
+        return inflight_.load(std::memory_order_acquire) +
+               connection_owners_.load(std::memory_order_acquire);
+    }
+    // Per-worker leaf cgroup directory (empty on non-Linux or when cgroup
+    // delegation is unconfigured). Released after child reap.
+    std::string cgroup_path() const;
     // M2 item 6: fire one bodyless GET probe against the App's
     // healthCheck.path (the absolute data-plane URL shape). The command
     // carries the probe id; the worker thread executes the Runtime call
@@ -392,6 +401,7 @@ class WorkerExecutor {
     // Publication gate only: a borrowed worker() result is not pinned.
     std::atomic<bool> destroying_ = false;
     std::atomic<std::int64_t> process_id_{0};
+    std::shared_ptr<WorkerCgroupLease> cgroup_lease_;
 
     // Bridge between the owner thread and the worker thread. Mutable: the
     // const accessors (available/exited/worker) read the state under the

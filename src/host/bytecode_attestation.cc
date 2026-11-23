@@ -12,6 +12,9 @@
 
 #include "host/bytecode_attestation.h"
 
+#include "host/json_codec.h"
+#include "json_escape.h"
+
 #include <jansson.h>
 #include <openssl/evp.h>
 
@@ -37,36 +40,15 @@ void set_error(BytecodeAttestationResult& result, ErrorCode code, std::string pa
 }
 
 bool sha256_hex(std::span<const std::uint8_t> bytes, std::string* out) {
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_size = 0;
-    if (EVP_Digest(bytes.data(), bytes.size(), digest, &digest_size, EVP_sha256(), nullptr) != 1 ||
-        digest_size != 32) {
+    if (out == nullptr) {
         return false;
     }
-    static constexpr char kHex[] = "0123456789abcdef";
-    out->clear();
-    out->reserve(64);
-    for (unsigned int i = 0; i < digest_size; ++i) {
-        out->push_back(kHex[digest[i] >> 4]);
-        out->push_back(kHex[digest[i] & 0x0f]);
-    }
-    return true;
+    *out = sha256_raw_hex(bytes);
+    return !out->empty();
 }
 
-// RFC 6901 JSON Pointer escaping: ~ -> ~0 and / -> ~1.
-std::string escape_pointer_component(std::string_view component) {
-    std::string escaped;
-    escaped.reserve(component.size());
-    for (const char c : component) {
-        if (c == '~') {
-            escaped += "~0";
-        } else if (c == '/') {
-            escaped += "~1";
-        } else {
-            escaped += c;
-        }
-    }
-    return escaped;
+inline std::string escape_pointer_component(std::string_view component) {
+    return capsid::json_pointer_escape(component);
 }
 
 // Claim values must be exactly "sha256:" plus 64 lowercase hex digits.
@@ -98,25 +80,25 @@ struct ParsedClaims {
 // non-string values; every failure is kReject with an RFC 6901 pointer.
 bool parse_attestation_json(std::string_view json, ParsedClaims* claims,
                             BytecodeAttestationResult* error) {
-    if (json.size() > kMaxBytecodeAttestationBytes) {
-        set_error(*error, ErrorCode::kResourceLimit, "", "attestation exceeds the size limit");
+    const StrictJsonResult parsed =
+        parse_strict_json(json, kMaxBytecodeAttestationBytes, 64U, true);
+    if (!parsed.ok) {
+        ErrorCode code = ErrorCode::kInvalidJson;
+        if (parsed.error == StrictJsonError::kTooLarge) {
+            code = ErrorCode::kResourceLimit;
+        } else if (parsed.error == StrictJsonError::kDuplicateKey) {
+            code = ErrorCode::kDuplicateKey;
+        }
+        set_error(*error, code, "",
+                  code == ErrorCode::kResourceLimit
+                      ? "attestation exceeds the size limit"
+                      : (code == ErrorCode::kDuplicateKey ? "duplicate attestation field"
+                                                          : "invalid attestation JSON"));
         return false;
     }
-    json_error_t parse_error;
-    json_t* root = json_loadb(json.data(), json.size(), JSON_REJECT_DUPLICATES, &parse_error);
-    if (root == nullptr) {
-        const enum json_error_code parse_code = json_error_code(&parse_error);
-        set_error(*error,
-                  parse_code == json_error_duplicate_key ? ErrorCode::kDuplicateKey
-                                                         : ErrorCode::kInvalidJson,
-                  "",
-                  parse_code == json_error_duplicate_key ? "duplicate attestation field"
-                                                         : "invalid attestation JSON");
-        return false;
-    }
+    json_t* root = parsed.root.get();
     if (!json_is_object(root)) {
         set_error(*error, ErrorCode::kInvalidJson, "", "attestation must be a JSON object");
-        json_decref(root);
         return false;
     }
 

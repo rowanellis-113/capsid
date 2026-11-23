@@ -84,6 +84,11 @@ class ChannelIO {
     uint64_t send_reserved() const;
     size_t queued_messages() const { return ready_.size(); }
     const ChannelRegistry& registry() const { return registry_; }
+    bool idle() const {
+        return registry_.live_count() == 0 && registry_.retained_owner_count() == 0 &&
+               registry_.pending_dial_count() == 0 && assembly_.empty() && ready_.empty() &&
+               sending_.empty() && quarantined_.empty();
+    }
 
   private:
     struct Quota;

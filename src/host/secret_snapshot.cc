@@ -13,7 +13,8 @@
 
 #include "host/secret_snapshot.h"
 
-#include <openssl/evp.h>
+#include "host/json_codec.h"
+#include "json_escape.h"
 
 #include <algorithm>
 #include <cctype>
@@ -39,37 +40,8 @@ void set_error(SecretSnapshotCompileResult& result, ErrorCode code, std::string 
     result.error.message = std::move(message);
 }
 
-// RFC 6901 JSON Pointer escaping for dynamic member names.
-std::string escape_pointer_component(std::string_view component) {
-    std::string escaped;
-    escaped.reserve(component.size());
-    for (const char c : component) {
-        if (c == '~') {
-            escaped += "~0";
-        } else if (c == '/') {
-            escaped += "~1";
-        } else {
-            escaped += c;
-        }
-    }
-    return escaped;
-}
-
-std::string sha256_hex(std::span<const std::uint8_t> bytes) {
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_size = 0;
-    if (EVP_Digest(bytes.data(), bytes.size(), digest, &digest_size, EVP_sha256(), nullptr) != 1 ||
-        digest_size != 32) {
-        return {};
-    }
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string result = "sha256:";
-    result.reserve(71);
-    for (unsigned int i = 0; i < digest_size; ++i) {
-        result.push_back(kHex[digest[i] >> 4]);
-        result.push_back(kHex[digest[i] & 0x0f]);
-    }
-    return result;
+inline std::string escape_pointer_component(std::string_view component) {
+    return capsid::json_pointer_escape(component);
 }
 
 void append_length_prefixed(std::vector<std::uint8_t>& output, std::string_view value) {
@@ -208,19 +180,7 @@ bool host_allows_name(std::span<const std::string_view> patterns, std::string_vi
     return false;
 }
 
-// Minimal JSON string escaping for metadata fields (names are grammar-
-// restricted, but key IDs and revisions may contain quotes or backslashes).
-std::string json_escape(std::string_view value) {
-    std::string escaped;
-    escaped.reserve(value.size() + 2);
-    for (const char c : value) {
-        if (c == '"' || c == '\\') {
-            escaped.push_back('\\');
-        }
-        escaped.push_back(c);
-    }
-    return escaped;
-}
+using capsid::json_escape;
 
 } // namespace
 

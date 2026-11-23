@@ -27,8 +27,10 @@ namespace capsid::host {
 // ---- listener model (§9.2; wired into the data plane by PR-09) ---------
 
 struct ListenerRoutingConfig {
-    std::string mode;   // "path" | "subdomain" | "header"
-    std::string suffix; // header mode: the trusted request header
+    std::string mode;       // "path" | "subdomain" | "header" | "single"
+    std::string suffix;     // subdomain mode: ".apps.example.com"
+    std::string header;     // header mode: trusted header name (default "capsid-app")
+    std::string single_app; // single mode: single mounted App ID
 };
 
 struct ListenerLimitsConfig {
@@ -41,6 +43,7 @@ struct ListenerLimitsConfig {
     std::uint64_t header_timeout_ms = 0;      // 0 = no ceiling
     std::uint64_t body_idle_timeout_ms = 0;   // 0 = no ceiling
     std::uint64_t stream_idle_timeout_ms = 0; // 0 = no ceiling
+    std::uint64_t write_timeout_ms = 0;       // 0 = inherit stream_idle_timeout_ms
 };
 
 // Listener-level CORS (edge/trust boundary, like `trusted`): the listener

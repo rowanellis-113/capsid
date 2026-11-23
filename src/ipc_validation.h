@@ -88,6 +88,7 @@ class WorkerStartupState {
     bool bundle_is_trusted_bytecode() const { return bundle_is_trusted_bytecode_; }
     // Binding descriptors in arrival order; empty for zero-binding workers.
     const std::vector<WorkerBindingDescriptor>& bindings() const { return bindings_; }
+    void clear_sensitive_and_release();
 
   private:
     bool consume_load_binding(const protocol::Frame& frame, std::string* error);

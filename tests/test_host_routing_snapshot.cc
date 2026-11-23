@@ -9,9 +9,6 @@
 #include "host/routing_snapshot.h"
 #include "host/worker_event_source.h"
 
-#include <signal.h>
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdlib>
 #include <cstring>

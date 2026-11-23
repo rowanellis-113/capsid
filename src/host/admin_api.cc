@@ -4,6 +4,7 @@
 
 #include "host/metrics.h"
 #include "host/structured_log.h"
+#include "json_escape.h"
 
 #include <jansson.h>
 
@@ -114,42 +115,12 @@ AdminResponse json_response(unsigned status, const std::string& body) {
 
 AdminResponse error_response(unsigned status, const char* message) {
     std::string body = "{\"error\":\"";
-    body += message;
+    body += capsid::json_escape(message ? message : "");
     body += "\"}";
     return json_response(status, body);
 }
 
-std::string json_escape(const std::string& value) {
-    std::ostringstream out;
-    for (const char c : value) {
-        switch (c) {
-        case '"':
-            out << "\\\"";
-            break;
-        case '\\':
-            out << "\\\\";
-            break;
-        case '\n':
-            out << "\\n";
-            break;
-        case '\r':
-            out << "\\r";
-            break;
-        case '\t':
-            out << "\\t";
-            break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buffer[8];
-                std::snprintf(buffer, sizeof(buffer), "\\u%04x", c);
-                out << buffer;
-            } else {
-                out << c;
-            }
-        }
-    }
-    return out.str();
-}
+using capsid::json_escape;
 
 bool ascii_alnum(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');

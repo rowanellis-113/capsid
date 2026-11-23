@@ -16,15 +16,17 @@
 #include "host/artifact_safe_read.h"
 #include "host/config.h"
 #include "host/generation_identity.h"
+#include "host/json_codec.h"
 #include "host/managed_registry.h"
 #include "host/metrics.h"
 #include "host/secret_file_provider.h"
 #include "host/secret_snapshot.h"
 #include "host/structured_log.h"
+#include "host/worker_cgroup.h"
 #include "host/worker_event_source.h"
+#include "json_escape.h"
 
 #include <jansson.h>
-#include <openssl/evp.h>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -120,45 +122,7 @@ void refresh_log_dropped(MetricsRegistry* metrics, StructuredLog* log, const std
     }
 }
 
-std::string sha256_hex(const std::string& data) {
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_size = 0;
-    if (EVP_Digest(data.data(), data.size(), digest, &digest_size, EVP_sha256(), nullptr) != 1 ||
-        digest_size != 32) {
-        return "";
-    }
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(64);
-    for (unsigned int i = 0; i < digest_size; ++i) {
-        out.push_back(kHex[digest[i] >> 4]);
-        out.push_back(kHex[digest[i] & 0x0f]);
-    }
-    return out;
-}
-
-std::string json_escape(const std::string& value) {
-    std::ostringstream out;
-    for (const char c : value) {
-        switch (c) {
-        case '"':
-            out << "\\\"";
-            break;
-        case '\\':
-            out << "\\\\";
-            break;
-        case '\n':
-            out << "\\n";
-            break;
-        case '\r':
-            out << "\\r";
-            break;
-        default:
-            out << c;
-        }
-    }
-    return out.str();
-}
+using capsid::json_escape;
 
 bool write_file_at(int dir_fd, const char* name, const std::string& content, std::string* error) {
     // O_EXCL + O_NOFOLLOW: the caller creates a fresh file; an existing
@@ -301,23 +265,6 @@ bool prepare_managed_worker_config(const ManagedHostOptions& options,
     if (effective.request_timeout_ms != 0) {
         config.request_timeout_ms = effective.request_timeout_ms;
     }
-    // Effective resource/request/strict-sandbox controls reach the worker,
-    // each in its own Runtime field: jsHeap bounds the QuickJS heap,
-    // processAddressSpace bounds the process address space
-    // (process_memory_limit -> RLIMIT_AS in the worker), fileDescriptors
-    // bounds open descriptors, and maxInflightPerWorker bounds the
-    // concurrent request window. memoryMax is the memory permit for Host
-    // budget accounting and identity only; it never impersonates a worker
-    // field. Sanitizer builds are the one deliberate exception: RLIMIT_AS
-    // is fundamentally incompatible with ASan/TSan-instrumented workers (the
-    // shadow-memory reservation exhausts any finite address-space limit
-    // before READY), so the sanitizer build skips the forwarding while the
-    // Release build always enforces it; the relation the Runtime's HELLO
-    // validation would reject (process_memory_limit < js_heap_limit) is
-    // additionally enforced by the policy compiler before staging, so an
-    // invalid worker configuration can never start. The Host's
-    // strict-sandbox decision is applied verbatim (worker spawn fails
-    // closed when the platform cannot honor it).
     if (effective.js_heap_bytes > 0) {
         config.js_heap_limit = effective.js_heap_bytes;
     }
@@ -346,6 +293,13 @@ bool prepare_managed_worker_config(const ManagedHostOptions& options,
         limits.file_descriptors = static_cast<std::uint32_t>(effective.file_descriptors);
         config.resource_limits = &limits;
     }
+    if (!options.host_policy.isolation_cgroup_root.empty() && effective.memory_bytes > 0) {
+        // Hard wall only: never cgroup memory.high (direct reclaim stalls)
+        // and never overload RLIMIT_AS with worker.memoryMax.
+        limits.enabled_fields |= CAPSID_RESOURCE_LIMIT_CGROUP_MEMORY_MAX;
+        limits.cgroup_memory_max_bytes = effective.memory_bytes;
+        config.resource_limits = &limits;
+    }
     if (effective.requests_per_worker > 0) {
         if (effective.requests_per_worker >
             static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
@@ -355,7 +309,23 @@ bool prepare_managed_worker_config(const ManagedHostOptions& options,
         config.max_inflight_requests = static_cast<std::uint32_t>(effective.requests_per_worker);
     }
     config.strict_sandbox = effective.strict_sandbox ? 1 : 0;
+    if (effective.strict_sandbox) {
+        std::uint32_t required_mask = 0;
+        if (!parse_isolation_required_features(options.host_policy.isolation_required,
+                                               &required_mask, error)) {
+            return false;
+        }
+        config.sandbox_required_features |= required_mask;
+        if (!options.host_policy.isolation_cgroup_root.empty()) {
+            config.sandbox_required_features |= CAPSID_SANDBOX_FEATURE_CGROUP_V2;
+        }
+    }
     return true;
+}
+
+void destroy_unadopted_worker(capsid_worker* worker) {
+    capsid_worker_destroy(worker);
+    release_worker_cgroup(worker);
 }
 
 } // namespace
@@ -385,6 +355,14 @@ spawn_loaded_worker(const ManagedHostOptions& options, const std::vector<std::ui
         return nullptr;
     }
     runtime_policy.apply(&config);
+    std::shared_ptr<WorkerCgroupLease> cgroup_lease;
+    if (effective.strict_sandbox && !options.host_policy.isolation_cgroup_root.empty()) {
+        cgroup_lease = create_worker_cgroup(options.host_policy.isolation_cgroup_root, error);
+        if (!cgroup_lease) {
+            return nullptr;
+        }
+        config.sandbox_cgroup_path = cgroup_lease->path.c_str();
+    }
     if (expected_ready != nullptr) {
         *expected_ready = capsid::host::expected_worker_ready_proof(bindings, config);
     }
@@ -405,7 +383,7 @@ spawn_loaded_worker(const ManagedHostOptions& options, const std::vector<std::ui
                                                         effective.strict_sandbox ? 1 : 0);
     }
     if (!capsid::host::load_effective_bindings_into_worker(worker, bindings, error)) {
-        capsid_worker_destroy(worker);
+        destroy_unadopted_worker(worker);
         return nullptr;
     }
     capsid::host::WorkerEventSource event_source;
@@ -416,7 +394,7 @@ spawn_loaded_worker(const ManagedHostOptions& options, const std::vector<std::ui
                          : capsid_worker_load_bundle_named(worker, bundle.data(), bundle.size(),
                                                            source_name.c_str());
     if (load_result != CAPSID_OK) {
-        capsid_worker_destroy(worker);
+        destroy_unadopted_worker(worker);
         *error = "worker bundle load failed";
         return nullptr;
     }
@@ -424,9 +402,12 @@ spawn_loaded_worker(const ManagedHostOptions& options, const std::vector<std::ui
     // drain loop observes it on its own next flush.
     const capsid_result flush = capsid_worker_flush(worker);
     if (flush != CAPSID_OK && flush != CAPSID_WOULD_BLOCK) {
-        capsid_worker_destroy(worker);
+        destroy_unadopted_worker(worker);
         *error = "worker flush failed";
         return nullptr;
+    }
+    if (cgroup_lease) {
+        register_worker_cgroup(worker, std::move(cgroup_lease));
     }
     return worker;
 }
@@ -464,7 +445,7 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std:
     for (;;) {
         const capsid_result flush = capsid_worker_flush(out.worker);
         if (flush != CAPSID_OK && flush != CAPSID_WOULD_BLOCK) {
-            capsid_worker_destroy(out.worker);
+            destroy_unadopted_worker(out.worker);
             out.worker = nullptr;
             out.error = "worker flush failed";
             return out;
@@ -477,7 +458,7 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std:
                 WorkerEvent decoded;
                 std::string log_error;
                 if (!decode_worker_log_event(event, &decoded, &log_error)) {
-                    capsid_worker_destroy(out.worker);
+                    destroy_unadopted_worker(out.worker);
                     out.worker = nullptr;
                     out.error = "invalid worker log before READY";
                     return out;
@@ -497,7 +478,7 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std:
                         std::vector<std::uint8_t>(event.payload.data,
                                                   event.payload.data + event.payload.size),
                         options.runtime_compatibility_id, expected_ready, &ready_error)) {
-                    capsid_worker_destroy(out.worker);
+                    destroy_unadopted_worker(out.worker);
                     out.worker = nullptr;
                     out.error = ready_error;
                     emit_deploy_stage(options.metrics, "health", "fail", options.application);
@@ -517,13 +498,13 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std:
             if (event.type == CAPSID_EVENT_ERROR) {
                 const std::string detail(reinterpret_cast<const char*>(event.payload.data),
                                          event.payload.size);
-                capsid_worker_destroy(out.worker);
+                destroy_unadopted_worker(out.worker);
                 out.worker = nullptr;
                 out.error = detail.empty() ? "worker failed before READY" : detail;
                 return out;
             }
             if (event.type == CAPSID_EVENT_EXIT) {
-                capsid_worker_destroy(out.worker);
+                destroy_unadopted_worker(out.worker);
                 out.worker = nullptr;
                 out.error = "worker failed before READY";
                 return out;
@@ -531,7 +512,7 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std:
             continue;
         }
         if (result != CAPSID_WOULD_BLOCK) {
-            capsid_worker_destroy(out.worker);
+            destroy_unadopted_worker(out.worker);
             out.worker = nullptr;
             out.error = "worker event error";
             return out;
@@ -539,13 +520,13 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std:
         // The process-level stop signal aborts the handshake promptly: a
         // SIGTERM shutdown must not wait out the 15-second READY deadline.
         if (options.stop_requested != nullptr && options.stop_requested->load()) {
-            capsid_worker_destroy(out.worker);
+            destroy_unadopted_worker(out.worker);
             out.worker = nullptr;
             out.error = "worker READY interrupted";
             return out;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-            capsid_worker_destroy(out.worker);
+            destroy_unadopted_worker(out.worker);
             out.worker = nullptr;
             out.error = "worker READY timeout";
             return out;
@@ -629,7 +610,7 @@ WarmPoolResult warm_worker_pool(const ManagedHostOptions& options,
                                             generation, effective, env_values, bindings);
         if (!warm.ok) {
             for (capsid_worker* worker : out.workers) {
-                capsid_worker_destroy(worker);
+                destroy_unadopted_worker(worker);
             }
             out.workers.clear();
             out.error = warm.error;
@@ -655,7 +636,7 @@ void publish_pool(DeployOutcome* outcome, std::vector<capsid_worker*> workers) {
 // pool; the old active pool is never touched).
 void destroy_pool(const std::vector<capsid_worker*>& workers) {
     for (capsid_worker* worker : workers) {
-        capsid_worker_destroy(worker);
+        destroy_unadopted_worker(worker);
     }
 }
 
@@ -1556,14 +1537,58 @@ std::string host_policy_identity(const HostPolicy& host) {
     if (host.max_request_timeout_ms != 0) {
         out << ";requestTimeoutMaximum:" << host.max_request_timeout_ms;
     }
-    return sha256_hex(out.str());
+    if (host.max_js_heap_bytes != 0) {
+        out << ";maxHeap:" << host.max_js_heap_bytes;
+    }
+    if (host.max_file_descriptors != 0) {
+        out << ";maxFds:" << host.max_file_descriptors;
+    }
+    if (host.default_worker_memory_bytes != 0) {
+        out << ";defMem:" << host.default_worker_memory_bytes;
+    }
+    if (host.default_js_heap_bytes != 0) {
+        out << ";defHeap:" << host.default_js_heap_bytes;
+    }
+    if (host.default_file_descriptors != 0) {
+        out << ";defFds:" << host.default_file_descriptors;
+    }
+    if (host.default_requests_per_worker != 0) {
+        out << ";defRps:" << host.default_requests_per_worker;
+    }
+    if (host.default_queue_requests != 0) {
+        out << ";defQreq:" << host.default_queue_requests;
+    }
+    if (host.default_queue_header_bytes != 0) {
+        out << ";defQbytes:" << host.default_queue_header_bytes;
+    }
+    if (host.default_queue_timeout_ms != 0) {
+        out << ";defQtimeout:" << host.default_queue_timeout_ms;
+    }
+    if (host.default_max_streaming_inflight_per_worker != 0) {
+        out << ";defStreaming:" << host.default_max_streaming_inflight_per_worker;
+    }
+    if (host.default_stream_idle_timeout_ms != 0) {
+        out << ";defIdle:" << host.default_stream_idle_timeout_ms;
+    }
+    if (host.default_write_timeout_ms != 0) {
+        out << ";defWtimeout:" << host.default_write_timeout_ms;
+    }
+    if (!host.isolation_required.empty()) {
+        std::set<std::string> iso_req(host.isolation_required.begin(),
+                                      host.isolation_required.end());
+        for (const std::string& feat : iso_req) {
+            out << ";isoReq:" << feat;
+        }
+    }
+    if (!host.isolation_cgroup_root.empty()) {
+        out << ";cgroupRoot:" << host.isolation_cgroup_root;
+    }
+    return sha256_raw_hex(out.str());
 }
 
 // The source bundle file name from the committed capsid.json ("entry").
-// The source artifact's frozen sourceName is derived from this trusted
-// document (never from the mutable artifact record), so recovery can
-// re-derive the name and compare it against the committed record instead
-// of trusting artifact.json verbatim.
+// When omitted on a valid JSON object (e.g., capsid/app-v2 defaults),
+// defaults to "bundle.mjs".
 bool config_entry_name(const std::string& capsid_json, std::string* out) {
     json_error_t parse_error;
     json_t* root =
@@ -1575,6 +1600,11 @@ bool config_entry_name(const std::string& capsid_json, std::string* out) {
         return false;
     }
     json_t* entry = json_object_get(root, "entry");
+    if (entry == nullptr) {
+        *out = "bundle.mjs";
+        json_decref(root);
+        return true;
+    }
     const bool ok =
         json_is_string(entry) && !json_is_null(entry) && json_string_value(entry)[0] != '\0';
     if (ok) {
@@ -1732,6 +1762,116 @@ bool parse_source_name_structure(const std::string& application, const std::stri
 // policy + secret compilation, generation identity). Deploy stages every
 // field into the committed generation snapshot; recovery rebuilds from that
 // snapshot alone and never re-reads the upload boundary.
+struct EnvPolicyCompileResult {
+    bool ok = false;
+    std::string error;
+    SecretSnapshotCompileResult snapshot;
+    PolicyCompileResult compiled;
+    std::vector<std::pair<std::string, std::string>> env_values;
+};
+
+EnvPolicyCompileResult compile_env_and_policy(
+    const ManagedHostOptions& options, const AppRequest& app_request,
+    const std::vector<SecretFileOutcome>& outcomes,
+    std::function<bool(const SecretSnapshotCompileResult&, std::string*)> pre_policy_check = {}) {
+    EnvPolicyCompileResult out;
+    std::vector<std::string_view> host_names;
+    for (const std::string& pattern : options.host_policy.env_patterns) {
+        host_names.push_back(pattern);
+    }
+    std::vector<EnvironmentRequest> requests;
+    for (const AppRequest::EnvRequest& request : app_request.env) {
+        EnvironmentRequest parsed;
+        parsed.name = request.name;
+        if (request.from_secret) {
+            parsed.value_from = request.secret_key_id;
+        } else {
+            parsed.value = request.literal;
+        }
+        requests.push_back(parsed);
+    }
+    std::vector<ResolvedSecret> resolved;
+    std::size_t secret_index = 0;
+    for (const AppRequest::EnvRequest& request : app_request.env) {
+        if (!request.from_secret) {
+            continue;
+        }
+        if (secret_index >= outcomes.size() || !outcomes[secret_index].error.empty()) {
+            out.error = "secret resolution failed";
+            return out;
+        }
+        const SecretFileOutcome& resolved_outcome = outcomes[secret_index];
+        resolved.push_back(ResolvedSecret{
+            request.secret_key_id,
+            std::string_view(reinterpret_cast<const char*>(resolved_outcome.value.data()),
+                             resolved_outcome.value.size()),
+            resolved_outcome.revision,
+        });
+        secret_index += 1;
+    }
+    bool app_requests_env_module = false;
+    for (const std::string& module : app_request.modules) {
+        if (module == "capsid:env") {
+            app_requests_env_module = true;
+            break;
+        }
+    }
+    bool host_allows_env_module = false;
+    for (const std::string& module : options.host_policy.module_allowlist) {
+        if (module == "capsid:env") {
+            host_allows_env_module = true;
+            break;
+        }
+    }
+    SecretSnapshotCompileInput snapshot_input;
+    snapshot_input.application_id = options.application;
+    snapshot_input.host_allows_env_module = host_allows_env_module;
+    snapshot_input.app_requests_env_module = app_requests_env_module;
+    snapshot_input.host_environment_names = host_names;
+    snapshot_input.requests = requests;
+    snapshot_input.resolved_secrets = resolved;
+    out.snapshot = compile_secret_snapshot(snapshot_input);
+    if (!out.snapshot.ok) {
+        out.error = "secret snapshot rejected at " + out.snapshot.error.path + ": " +
+                    out.snapshot.error.message;
+        return out;
+    }
+    if (pre_policy_check && !pre_policy_check(out.snapshot, &out.error)) {
+        return out;
+    }
+    for (const EnvironmentSnapshotEntry& entry : out.snapshot.snapshot.entries()) {
+        out.env_values.push_back({entry.name, entry.value});
+    }
+    // The policy compiler requires one resolved entry per env request,
+    // literal or secret; build them from the compiled snapshot metadata.
+    // Literal values are recovered from the request itself.
+    std::vector<EffectiveEnvEntry> resolved_secrets;
+    for (const EnvironmentSnapshotMetadata& meta : out.snapshot.snapshot.metadata()) {
+        EffectiveEnvEntry entry;
+        entry.name = meta.name;
+        if (meta.source == EnvironmentValueSource::kSecret) {
+            entry.from_secret = true;
+            entry.secret_key_id = meta.secret_key_id;
+            entry.secret_revision = meta.opaque_revision;
+        } else {
+            for (const AppRequest::EnvRequest& request : app_request.env) {
+                if (request.name == meta.name && !request.from_secret) {
+                    entry.literal = request.literal;
+                    break;
+                }
+            }
+        }
+        resolved_secrets.push_back(std::move(entry));
+    }
+    out.compiled = compile_policy(options.host_policy, app_request, resolved_secrets);
+    if (!out.compiled.ok) {
+        out.error = out.compiled.error;
+        return out;
+    }
+    out.ok = true;
+    return out;
+}
+
 struct PreparedDeployment {
     bool ok = false;
     std::string error;
@@ -1803,7 +1943,7 @@ PreparedDeployment prepare_deployment(ManagedHostOptions* options, const std::st
         // The bytecode's module name (the compile filename) is the frozen
         // sourceName the attestation claims; the verification and the
         // trusted load both use it.
-        source_name = "file://" + options->application + "/" + version + "/bundle.qjsb";
+        source_name = derive_source_name(options->application, version, {}, true);
         attestation_json_text.assign(artifacts.artifacts.attestation.bytes.begin(),
                                      artifacts.artifacts.attestation.bytes.end());
         capsid::host::BytecodeAttestationInput input;
@@ -1825,7 +1965,7 @@ PreparedDeployment prepare_deployment(ManagedHostOptions* options, const std::st
             capsid::host::verify_bytecode_attestation(input);
         if (verified.selection == capsid::host::BytecodeArtifactSelection::kTrustedBytecode) {
             selected = SelectedArtifactKind::kTrustedBytecode;
-            attestation_digest = sha256_hex(attestation_json_text);
+            attestation_digest = sha256_raw_hex(attestation_json_text);
         } else if (verified.selection == capsid::host::BytecodeArtifactSelection::kSource &&
                    verified.code ==
                        capsid::host::BytecodeAttestationErrorCode::kCompatibilityMismatch) {
@@ -1834,7 +1974,7 @@ PreparedDeployment prepare_deployment(ManagedHostOptions* options, const std::st
             // in the generation identity: a fallback must not collapse to
             // the identity of an otherwise identical source-only deploy.
             selected = SelectedArtifactKind::kSource;
-            attestation_digest = sha256_hex(attestation_json_text);
+            attestation_digest = sha256_raw_hex(attestation_json_text);
             // §13:682: the committed artifact record names the fallback
             // reason next to the verified attestation and the actual
             // selected artifact.
@@ -1887,11 +2027,16 @@ PreparedDeployment prepare_deployment(ManagedHostOptions* options, const std::st
     // their key ids join the provider read below.
     std::vector<capsid::host::AppBindingRequest> binding_requests;
     std::vector<capsid::host::BindingSecretRef> binding_secret_refs;
-    if (!options->bindings_root.empty()) {
+    {
         std::string binding_parse_error;
         if (!capsid::host::parse_app_bindings(artifacts.artifacts.capsid_json.bytes,
                                               &binding_requests, &binding_parse_error)) {
             fail(binding_parse_error);
+            return prepared;
+        }
+        if (!binding_requests.empty() && options->bindings_root.empty() &&
+            !options->binding_registry_loaded) {
+            fail("bindings requested by app but bindingsRoot is not configured");
             return prepared;
         }
         for (const capsid::host::AppBindingRequest& request : binding_requests) {
@@ -1939,98 +2084,17 @@ PreparedDeployment prepare_deployment(ManagedHostOptions* options, const std::st
         outcomes = read_secret_files(app_secret_fd, key_ids);
         close(app_secret_fd);
     }
-    std::vector<std::string_view> host_names;
-    for (const std::string& pattern : options->host_policy.env_patterns) {
-        host_names.push_back(pattern);
-    }
-    std::vector<EnvironmentRequest> requests;
-    for (const AppRequest::EnvRequest& request : app_request.env) {
-        EnvironmentRequest parsed;
-        parsed.name = request.name;
-        if (request.from_secret) {
-            parsed.value_from = request.secret_key_id;
-        } else {
-            parsed.value = request.literal;
-        }
-        requests.push_back(parsed);
-    }
-    std::vector<ResolvedSecret> resolved;
-    std::size_t secret_index = 0;
-    for (const AppRequest::EnvRequest& request : app_request.env) {
-        if (!request.from_secret) {
-            continue;
-        }
-        if (secret_index >= outcomes.size() || !outcomes[secret_index].error.empty()) {
-            fail("secret resolution failed");
-            return prepared;
-        }
-        const SecretFileOutcome& outcome = outcomes[secret_index];
-        resolved.push_back(ResolvedSecret{
-            request.secret_key_id,
-            std::string_view(reinterpret_cast<const char*>(outcome.value.data()),
-                             outcome.value.size()),
-            outcome.revision,
-        });
-        secret_index += 1;
-    }
-    bool app_requests_env_module = false;
-    for (const std::string& module : app_request.modules) {
-        if (module == "capsid:env") {
-            app_requests_env_module = true;
-            break;
-        }
-    }
-    bool host_allows_env_module = false;
-    for (const std::string& module : options->host_policy.module_allowlist) {
-        if (module == "capsid:env") {
-            host_allows_env_module = true;
-            break;
-        }
-    }
-    SecretSnapshotCompileInput snapshot_input;
-    snapshot_input.application_id = options->application;
-    snapshot_input.host_allows_env_module = host_allows_env_module;
-    snapshot_input.app_requests_env_module = app_requests_env_module;
-    snapshot_input.host_environment_names = host_names;
-    snapshot_input.requests = requests;
-    snapshot_input.resolved_secrets = resolved;
-    const SecretSnapshotCompileResult snapshot = compile_secret_snapshot(snapshot_input);
-    if (!snapshot.ok) {
-        fail("secret snapshot rejected at " + snapshot.error.path + ": " + snapshot.error.message);
+    const EnvPolicyCompileResult env_policy =
+        compile_env_and_policy(*options, app_request, outcomes);
+    if (!env_policy.ok) {
+        fail(env_policy.error);
         return prepared;
     }
-    const std::string snapshot_revision = snapshot.snapshot.secret_revision();
-    for (const EnvironmentSnapshotEntry& entry : snapshot.snapshot.entries()) {
-        prepared.env_values.push_back({entry.name, entry.value});
-    }
-    // The policy compiler requires one resolved entry per env request,
-    // literal or secret; build them from the compiled snapshot metadata.
-    // Literal values are recovered from the request itself.
-    std::vector<EffectiveEnvEntry> resolved_secrets;
-    for (const EnvironmentSnapshotMetadata& meta : snapshot.snapshot.metadata()) {
-        EffectiveEnvEntry resolved;
-        resolved.name = meta.name;
-        if (meta.source == EnvironmentValueSource::kSecret) {
-            resolved.from_secret = true;
-            resolved.secret_key_id = meta.secret_key_id;
-            resolved.secret_revision = meta.opaque_revision;
-        } else {
-            for (const AppRequest::EnvRequest& request : app_request.env) {
-                if (request.name == meta.name && !request.from_secret) {
-                    resolved.literal = request.literal;
-                    break;
-                }
-            }
-        }
-        resolved_secrets.push_back(std::move(resolved));
-    }
-    const PolicyCompileResult compiled =
-        compile_policy(options->host_policy, app_request, resolved_secrets);
-    if (!compiled.ok) {
-        fail(compiled.error);
-        return prepared;
-    }
-    prepared.effective = compiled.effective;
+    const std::string snapshot_revision = env_policy.snapshot.snapshot.secret_revision();
+    prepared.env_values = env_policy.env_values;
+    prepared.effective = env_policy.compiled.effective;
+    const PolicyCompileResult& compiled = env_policy.compiled;
+    const SecretSnapshotCompileResult& snapshot = env_policy.snapshot;
 
     // ---- 5b. Binding v1: compile the effective binding set from the
     // committed snapshot material. The digest joins the Generation
@@ -2101,8 +2165,9 @@ PreparedDeployment prepare_deployment(ManagedHostOptions* options, const std::st
     // ---- 6. real generation identity (no placeholders) ----
     GenerationIdentityInput identity;
     identity.application_id = options->application;
-    identity.source_digest = sha256_hex(std::string(artifacts.artifacts.bundle.bytes.begin(),
-                                                    artifacts.artifacts.bundle.bytes.end()));
+    identity.source_digest = sha256_raw_hex(
+        std::string_view(reinterpret_cast<const char*>(artifacts.artifacts.bundle.bytes.data()),
+                         artifacts.artifacts.bundle.bytes.size()));
     identity.bytecode_attestation_digest = attestation_digest;
     identity.selected_artifact = selected;
     identity.normalized_app_config_digest = compiled.effective.app_config_digest;
@@ -2184,7 +2249,8 @@ struct ValidatedGeneration {
 // rejected, while the sharing scenarios stay valid.
 ValidatedGeneration validate_committed_generation(int app_state_fd,
                                                   const ManagedHostOptions& options,
-                                                  const std::string& generation) {
+                                                  const std::string& generation,
+                                                  const std::string& unmapped_version_hint = {}) {
     ValidatedGeneration validated;
     const auto fail = [&](const std::string& message) {
         validated.ok = false;
@@ -2324,7 +2390,8 @@ ValidatedGeneration validate_committed_generation(int app_state_fd,
         fail("cannot read version mappings");
         return validated;
     }
-    if (mapped_versions.find(embedded_version) == mapped_versions.end()) {
+    if (mapped_versions.find(embedded_version) == mapped_versions.end() &&
+        (unmapped_version_hint.empty() || embedded_version != unmapped_version_hint)) {
         fail("committed source name mismatch");
         return validated;
     }
@@ -2378,18 +2445,18 @@ ValidatedGeneration validate_committed_generation(int app_state_fd,
             capsid::host::verify_bytecode_attestation(input);
         if (selected == SelectedArtifactKind::kTrustedBytecode) {
             if (verified.selection != capsid::host::BytecodeArtifactSelection::kTrustedBytecode ||
-                sha256_hex(bundle_bin) != sha256_hex(bytecode_bin)) {
+                sha256_raw_hex(bundle_bin) != sha256_raw_hex(bytecode_bin)) {
                 fail("committed trusted generation failed re-verification");
                 return validated;
             }
-            if (sha256_hex(attestation_json) != snapshot_attestation_digest) {
+            if (sha256_raw_hex(attestation_json) != snapshot_attestation_digest) {
                 fail("committed attestation digest mismatch");
                 return validated;
             }
         } else if (verified.selection != capsid::host::BytecodeArtifactSelection::kSource ||
                    verified.code !=
                        capsid::host::BytecodeAttestationErrorCode::kCompatibilityMismatch ||
-                   sha256_hex(attestation_json) != snapshot_attestation_digest) {
+                   sha256_raw_hex(attestation_json) != snapshot_attestation_digest) {
             fail("committed fallback generation failed re-verification");
             return validated;
         }
@@ -2473,105 +2540,25 @@ ValidatedGeneration validate_committed_generation(int app_state_fd,
             }
         }
     }
-    std::vector<std::string_view> host_names;
-    for (const std::string& pattern : options.host_policy.env_patterns) {
-        host_names.push_back(pattern);
-    }
-    std::vector<EnvironmentRequest> requests;
-    for (const AppRequest::EnvRequest& request : app_request.env) {
-        EnvironmentRequest parsed;
-        parsed.name = request.name;
-        if (request.from_secret) {
-            parsed.value_from = request.secret_key_id;
-        } else {
-            parsed.value = request.literal;
-        }
-        requests.push_back(parsed);
-    }
-    std::vector<ResolvedSecret> resolved;
-    std::size_t secret_index = 0;
-    for (const AppRequest::EnvRequest& request : app_request.env) {
-        if (!request.from_secret) {
-            continue;
-        }
-        if (secret_index >= outcomes.size() || !outcomes[secret_index].error.empty()) {
-            fail("secret resolution failed");
-            return validated;
-        }
-        const SecretFileOutcome& resolved_outcome = outcomes[secret_index];
-        resolved.push_back(ResolvedSecret{
-            request.secret_key_id,
-            std::string_view(reinterpret_cast<const char*>(resolved_outcome.value.data()),
-                             resolved_outcome.value.size()),
-            resolved_outcome.revision,
-        });
-        secret_index += 1;
-    }
-    bool app_requests_env_module = false;
-    for (const std::string& module : app_request.modules) {
-        if (module == "capsid:env") {
-            app_requests_env_module = true;
-            break;
-        }
-    }
-    bool host_allows_env_module = false;
-    for (const std::string& module : options.host_policy.module_allowlist) {
-        if (module == "capsid:env") {
-            host_allows_env_module = true;
-            break;
-        }
-    }
-    SecretSnapshotCompileInput snapshot_input;
-    snapshot_input.application_id = options.application;
-    snapshot_input.host_allows_env_module = host_allows_env_module;
-    snapshot_input.app_requests_env_module = app_requests_env_module;
-    snapshot_input.host_environment_names = host_names;
-    snapshot_input.requests = requests;
-    snapshot_input.resolved_secrets = resolved;
-    const SecretSnapshotCompileResult snapshot = compile_secret_snapshot(snapshot_input);
-    if (!snapshot.ok) {
-        fail("secret snapshot rejected at " + snapshot.error.path + ": " + snapshot.error.message);
-        return validated;
-    }
-    // 9. The committed env metadata must match the recomputed snapshot
-    // metadata (names, sources, key ids, revisions). The committed
-    // generation carries no values, so this document is the record of what
-    // the provider resolved at commit time.
-    std::vector<EnvironmentSnapshotMetadata> committed_metadata;
-    if (!parse_env_metadata(env_json, &committed_metadata, &error)) {
-        fail(error);
-        return validated;
-    }
-    if (!env_metadata_equal(snapshot.snapshot.metadata(), committed_metadata)) {
-        fail("committed environment metadata mismatch");
-        return validated;
-    }
-    // 10. Recompile the effective policy under the CURRENT Host policy and
-    // require it to match the committed effective.json byte for byte.
-    std::vector<EffectiveEnvEntry> resolved_secrets;
-    for (const EnvironmentSnapshotMetadata& meta : snapshot.snapshot.metadata()) {
-        EffectiveEnvEntry resolved;
-        resolved.name = meta.name;
-        if (meta.source == EnvironmentValueSource::kSecret) {
-            resolved.from_secret = true;
-            resolved.secret_key_id = meta.secret_key_id;
-            resolved.secret_revision = meta.opaque_revision;
-        } else {
-            for (const AppRequest::EnvRequest& request : app_request.env) {
-                if (request.name == meta.name && !request.from_secret) {
-                    resolved.literal = request.literal;
-                    break;
-                }
+    EnvPolicyCompileResult env_policy = compile_env_and_policy(
+        options, app_request, outcomes,
+        [&env_json](const SecretSnapshotCompileResult& compiled_snapshot, std::string* err) {
+            std::vector<EnvironmentSnapshotMetadata> committed_metadata;
+            if (!parse_env_metadata(env_json, &committed_metadata, err)) {
+                return false;
             }
-        }
-        resolved_secrets.push_back(std::move(resolved));
-    }
-    const PolicyCompileResult compiled =
-        compile_policy(options.host_policy, app_request, resolved_secrets);
-    if (!compiled.ok) {
-        fail(compiled.error);
+            if (!env_metadata_equal(compiled_snapshot.snapshot.metadata(), committed_metadata)) {
+                *err = "committed environment metadata mismatch";
+                return false;
+            }
+            return true;
+        });
+    if (!env_policy.ok) {
+        fail(env_policy.error);
         return validated;
     }
+    PolicyCompileResult& compiled = env_policy.compiled;
+    const SecretSnapshotCompileResult& snapshot = env_policy.snapshot;
     if (compiled.effective.effective_json != effective_json) {
         fail("committed effective config mismatch");
         return validated;
@@ -2581,7 +2568,7 @@ ValidatedGeneration validate_committed_generation(int app_state_fd,
     // digest.
     GenerationIdentityInput identity;
     identity.application_id = options.application;
-    identity.source_digest = sha256_hex(source_bin);
+    identity.source_digest = sha256_raw_hex(source_bin);
     identity.bytecode_attestation_digest = snapshot_attestation_digest;
     identity.selected_artifact = selected;
     identity.normalized_app_config_digest = compiled.effective.app_config_digest;
@@ -2611,7 +2598,7 @@ ValidatedGeneration validate_committed_generation(int app_state_fd,
     // bundle.bin is caught here); for a trusted generation the attestation
     // re-verification above bound bundle.bin to the attested bytecode.
     if (selected == SelectedArtifactKind::kSource &&
-        sha256_hex(bundle_bin) != sha256_hex(source_bin)) {
+        sha256_raw_hex(bundle_bin) != sha256_raw_hex(source_bin)) {
         fail("committed bundle tampered");
         return validated;
     }
@@ -2620,11 +2607,7 @@ ValidatedGeneration validate_committed_generation(int app_state_fd,
     validated.source_name = derived_source_name;
     validated.bundle_bin = std::move(bundle_bin);
     validated.effective = std::move(compiled.effective);
-    // The env values come from the recomputed snapshot (the current
-    // provider), never from committed metadata.
-    for (const EnvironmentSnapshotEntry& entry : snapshot.snapshot.entries()) {
-        validated.env_values.push_back({entry.name, entry.value});
-    }
+    validated.env_values = std::move(env_policy.env_values);
     return validated;
 }
 
@@ -2781,6 +2764,7 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
         // the outcome so the data plane can adopt a pool in place.
         outcome.version = version;
         outcome.generation_digest = generation_digest;
+        outcome.effective = validated.effective;
         outcome.generation_factory = make_generation_factory(
             *options, bundle, validated.selected == SelectedArtifactKind::kTrustedBytecode,
             validated.source_name, validated.effective, validated.env_values, validated.bindings);
@@ -2894,8 +2878,8 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
                 // operation is allowed to share it (the shared validator
                 // binds the sourceName segment to the mapped versions).
                 shared_generation = true;
-                const ValidatedGeneration shared =
-                    validate_committed_generation(app_state_fd, *options, generation_digest);
+                const ValidatedGeneration shared = validate_committed_generation(
+                    app_state_fd, *options, generation_digest, version);
                 shared_ok = shared.ok;
                 if (!shared.ok) {
                     error = "cannot share an invalid generation";
@@ -2998,6 +2982,7 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
     // the outcome so the data plane can adopt a pool in place.
     outcome.version = version;
     outcome.generation_digest = generation_digest;
+    outcome.effective = effective;
     outcome.generation_factory = make_generation_factory(
         *options, bundle_bytes, selected == SelectedArtifactKind::kTrustedBytecode, source_name,
         effective, env_values, prepared.bindings);
@@ -3433,6 +3418,7 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
         status->error = outcome.error;
         return outcome;
     }
+    outcome.recovery_action = recovered.action;
     if (recovered.action != ActiveStateRecoveryAction::kActivate) {
         // No active App, or retired/quarantined: do not start a worker.
         outcome.ok = true;
@@ -3498,6 +3484,7 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
     // the outcome so the data plane can adopt a pool in place.
     outcome.version = recovered.document.version;
     outcome.generation_digest = active_generation;
+    outcome.effective = validated.effective;
     outcome.generation_factory = make_generation_factory(
         *options, bundle, validated.selected == SelectedArtifactKind::kTrustedBytecode,
         validated.source_name, validated.effective, validated.env_values, validated.bindings);

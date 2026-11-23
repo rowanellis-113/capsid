@@ -20,6 +20,7 @@ enum class RequestRoutingMode {
     kSubdomain,
     kPath,
     kHeader,
+    kSingle,
 };
 
 struct RequestRoutingPolicy {
@@ -28,8 +29,13 @@ struct RequestRoutingPolicy {
     // Required only by kSubdomain. It has a leading dot, contains no port,
     // and names the exact DNS suffix (for example, ".apps.example.com").
     std::string_view subdomain_suffix;
-    // Required only by kPath/kHeader. It is independent of the request Host.
+    // Required by kPath/kHeader; optional on kSingle (empty falls back to
+    // the validated request Host header).
     std::string_view public_authority;
+    // Required only by kSingle.
+    std::string_view single_application;
+    // Header routing field name (case-insensitive, default "capsid-app").
+    std::string_view routing_header = "capsid-app";
     // The listener adapter sets this only after its Unix/mTLS/source trust
     // boundary succeeds. kHeader fails closed when it is false.
     bool trusted_header_routing = false;

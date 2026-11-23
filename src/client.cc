@@ -692,6 +692,37 @@ void rollback_cgroup_settings(int directory, std::vector<CgroupSetting>* setting
     }
 }
 
+bool cgroup_value_matches(const std::string& name, const std::string& desired,
+                          const std::string& actual) {
+    if (actual == desired) {
+        return true;
+    }
+    if (name != "memory.max" && name != "memory.high" && name != "memory.swap.max") {
+        return false;
+    }
+    if (desired == "max" || actual == "max" || desired.empty() || actual.empty()) {
+        return false;
+    }
+    char* desired_end = nullptr;
+    char* actual_end = nullptr;
+    errno = 0;
+    const unsigned long long desired_val = std::strtoull(desired.c_str(), &desired_end, 10);
+    if (errno != 0 || desired_end == desired.c_str() || *desired_end != '\0') {
+        return false;
+    }
+    const unsigned long long actual_val = std::strtoull(actual.c_str(), &actual_end, 10);
+    if (errno != 0 || actual_end == actual.c_str() || *actual_end != '\0') {
+        return false;
+    }
+    if (actual_val == 0 || actual_val > desired_val) {
+        return false;
+    }
+    const long page_size = sysconf(_SC_PAGESIZE);
+    const unsigned long long page_bytes =
+        page_size > 0 ? static_cast<unsigned long long>(page_size) : 4096ULL;
+    return (desired_val - actual_val) < page_bytes;
+}
+
 bool configure_and_attach_cgroup_v2(pid_t pid, const char* path,
                                     const capsid_resource_limits& limits) {
     const int directory = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -756,7 +787,7 @@ bool configure_and_attach_cgroup_v2(pid_t pid, const char* path,
         }
         std::string actual;
         const bool read_back = cgroup_read_at(directory, it->name.c_str(), &actual);
-        if (!read_back || actual != it->desired) {
+        if (!read_back || !cgroup_value_matches(it->name, it->desired, actual)) {
             const int failure = read_back ? EIO : errno;
             rollback_cgroup_settings(directory, &settings);
             close(directory);
@@ -3303,108 +3334,116 @@ capsid_result capsid_worker_request_memory_metrics(capsid_worker* worker) {
         "capsid_worker_request_memory_metrics: internal error");
 }
 
-capsid_result capsid_worker_flush(capsid_worker* worker) {
-    return capsid::abi::guard_result(
-        [&]() -> capsid_result {
-            if (!worker || worker->closed) {
-                return CAPSID_CLOSED;
-            }
-            const auto clock_result = advance_channel_clock(worker);
-            if (clock_result != CAPSID_OK)
-                return clock_result;
-            if (worker->ipc_metrics_enabled) {
-                worker->ipc_metrics.flush_calls.fetch_add(1, std::memory_order_relaxed);
-            }
-        // Total EAGAIN retry window for this flush call: once the first
-        // WOULD_BLOCK appears, all subsequent EAGAIN waits share one deadline
-        // instead of resetting a fresh per-poll timeout each time.
+namespace {
+
+capsid_result flush_worker_outbound(capsid_worker* worker, bool allow_poll_wait) {
+    if (!worker || worker->closed) {
+        return CAPSID_CLOSED;
+    }
+    const auto clock_result = advance_channel_clock(worker);
+    if (clock_result != CAPSID_OK)
+        return clock_result;
+    if (worker->ipc_metrics_enabled) {
+        worker->ipc_metrics.flush_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    // Total EAGAIN retry window for this flush call: once the first
+    // WOULD_BLOCK appears, all subsequent EAGAIN waits share one deadline
+    // instead of resetting a fresh per-poll timeout each time.
 #if !defined(_WIN32)
-            std::chrono::steady_clock::time_point eagain_poll_deadline{};
+    std::chrono::steady_clock::time_point eagain_poll_deadline{};
 #endif
-            while (worker->write_offset < worker->write_buffer.size()) {
-                const uint8_t* data = &worker->write_buffer[worker->write_offset];
-                const size_t size = worker->write_buffer.size() - worker->write_offset;
-                if (worker->ipc_metrics_enabled) {
-                    worker->ipc_metrics.socket_write_calls.fetch_add(1, std::memory_order_relaxed);
-                }
-                const ssize_t written = write_socket(worker->fd, data, size);
-                if (written > 0) {
-                    if (worker->ipc_metrics_enabled) {
-                        worker->ipc_metrics.socket_write_bytes.fetch_add(
-                            static_cast<uint64_t>(written), std::memory_order_relaxed);
-                    }
-                    worker->write_offset += static_cast<size_t>(written);
-                    continue;
-                }
-                if (written < 0 && errno == EINTR) {
-                    continue;
-                }
-                if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    if (worker->ipc_metrics_enabled) {
-                        worker->ipc_metrics.socket_write_eagain.fetch_add(
-                            1, std::memory_order_relaxed);
-                    }
+    while (worker->write_offset < worker->write_buffer.size()) {
+        const uint8_t* data = &worker->write_buffer[worker->write_offset];
+        const size_t size = worker->write_buffer.size() - worker->write_offset;
+        if (worker->ipc_metrics_enabled) {
+            worker->ipc_metrics.socket_write_calls.fetch_add(1, std::memory_order_relaxed);
+        }
+        const ssize_t written = write_socket(worker->fd, data, size);
+        if (written > 0) {
+            if (worker->ipc_metrics_enabled) {
+                worker->ipc_metrics.socket_write_bytes.fetch_add(static_cast<uint64_t>(written),
+                                                                 std::memory_order_relaxed);
+            }
+            worker->write_offset += static_cast<size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (worker->ipc_metrics_enabled) {
+                worker->ipc_metrics.socket_write_eagain.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (!allow_poll_wait) {
+                return CAPSID_WOULD_BLOCK;
+            }
 #if !defined(_WIN32)
-                    // A bundle larger than the socket send buffer blocks the first
-                    // flush: the peer drains asynchronously, so retry on writability
-                    // for a bounded total window instead of failing the spawn
-                    // outright. The worker never stops reading until it dies; only a
-                    // dead peer (or a flush stuck for the whole window) reaches
-                    // WOULD_BLOCK.
-                    static constexpr int kFlushPollTotalTimeoutMs = 5000;
-                    if (eagain_poll_deadline == std::chrono::steady_clock::time_point{}) {
-                        eagain_poll_deadline = std::chrono::steady_clock::now() +
-                                               std::chrono::milliseconds(kFlushPollTotalTimeoutMs);
-                    }
-                    bool writable_ready = false;
-                    for (;;) {
-                        const auto remaining_ms =
-                            std::chrono::duration_cast<std::chrono::milliseconds>(
-                                eagain_poll_deadline - std::chrono::steady_clock::now())
-                                .count();
-                        if (remaining_ms <= 0) {
-                            break;
-                        }
-                        struct pollfd writable = {worker->fd, POLLOUT, 0};
-                        int poll_result;
-                        do {
-                            poll_result = poll(&writable, 1, static_cast<int>(remaining_ms));
-                        } while (poll_result < 0 && errno == EINTR);
-                        if (poll_result <= 0) {
-                            break;
-                        }
-                        // POLLOUT means the outer write loop may retry the write;
-                        // POLLERR/POLLHUP also fall through to write() so it
-                        // observes the dead peer (EPIPE/ECONNRESET) and the
-                        // closed-path below records the real failure instead of a
-                        // misleading WOULD_BLOCK.
-                        if (writable.revents & (POLLOUT | POLLERR | POLLHUP)) {
-                            writable_ready = true;
-                            break;
-                        }
-                    }
-                    if (!writable_ready) {
-                        return CAPSID_WOULD_BLOCK;
-                    }
+            // A bundle larger than the socket send buffer blocks the first
+            // flush: the peer drains asynchronously, so retry on writability
+            // for a bounded total window instead of failing the spawn
+            // outright. The worker never stops reading until it dies; only a
+            // dead peer (or a flush stuck for the whole window) reaches
+            // WOULD_BLOCK.
+            static constexpr int kFlushPollTotalTimeoutMs = 5000;
+            if (eagain_poll_deadline == std::chrono::steady_clock::time_point{}) {
+                eagain_poll_deadline = std::chrono::steady_clock::now() +
+                                       std::chrono::milliseconds(kFlushPollTotalTimeoutMs);
+            }
+            bool writable_ready = false;
+            for (;;) {
+                const auto remaining_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        eagain_poll_deadline - std::chrono::steady_clock::now())
+                        .count();
+                if (remaining_ms <= 0) {
+                    break;
+                }
+                struct pollfd writable = {worker->fd, POLLOUT, 0};
+                int poll_result;
+                do {
+                    poll_result = poll(&writable, 1, static_cast<int>(remaining_ms));
+                } while (poll_result < 0 && errno == EINTR);
+                if (poll_result <= 0) {
+                    break;
+                }
+                // POLLOUT means the outer write loop may retry the write;
+                // POLLERR/POLLHUP also fall through to write() so it
+                // observes the dead peer (EPIPE/ECONNRESET) and the
+                // closed-path below records the real failure instead of a
+                // misleading WOULD_BLOCK.
+                if (writable.revents & (POLLOUT | POLLERR | POLLHUP)) {
+                    writable_ready = true;
+                    break;
+                }
+            }
+            if (!writable_ready) {
+                return CAPSID_WOULD_BLOCK;
+            }
 #endif
 #if defined(_WIN32)
-                    return CAPSID_WOULD_BLOCK;
+            return CAPSID_WOULD_BLOCK;
 #else
-                    continue;
+            continue;
 #endif
-                }
-                worker->closed = true;
-                close(worker->fd);
-                worker->fd = -1;
-                worker->requests.clear();
-                worker->canceled_requests.clear();
-                worker->canceled_request_order.clear();
-                return CAPSID_CLOSED;
-            }
-            worker->write_buffer.clear();
-            worker->write_offset = 0;
-            return CAPSID_OK;
-        },
+        }
+        worker->closed = true;
+        close(worker->fd);
+        worker->fd = -1;
+        worker->requests.clear();
+        worker->canceled_requests.clear();
+        worker->canceled_request_order.clear();
+        return CAPSID_CLOSED;
+    }
+    worker->write_buffer.clear();
+    worker->write_offset = 0;
+    return CAPSID_OK;
+}
+
+} // namespace
+
+capsid_result capsid_worker_flush(capsid_worker* worker) {
+    return capsid::abi::guard_result(
+        [&]() -> capsid_result { return flush_worker_outbound(worker, true); },
         "capsid_worker_flush: out of memory", "capsid_worker_flush: internal error");
 }
 
@@ -3694,5 +3733,10 @@ bool client_egress_snapshot(const capsid_worker* worker, EgressPolicy* out) {
 bool client_dial_must_reject(const capsid_worker* worker, uint64_t id, uint32_t* reason) {
     return worker && worker->channel_registry_live &&
            worker->channel_registry.dial_must_reject(id, reason);
+}
+capsid_result client_flush_nonblocking(capsid_worker* worker) {
+    return capsid::abi::guard_result(
+        [&]() -> capsid_result { return flush_worker_outbound(worker, false); },
+        "client_flush_nonblocking: out of memory", "client_flush_nonblocking: internal error");
 }
 }

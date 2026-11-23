@@ -14,6 +14,8 @@
 
 #include "host/active_state.h"
 
+#include "json_escape.h"
+
 #include <jansson.h>
 
 #include <array>
@@ -33,20 +35,8 @@ void set_error(ActiveStateError& error, ErrorCode code, std::string path, std::s
     error.message = std::move(message);
 }
 
-// RFC 6901 JSON Pointer escaping for dynamic member names.
-std::string escape_pointer_component(std::string_view component) {
-    std::string escaped;
-    escaped.reserve(component.size());
-    for (const char c : component) {
-        if (c == '~') {
-            escaped += "~0";
-        } else if (c == '/') {
-            escaped += "~1";
-        } else {
-            escaped += c;
-        }
-    }
-    return escaped;
+inline std::string escape_pointer_component(std::string_view component) {
+    return capsid::json_pointer_escape(component);
 }
 
 // Hand-written ASCII range checks: never locale-dependent isalnum.
@@ -398,6 +388,11 @@ ActiveStateDocumentResult encode_active_state_json(const ActiveStateDocument& do
     result.document = document;
     result.canonical_json = build_canonical_json(document);
     return result;
+}
+
+bool validate_active_state_document(const ActiveStateDocument& document) {
+    ActiveStateError ignored;
+    return validate_document(document, ignored);
 }
 
 ActiveStatePersistResult persist_active_state(const ActiveStateDocument& document,

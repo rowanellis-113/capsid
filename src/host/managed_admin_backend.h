@@ -92,62 +92,6 @@ class AsyncAdminBackend final : public AdminBackend {
     std::map<std::string, OperationStatus> registry_;
 };
 
-// Process-global worker permit (capacity.workersTotal). The permit is
-// bound to an ACTIVE App slot: a replacement deploy of an App that already
-// holds the slot does not acquire again, a failed replacement leaves the
-// old holder's slot untouched, and only a newly acquired permit is
-// returned when the deploy settles without a live worker.
-class WorkerCapacityPermit {
-  public:
-    explicit WorkerCapacityPermit(int capacity) : remaining_(capacity) {}
-
-    // Acquires the permit for `application`. Returns true when the permit
-    // was newly acquired (the caller must release it if the operation
-    // settles without a live worker); returns false when the App already
-    // holds its slot (replacement) or when the global capacity is
-    // exhausted.
-    bool acquire(const std::string& application) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (holders_.find(application) != holders_.end()) {
-            return false; // replacement of an existing slot
-        }
-        int remaining = remaining_.load();
-        while (remaining > 0 && !remaining_.compare_exchange_weak(remaining, remaining - 1)) {
-        }
-        if (remaining <= 0) {
-            return false; // capacity exhausted
-        }
-        holders_.insert(application);
-        return true;
-    }
-
-    // Records a live worker for the App (already-held slots are kept).
-    void record_success(const std::string& application) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        holders_.insert(application);
-    }
-
-    // Returns the slot: the App's activated worker no longer holds the
-    // permit (retire) or a newly acquired permit that settled without a
-    // worker.
-    void release(const std::string& application) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (holders_.erase(application) > 0) {
-            remaining_.fetch_add(1);
-        }
-    }
-
-    bool holds(const std::string& application) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return holders_.find(application) != holders_.end();
-    }
-
-  private:
-    std::atomic<int> remaining_;
-    std::mutex mutex_;
-    std::set<std::string> holders_;
-};
-
 // A deploy's target generation is unknown until the artifact is COMPLETE,
 // but a startup-permit request must carry a valid generation. Deploys use
 // the current active generation, or this zero probe when the App has
@@ -165,8 +109,7 @@ inline constexpr std::string_view kStartupPermitProbeGeneration =
 // release awards the next grant, and the stop signal interrupts a wait
 // and withdraws the request (shutdown is never startup).
 //
-// WorkerCapacityPermit still decides CONCURRENCY: an App that cannot
-// acquire capacity never reaches this queue, and a granted permit is
+// StartupPermitCoordinator decides CONCURRENCY: a granted permit is
 // consumed by a single spawn/READY window (the holder releases it when
 // the operation settles).
 class StartupPermitCoordinator {
@@ -291,11 +234,6 @@ class ManagedAdminBackend final : public AdminBackend {
     std::vector<ManagedHostOptions*> applications_;
 
   public:
-    // Optional process-global worker permit (capacity.workersTotal). A
-    // deploy consumes the App's slot BEFORE any spawn or durable
-    // activation; the slot stays bound to the active worker until its
-    // retire. Null disables the gate.
-    WorkerCapacityPermit* capacity = nullptr;
     // Optional process-global fair startup-permit coordinator (design
     // §10.5.6). A deploy joins the shared queue after acquiring capacity
     // and holds its grant across the whole pipeline. Null disables the

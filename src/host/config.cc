@@ -36,6 +36,8 @@
 #include "host/config.h"
 #include "host/policy_compiler.h"
 #include "host/secret_snapshot.h"
+#include "host/units.h"
+#include "json_escape.h"
 
 #include <jansson.h>
 
@@ -628,21 +630,8 @@ const Member* find_member(const Schema& schema, std::string_view key) {
     return nullptr;
 }
 
-// RFC 6901 JSON Pointer escaping: ~ -> ~0 and / -> ~1. Keys are
-// NUL-terminated, UTF-8 validated strings produced by the parser.
-std::string escape_pointer_component(std::string_view component) {
-    std::string escaped;
-    escaped.reserve(component.size());
-    for (const char c : component) {
-        if (c == '~') {
-            escaped += "~0";
-        } else if (c == '/') {
-            escaped += "~1";
-        } else {
-            escaped += c;
-        }
-    }
-    return escaped;
+inline std::string escape_pointer_component(std::string_view component) {
+    return capsid::json_pointer_escape(component);
 }
 
 // Environment name/pattern grammars mirror
@@ -1447,37 +1436,7 @@ namespace {} // namespace
 // Kept outside the anonymous namespace and declared in config.h: the
 // local-capsid.json data planes reuse the same grammars.
 bool parse_size_bytes(const std::string& text, std::uint64_t* out) {
-    if (text.empty()) {
-        return false;
-    }
-    char* end = nullptr;
-    errno = 0;
-    const unsigned long long base = std::strtoull(text.c_str(), &end, 10);
-    if (errno == ERANGE || end == text.c_str()) {
-        return false;
-    }
-    std::uint64_t multiplier = 0;
-    const std::string suffix(end);
-    if (suffix == "KiB") {
-        multiplier = 1024ULL;
-    } else if (suffix == "MiB") {
-        multiplier = 1024ULL * 1024ULL;
-    } else if (suffix == "GiB") {
-        multiplier = 1024ULL * 1024ULL * 1024ULL;
-    } else if (suffix == "KB") {
-        multiplier = 1000ULL;
-    } else if (suffix == "MB") {
-        multiplier = 1000ULL * 1000ULL;
-    } else if (suffix == "GB") {
-        multiplier = 1000ULL * 1000ULL * 1000ULL;
-    } else {
-        return false;
-    }
-    if (base > std::numeric_limits<std::uint64_t>::max() / multiplier) {
-        return false;
-    }
-    *out = static_cast<std::uint64_t>(base) * multiplier;
-    return true;
+    return units::parse_size_bytes(text, out, /*allow_bare_bytes=*/false);
 }
 
 // Duration grammar for pool.queueTimeout: "250ms" / "5s" / "1m" — the same
@@ -1486,31 +1445,7 @@ bool parse_size_bytes(const std::string& text, std::uint64_t* out) {
 // when the operator meant something else. Rejects overflow and unknown
 // suffixes. 0 is a valid value (queueing without a deadline).
 bool parse_duration_ms(const std::string& text, std::uint64_t* out) {
-    if (text.empty()) {
-        return false;
-    }
-    char* end = nullptr;
-    errno = 0;
-    const unsigned long long base = std::strtoull(text.c_str(), &end, 10);
-    if (errno == ERANGE || end == text.c_str()) {
-        return false;
-    }
-    std::uint64_t multiplier = 0;
-    const std::string suffix(end);
-    if (suffix == "ms") {
-        multiplier = 1;
-    } else if (suffix == "s") {
-        multiplier = 1000;
-    } else if (suffix == "m") {
-        multiplier = 60ULL * 1000ULL;
-    } else {
-        return false;
-    }
-    if (base > std::numeric_limits<std::uint64_t>::max() / multiplier) {
-        return false;
-    }
-    *out = static_cast<std::uint64_t>(base) * multiplier;
-    return true;
+    return units::parse_duration_ms(text, out, /*allow_hours=*/false);
 }
 
 bool parse_fetch_target_text(std::string_view text, FetchTarget* out) {

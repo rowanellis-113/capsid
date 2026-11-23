@@ -16,6 +16,7 @@
 #include "host/request_normalization.h"
 
 #include "host/ws_codec.h"
+#include "net_target.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -109,14 +110,64 @@ struct ParsedAuthority {
     std::optional<std::uint16_t> port;
 };
 
-// host[:port]: lowercase DNS labels with an optional decimal port in
-// [1, 65535]. Userinfo, bracketed literals, empty/trailing labels,
-// oversized labels (>63 bytes) or hostnames (>253 bytes) and empty or
-// non-numeric ports are rejected.
-bool parse_authority(std::string_view value, ParsedAuthority* out) {
+bool parse_authority_port(std::string_view port_part, std::optional<std::uint16_t>* out) {
+    // A colon demands a non-empty decimal port in [1, 65535].
+    if (port_part.empty() || port_part.size() > 5 || out == nullptr) {
+        return false;
+    }
+    std::uint32_t port = 0;
+    for (const char c : port_part) {
+        if (!ascii_digit(c)) {
+            return false;
+        }
+        port = port * 10 + static_cast<std::uint32_t>(c - '0');
+    }
+    if (port == 0 || port > 65535) {
+        return false;
+    }
+    *out = static_cast<std::uint16_t>(port);
+    return true;
+}
+
+// host[:port]: lowercase DNS labels (or bracketed IPv6 literal when
+// allow_ipv6 is true) with an optional decimal port in [1, 65535].
+// Userinfo, empty/trailing labels, oversized labels (>63 bytes) or
+// hostnames (>253 bytes), zone IDs, and empty or non-numeric ports are
+// rejected.
+bool parse_authority(std::string_view value, ParsedAuthority* out, bool allow_ipv6 = false) {
     if (value.empty() || value.size() > kMaxPublicAuthorityBytes) {
         return false;
     }
+    if (value.front() == '[') {
+        if (!allow_ipv6) {
+            return false;
+        }
+        const std::size_t close = value.find(']');
+        if (close == std::string_view::npos || close <= 1) {
+            return false;
+        }
+        const std::string_view ip_part = value.substr(1, close - 1);
+        if (ip_part.find('/') != std::string_view::npos ||
+            ip_part.find('%') != std::string_view::npos) {
+            return false;
+        }
+        capsid::CanonicalNetHost net_host;
+        if (!capsid::parse_net_host(std::string(ip_part), &net_host) ||
+            net_host.kind != capsid::CanonicalNetHost::kIpv6Cidr || net_host.prefix_len != 128) {
+            return false;
+        }
+        if (close + 1 < value.size()) {
+            if (value[close + 1] != ':') {
+                return false;
+            }
+            if (!parse_authority_port(value.substr(close + 2), &out->port)) {
+                return false;
+            }
+        }
+        out->host = "[" + net_host.canonical + "]";
+        return true;
+    }
+
     const std::size_t colon = value.find(':');
     const std::string_view host_part = value.substr(0, colon);
     const bool has_port = colon != std::string_view::npos;
@@ -149,22 +200,8 @@ bool parse_authority(std::string_view value, ParsedAuthority* out) {
         start = dot + 1;
     }
 
-    if (has_port) {
-        // A colon demands a non-empty decimal port.
-        if (port_part.empty() || port_part.size() > 5) {
-            return false;
-        }
-        std::uint32_t port = 0;
-        for (const char c : port_part) {
-            if (!ascii_digit(c)) {
-                return false;
-            }
-            port = port * 10 + static_cast<std::uint32_t>(c - '0');
-        }
-        if (port == 0 || port > 65535) {
-            return false;
-        }
-        out->port = static_cast<std::uint16_t>(port);
+    if (has_port && !parse_authority_port(port_part, &out->port)) {
+        return false;
     }
     out->host = std::move(host);
     return true;
@@ -214,15 +251,47 @@ static bool validate_policy(const RequestRoutingPolicy& policy, RequestNormaliza
     case RequestRoutingMode::kPath:
     case RequestRoutingMode::kHeader: {
         ParsedAuthority parsed;
-        if (policy.public_authority.empty() || !parse_authority(policy.public_authority, &parsed)) {
+        if (policy.public_authority.empty() ||
+            !parse_authority(policy.public_authority, &parsed, /*allow_ipv6=*/true)) {
             set_error(error, ErrorCode::kInvalidListenerPolicy, "/listener/publicAuthority",
                       "public authority must be host[:port]");
             return false;
         }
-        if (policy.mode == RequestRoutingMode::kHeader && !policy.trusted_header_routing) {
-            set_error(error, ErrorCode::kUntrustedHeaderRouting, "/listener/routing/mode",
-                      "header routing requires a trusted listener");
+        if (policy.mode == RequestRoutingMode::kHeader) {
+            if (!policy.trusted_header_routing) {
+                set_error(error, ErrorCode::kUntrustedHeaderRouting, "/listener/routing/mode",
+                          "header routing requires a trusted listener");
+                return false;
+            }
+            if (policy.routing_header.empty()) {
+                set_error(error, ErrorCode::kInvalidListenerPolicy, "/listener/routing/header",
+                          "header routing requires a non-empty header name");
+                return false;
+            }
+            for (const char c : policy.routing_header) {
+                if (!token_char(c)) {
+                    set_error(error, ErrorCode::kInvalidListenerPolicy, "/listener/routing/header",
+                              "routing header name is not a valid HTTP token");
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    case RequestRoutingMode::kSingle: {
+        if (!valid_application_id(policy.single_application)) {
+            set_error(error, ErrorCode::kInvalidListenerPolicy,
+                      "/listener/routing/singleApplication",
+                      "single routing mode requires a valid application id");
             return false;
+        }
+        if (!policy.public_authority.empty()) {
+            ParsedAuthority parsed;
+            if (!parse_authority(policy.public_authority, &parsed, /*allow_ipv6=*/true)) {
+                set_error(error, ErrorCode::kInvalidListenerPolicy, "/listener/publicAuthority",
+                          "public authority must be host[:port]");
+                return false;
+            }
         }
         return true;
     }
@@ -347,7 +416,7 @@ bool is_forwarding(std::string_view name) {
 
 bool is_valid_public_authority(std::string_view value) {
     ParsedAuthority parsed;
-    return parse_authority(value, &parsed);
+    return parse_authority(value, &parsed, /*allow_ipv6=*/true);
 }
 
 // Exported policy validation with an optional error slot. The listener
@@ -547,6 +616,15 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
         return result;
     }
 
+    std::string routing_header_lower = "capsid-app";
+    if (policy.mode == RequestRoutingMode::kHeader) {
+        routing_header_lower.clear();
+        routing_header_lower.reserve(policy.routing_header.size());
+        for (const char c : policy.routing_header) {
+            routing_header_lower.push_back(ascii_lower_char(c));
+        }
+    }
+
     // Header syntax validation and collection. Header-value errors point at
     // the header index; missing/duplicate control fields point at their name.
     std::vector<std::string> lowered_names;
@@ -591,7 +669,7 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
                 return result;
             }
             host_index = index;
-        } else if (lowered == "capsid-app") {
+        } else if (lowered == routing_header_lower) {
             // Cardinality is enforced only by header routing; path and
             // subdomain routes strip every Capsid-App field unconditionally.
             if (!capsid_app_index.has_value()) {
@@ -651,7 +729,8 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
         return result;
     }
     ParsedAuthority host_authority;
-    if (!parse_authority(headers[*host_index].value, &host_authority)) {
+    const bool allow_ipv6_host = policy.mode != RequestRoutingMode::kSubdomain;
+    if (!parse_authority(headers[*host_index].value, &host_authority, allow_ipv6_host)) {
         set_error(result.error, ErrorCode::kInvalidAuthority,
                   "/headers/" + std::to_string(*host_index),
                   "Host header is not a valid authority");
@@ -700,13 +779,34 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
             url += ":" + std::to_string(*host_authority.port);
         }
         url += std::string(target);
+    } else if (policy.mode == RequestRoutingMode::kSingle) {
+        std::string authority;
+        if (!policy.public_authority.empty()) {
+            ParsedAuthority parsed;
+            if (!parse_authority(policy.public_authority, &parsed, /*allow_ipv6=*/true)) {
+                set_error(result.error, ErrorCode::kInvalidListenerPolicy,
+                          "/listener/publicAuthority", "public authority must be host[:port]");
+                return result;
+            }
+            authority = parsed.host;
+            if (parsed.port.has_value()) {
+                authority += ":" + std::to_string(*parsed.port);
+            }
+        } else {
+            authority = host_authority.host;
+            if (host_authority.port.has_value()) {
+                authority += ":" + std::to_string(*host_authority.port);
+            }
+        }
+        application = std::string(policy.single_application);
+        url = std::string(policy.public_scheme) + "://" + authority + std::string(target);
     } else {
         // Path and header modes construct the public origin only from the
         // listener policy, never from the request Host.
         std::string authority;
         {
             ParsedAuthority parsed;
-            if (!parse_authority(policy.public_authority, &parsed)) {
+            if (!parse_authority(policy.public_authority, &parsed, /*allow_ipv6=*/true)) {
                 set_error(result.error, ErrorCode::kInvalidListenerPolicy,
                           "/listener/publicAuthority", "public authority must be host[:port]");
                 return result;
@@ -743,22 +843,23 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
             }
             url = std::string(policy.public_scheme) + "://" + authority + rewritten;
         } else {
-            // Header routing: trusted listener, exactly one Capsid-App.
+            // Header routing: trusted listener, exactly one configured header.
             if (capsid_app_count == 0) {
-                set_error(result.error, ErrorCode::kRouteNotFound, "/headers/capsid-app",
-                          "header routing requires a Capsid-App header");
+                set_error(result.error, ErrorCode::kRouteNotFound,
+                          "/headers/" + routing_header_lower,
+                          "header routing requires the routing header");
                 return result;
             }
             if (capsid_app_count > 1) {
-                set_error(result.error, ErrorCode::kInvalidHeader, "/headers/capsid-app",
-                          "duplicate Capsid-App header");
+                set_error(result.error, ErrorCode::kInvalidHeader,
+                          "/headers/" + routing_header_lower, "duplicate routing header");
                 return result;
             }
             const std::string_view app_value = headers[*capsid_app_index].value;
             if (!valid_application_id(app_value)) {
                 set_error(result.error, ErrorCode::kRouteNotFound,
                           "/headers/" + std::to_string(*capsid_app_index),
-                          "Capsid-App is not a valid App ID");
+                          "routing header is not a valid App ID");
                 return result;
             }
             application = std::string(app_value);
@@ -769,8 +870,8 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
     // Output headers: input order, lowercase names, unsafe fields removed.
     for (std::size_t index = 0; index < headers.size(); ++index) {
         const std::string_view name = lowered_names[index];
-        bool removed =
-            name == "host" || name == "capsid-app" || is_hop_by_hop(name) || is_forwarding(name);
+        bool removed = name == "host" || name == "capsid-app" || name == routing_header_lower ||
+                       is_hop_by_hop(name) || is_forwarding(name);
         if (!removed) {
             for (const std::string& nominated : connection_nominated) {
                 if (name == nominated) {

@@ -74,6 +74,10 @@ ActiveStateDocumentResult parse_active_state_json(std::string_view expected_appl
 // a partially valid document.
 ActiveStateDocumentResult encode_active_state_json(const ActiveStateDocument& document);
 
+// Validates all field grammars and state-exclusivity invariants without
+// allocating or formatting a canonical JSON string.
+bool validate_active_state_document(const ActiveStateDocument& document);
+
 enum class ActiveStateIoStatus {
     kOk,
     kNotFound,

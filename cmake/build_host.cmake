@@ -26,6 +26,7 @@ if(CAPSID_BUILD_HOST)
     endif()
 
     add_library(capsid_host_core STATIC
+        src/net_target.cc
         src/host/active_state.cc
         src/host/artifact_safe_read.cc
         src/host/binding_compile.cc
@@ -35,7 +36,9 @@ if(CAPSID_BUILD_HOST)
         src/host/channel_ledger.cc
         src/host/generation_identity.cc
         src/host/generation_pool.cc
+        src/host/host_config_model.cc
         src/host/ipc_metrics.cc
+        src/host/json_codec.cc
         src/host/listener_cors.cc
         src/host/local_capsid_policy.cc
         src/host/metrics.cc
@@ -44,14 +47,15 @@ if(CAPSID_BUILD_HOST)
         src/host/process_snapshot.cc
         src/host/request_normalization.cc
         src/host/secret_snapshot.cc
-        src/host/service_lifecycle.cc
         src/host/static_pool.cc
         src/host/structured_log.cc
         src/host/static_pool_server.cc
         src/host/trusted_key_store.cc
+        src/host/units.cc
         src/host/ws_codec.cc
         src/host/ws_stream.cc
         src/host/worker_capacity_ledger.cc
+        src/host/worker_cgroup.cc
         src/host/worker_event_source.cc
         src/host/worker_executor.cc
         src/host/worker_recovery.cc
@@ -64,7 +68,6 @@ if(CAPSID_BUILD_HOST)
         # planes only (see docs/windows.md).
         target_sources(capsid_host_core PRIVATE
             src/host/admin_api.cc
-            src/host/host_config_model.cc
             src/host/managed_admin_backend.cc
             src/host/managed_host.cc
             src/host/managed_registry.cc
@@ -192,8 +195,7 @@ if(CAPSID_BUILD_HOST)
         endforeach()
 
         add_executable(capsid-host
-            src/host/main.cc
-            src/host/single_worker_server.cc)
+            src/host/main.cc)
         target_include_directories(capsid-host PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -255,11 +257,9 @@ if(CAPSID_BUILD_HOST)
         # §9.6-10) builds the pure coordinator surface and skips the data
         # plane; the data-plane tests are already registered under UNIX AND
         # Boost_FOUND.
-        if(NOT WIN32)
-            target_sources(capsid_host_core PRIVATE
-                src/host/managed_listener.cc
-                src/host/routing_snapshot.cc)
-        endif()
+        target_sources(capsid_host_core PRIVATE
+            src/host/managed_listener.cc
+            src/host/routing_snapshot.cc)
         target_link_libraries(capsid_host_core PRIVATE Boost::system)
     else()
         message(STATUS "capsid-host skipped: system Boost not found")

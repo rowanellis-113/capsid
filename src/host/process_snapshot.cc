@@ -2,6 +2,10 @@
 
 #if defined(_WIN32)
 #include <psapi.h>
+#elif defined(__APPLE__)
+#include <libproc.h>
+#include <sys/proc_info.h>
+#include <unistd.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -39,7 +43,8 @@ bool read_rss_kib(pid_t pid, std::uint64_t* rss_kib) {
 
 // PSS (proportional set size) has no Windows equivalent; the caller
 // falls back to RSS so the series never disappears.
-bool read_self_pss_kib(std::uint64_t* pss_kib) {
+bool read_pss_kib(pid_t pid, std::uint64_t* pss_kib) {
+    (void)pid;
     (void)pss_kib;
     return false;
 }
@@ -65,6 +70,35 @@ bool read_cpu_seconds(pid_t pid, std::uint64_t* cpu_seconds) {
                static_cast<std::uint64_t>(value.dwLowDateTime);
     };
     *cpu_seconds = (to_uint64(kernel) + to_uint64(user)) / 10000000ULL;
+    return true;
+}
+
+#elif defined(__APPLE__)
+
+bool read_rss_kib(pid_t pid, std::uint64_t* rss_kib) {
+    struct proc_taskinfo info = {};
+    if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, sizeof(info)) !=
+        static_cast<int>(sizeof(info))) {
+        return false;
+    }
+    *rss_kib = static_cast<std::uint64_t>(info.pti_resident_size) / 1024ULL;
+    return true;
+}
+
+bool read_pss_kib(pid_t pid, std::uint64_t* pss_kib) {
+    (void)pid;
+    (void)pss_kib;
+    return false;
+}
+
+bool read_cpu_seconds(pid_t pid, std::uint64_t* cpu_seconds) {
+    struct proc_taskinfo info = {};
+    if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, sizeof(info)) !=
+        static_cast<int>(sizeof(info))) {
+        return false;
+    }
+    *cpu_seconds =
+        static_cast<std::uint64_t>(info.pti_total_user + info.pti_total_system) / 1000000000ULL;
     return true;
 }
 
@@ -106,12 +140,18 @@ bool read_rss_kib(pid_t pid, std::uint64_t* rss_kib) {
     return true;
 }
 
-// Reads the PSS proportional-set size of the Host itself from
-// /proc/self/smaps_rollup (the first "Pss:" line, in KiB). Returns false
+// Reads the PSS proportional-set size of a process from
+// /proc/<pid>/smaps_rollup (the first "Pss:" line, in KiB). Returns false
 // when unavailable (non-Linux, no smaps permission); the caller falls
 // back to RSS so the series never disappears.
-bool read_self_pss_kib(std::uint64_t* pss_kib) {
-    FILE* file = std::fopen("/proc/self/smaps_rollup", "r");
+bool read_pss_kib(pid_t pid, std::uint64_t* pss_kib) {
+    char path[64];
+    const int written =
+        std::snprintf(path, sizeof(path), "/proc/%ld/smaps_rollup", static_cast<long>(pid));
+    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(path)) {
+        return false;
+    }
+    FILE* file = std::fopen(path, "r");
     if (file == nullptr) {
         return false;
     }
@@ -197,7 +237,7 @@ process_snapshot_provider(std::function<pid_t()> worker_pid) {
             snapshot.pss_bytes = snapshot.rss_bytes;
         }
         std::uint64_t pss_kib = 0;
-        if (read_self_pss_kib(&pss_kib)) {
+        if (read_pss_kib(host_pid, &pss_kib)) {
             snapshot.pss_bytes = pss_kib * 1024ULL;
         }
         read_cpu_seconds(host_pid, &snapshot.cpu_seconds_total);

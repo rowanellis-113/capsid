@@ -24,10 +24,10 @@ std::shared_ptr<const RoutingSnapshot> RoutingSnapshot::build(
         if (snapshot->routes_.find(route.first) != snapshot->routes_.end()) {
             continue;
         }
-        snapshot->routes_.emplace(std::move(route.first), std::move(route.second));
         // A live pool beats a tombstone for the same name, whichever order
-        // the publisher used.
+        // the publisher used. Erase before moving `route.first`.
         snapshot->tombstones_.erase(route.first);
+        snapshot->routes_.emplace(std::move(route.first), std::move(route.second));
     }
     return snapshot;
 }

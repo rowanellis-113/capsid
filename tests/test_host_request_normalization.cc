@@ -32,18 +32,30 @@ void require(bool condition, const std::string& message) {
 }
 
 RequestRoutingPolicy path_policy() {
-    return RequestRoutingPolicy{
-        RequestRoutingMode::kPath, "https", {}, "Public.Example.Com:00443", false};
+    RequestRoutingPolicy policy;
+    policy.mode = RequestRoutingMode::kPath;
+    policy.public_scheme = "https";
+    policy.public_authority = "Public.Example.Com:00443";
+    policy.trusted_header_routing = false;
+    return policy;
 }
 
 RequestRoutingPolicy header_policy(bool trusted = true) {
-    return RequestRoutingPolicy{
-        RequestRoutingMode::kHeader, "https", {}, "Api.Example.Com:00443", trusted};
+    RequestRoutingPolicy policy;
+    policy.mode = RequestRoutingMode::kHeader;
+    policy.public_scheme = "https";
+    policy.public_authority = "Api.Example.Com:00443";
+    policy.trusted_header_routing = trusted;
+    return policy;
 }
 
 RequestRoutingPolicy subdomain_policy() {
-    return RequestRoutingPolicy{
-        RequestRoutingMode::kSubdomain, "https", ".Apps.Example.Com", {}, false};
+    RequestRoutingPolicy policy;
+    policy.mode = RequestRoutingMode::kSubdomain;
+    policy.public_scheme = "https";
+    policy.subdomain_suffix = ".Apps.Example.Com";
+    policy.trusted_header_routing = false;
+    return policy;
 }
 
 RequestNormalizationResult normalize(const RequestRoutingPolicy& policy, std::string_view target,
@@ -522,10 +534,38 @@ void test_websocket_handshake_fields() {
     require(check(fields) == Check::kBadHandshake, "missing Connection Upgrade rejected");
 }
 
+void test_single_and_custom_header_routing() {
+    RequestRoutingPolicy single;
+    single.mode = RequestRoutingMode::kSingle;
+    single.public_scheme = "http";
+    single.single_application = "local";
+    const RequestNormalizationResult single_res =
+        normalize(single, "/hello?a=1", {{"Host", "localhost:8080"}});
+    require_success(single_res, "local", "http://localhost:8080/hello?a=1",
+                    "single routing uses validated Host");
+    require(single_res.request.headers.empty(), "single routing strips Host");
+
+    const RequestNormalizationResult single_ipv6_res =
+        normalize(single, "/v6", {{"Host", "[0:0:0:0:0:0:0:1]:8080"}});
+    require_success(single_ipv6_res, "local", "http://[::1]:8080/v6",
+                    "single routing canonicalizes bracketed IPv6 Host");
+
+    RequestRoutingPolicy custom_hdr = header_policy();
+    custom_hdr.routing_header = "X-Tenant-App";
+    const RequestNormalizationResult custom_res =
+        normalize(custom_hdr, "/orders",
+                  {{"Host", "ignored"}, {"X-Tenant-App", "billing"}, {"Capsid-App", "wrong"}});
+    require_success(custom_res, "billing", "https://api.example.com:443/orders",
+                    "custom routing header takes precedence");
+    require(custom_res.request.headers.empty(),
+            "custom routing header strips both custom header and capsid-app");
+}
+
 } // namespace
 
 int main() {
     test_websocket_handshake_fields();
+    test_single_and_custom_header_routing();
     test_forwarded_headers_never_change_subdomain_url();
     test_path_rewrite_table_and_fixed_origin();
     test_trusted_header_route_uses_only_capsid_app();

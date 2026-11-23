@@ -275,7 +275,7 @@ void ListenerCors::build_preflight(http::response<http::string_body>& response) 
         response.set(http::field::access_control_allow_headers, headers);
         if (config_.max_age_ms > 0) {
             response.set(http::field::access_control_max_age,
-                         std::to_string(config_.max_age_ms / 1000));
+                         std::to_string((config_.max_age_ms + 999ULL) / 1000ULL));
         }
         response.body() = std::string();
     } else {

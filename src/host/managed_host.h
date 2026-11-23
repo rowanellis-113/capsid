@@ -61,6 +61,8 @@ struct DeployOutcome {
     WorkerExecutor::WorkerFactory generation_factory;
     std::string version;
     std::string generation_digest;
+    ActiveStateRecoveryAction recovery_action = ActiveStateRecoveryAction::kNone;
+    EffectiveConfig effective;
     // Binding v1 §6: the committed immutable Binding snapshot; worker
     // replacement reloads from this, never from a re-read of bindingsRoot.
     std::vector<capsid::host::EffectiveBinding> bindings;

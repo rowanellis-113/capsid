@@ -9,6 +9,7 @@
 #include "host/managed_listener.h"
 #include "host/client_disconnect.h"
 #include "host/metrics.h"
+#include "net_target.h"
 
 #include "host/listener_cors.h"
 #include "host/request_normalization.h"
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -99,6 +101,35 @@ std::string ascii_lower(std::string_view text) {
         }
     }
     return lower;
+}
+
+bool is_event_stream_content_type(std::string_view value) {
+    std::size_t begin = 0;
+    while (begin < value.size() && (value[begin] == ' ' || value[begin] == '\t')) {
+        ++begin;
+    }
+    static constexpr std::string_view kEventStream = "text/event-stream";
+    if (value.size() - begin < kEventStream.size() ||
+        !std::equal(
+            kEventStream.begin(), kEventStream.end(),
+            value.begin() + static_cast<std::ptrdiff_t>(begin),
+            [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); })) {
+        return false;
+    }
+    std::size_t end = begin + kEventStream.size();
+    while (end < value.size() && (value[end] == ' ' || value[end] == '\t')) {
+        ++end;
+    }
+    return end == value.size() || value[end] == ';';
+}
+
+std::size_t estimate_request_bytes(const http::request<http::string_body>& request) {
+    std::size_t bytes =
+        request.method_string().size() + request.target().size() + request.body().size() + 8;
+    for (const auto& field : request.base()) {
+        bytes += field.name_string().size() + field.value().size() + 4;
+    }
+    return bytes;
 }
 
 // Parses the comma-separated token list of a Connection header and collects
@@ -246,14 +277,15 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
 // Early-credit window (host, spec §8.1): response credit is returned at
 // receive time while the per-request HTTP write queue is below this;
 // beyond it, credit falls back to write-completion, so a slow client
-// cannot make the host buffer unboundedly. Mirrored from
-// single_worker_server.cc.
+// cannot make the host buffer unboundedly.
 static constexpr std::size_t kEarlyCreditWindow = 64u * 1024u;
+// Minimum response-credit batch before sending a kGrantResponseCredit command
+// mid-stream; smaller tails flush immediately at write completion or end.
+static constexpr std::uint32_t kCreditFlushThreshold = 16u * 1024u;
 
-// Request state owned by the io thread only. Mirrors the M1A
-// single_worker_server PendingRequest minus the SSE/E-1 members (deferred
-// follow-up PRs).
+// Request state owned by the io thread only.
 struct PendingRequest {
+    std::shared_ptr<GenerationPool> pool;
     std::shared_ptr<ChannelLease> lease;
     std::string upgrade_key, upgrade_protocols;
     const WorkerExecutor* executor = nullptr;
@@ -298,7 +330,9 @@ struct PendingRequest {
     bool end_seen = false;
     bool cl_known = false;
     std::size_t cl_remaining = 0;
-    // stream_idle_timeout_ms deadline around one socket write (E-3 §9.2).
+    bool holds_streaming_permit = false;
+    std::optional<asio::steady_timer> idle_timer;
+    // E-3 §9.2 write deadline around one socket write.
     std::optional<asio::steady_timer> write_timer;
 };
 
@@ -388,8 +422,21 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     void do_accept();
     void stop_from_io();
     void drop_session(const std::shared_ptr<ListenerSession>& session);
-    void begin_request(const WorkerExecutor* executor, std::uint64_t request_id,
-                       const std::shared_ptr<ListenerSession>& session,
+    void dispatch_request(const std::shared_ptr<GenerationPool>& pool, WorkerExecutor* executor,
+                          const std::shared_ptr<ListenerSession>& session,
+                          const http::request<http::string_body>& request,
+                          const NormalizedPublicRequest& normalized);
+    void enqueue_or_reject(const std::shared_ptr<GenerationPool>& pool,
+                           const std::shared_ptr<ListenerSession>& session,
+                           http::request<http::string_body> request,
+                           const NormalizedPublicRequest& normalized);
+    void pump_pool_queue(const GenerationPool* pool_key);
+    void arm_queue_timer(const GenerationPool* pool_key);
+    void on_queue_timer(const GenerationPool* pool_key, const beast::error_code ec);
+    void cancel_queued_for_session(const GenerationPool* pool_key,
+                                   const std::shared_ptr<ListenerSession>& session);
+    void begin_request(const std::shared_ptr<GenerationPool>& pool, const WorkerExecutor* executor,
+                       std::uint64_t request_id, const std::shared_ptr<ListenerSession>& session,
                        const http::request<http::string_body>& request,
                        const NormalizedPublicRequest& normalized);
     void handle_worker_event(const WorkerExecutor* executor, WorkerEvent event);
@@ -397,7 +444,7 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     void write_body_block(const WorkerExecutor* executor, std::uint64_t request_id,
                           std::vector<std::uint8_t> bytes, bool credit_returned_early);
     void flush_pending_credit(const WorkerExecutor* executor, std::uint64_t request_id,
-                              PendingRequest& pending);
+                              PendingRequest& pending, bool force);
     void write_fixed_response(const WorkerExecutor* executor, std::uint64_t request_id);
     void write_end_block(const WorkerExecutor* executor, std::uint64_t request_id);
     void finalize_request(const WorkerExecutor* executor, std::uint64_t request_id,
@@ -410,10 +457,35 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     void reject_response_head(const WorkerExecutor* executor, std::uint64_t request_id,
                               const std::string& reason);
     bool sanitize_response_headers(std::vector<std::pair<std::string, std::string>>* headers);
+    bool acquire_streaming_permit(const WorkerExecutor* executor, PendingRequest& pending);
+    void release_streaming_permit(PendingRequest& pending);
+    std::uint64_t resolve_stream_idle_timeout_ms(const PendingRequest& pending) const;
+    std::uint64_t resolve_write_timeout_ms(const PendingRequest& pending) const;
+    void arm_stream_idle_timer(const WorkerExecutor* executor, std::uint64_t request_id,
+                               PendingRequest& pending);
+    void on_stream_idle_timer(const WorkerExecutor* executor, std::uint64_t request_id,
+                              const beast::error_code ec);
     void arm_write_timer(std::uint64_t request_id, PendingRequest& pending);
     void disarm_write_timer(PendingRequest& pending);
 
+    struct QueuedRequest {
+        std::shared_ptr<ListenerSession> session;
+        std::shared_ptr<GenerationPool> pool;
+        http::request<http::string_body> request;
+        NormalizedPublicRequest normalized;
+        std::size_t bytes = 0;
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+    };
+
+    struct PoolQueue {
+        std::deque<QueuedRequest> entries;
+        std::size_t queued_bytes = 0;
+        std::uint64_t queue_timeout_ms = 0;
+        std::optional<asio::steady_timer> timer;
+    };
+
     ManagedListenerOptions options_;
+    std::string routing_header_storage_ = "capsid-app";
     RequestRoutingPolicy policy_;
     std::shared_ptr<WorkerEventMailbox> mailbox_;
     const std::uint64_t max_request_body_bytes_;
@@ -430,6 +502,8 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     ChannelLedger channel_ledger_{ChannelLedger::Limits{}, channel_budget_.get()};
     std::map<std::pair<const WorkerExecutor*, std::uint64_t>, PendingRequest> requests_;
     std::map<const WorkerExecutor*, std::uint64_t> next_request_id_;
+    std::map<const WorkerExecutor*, std::uint64_t> streaming_inflight_;
+    std::map<const GenerationPool*, PoolQueue> pool_queues_;
     std::map<std::pair<const WorkerExecutor*, std::uint32_t>, std::shared_ptr<WebSocketSession>>
         websockets_;
     std::uint64_t connections_ = 0;
@@ -463,7 +537,8 @@ void ListenerSession::read_head() {
     parser_->body_limit(impl_->max_request_body_bytes_);
     const std::uint64_t header_bytes = impl_->options_.config.limits.header_bytes;
     if (header_bytes != 0) {
-        parser_->header_limit(header_bytes);
+        parser_->header_limit(static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(header_bytes, std::numeric_limits<std::uint32_t>::max())));
     }
     arm_read_timer(true);
     http::async_read_header(
@@ -566,21 +641,17 @@ void ListenerSession::handle_request(http::request<http::string_body> request) {
                     request.version());
         return;
     }
+    const auto q_it = impl_->pool_queues_.find(pool.get());
+    const bool queue_empty = q_it == impl_->pool_queues_.end() || q_it->second.entries.empty();
     // The generation's per-worker inflight ceiling (0 = no cap): the pool
-    // schedules least-loaded, but admission is this listener's.
+    // schedules least-loaded, while E-1 queueing and capacity admission live here.
     const std::uint64_t max_inflight = pool->max_inflight_per_worker();
-    if (max_inflight != 0 && executor->inflight() >= max_inflight) {
-        send_simple(http::status::service_unavailable, "worker at capacity", request.keep_alive(),
-                    request.version());
+    if (!queue_empty || (max_inflight != 0 && executor->inflight() >= max_inflight)) {
+        current_pool_ = pool;
+        impl_->enqueue_or_reject(pool, shared_from_this(), std::move(request), normalized.request);
         return;
     }
-    std::uint64_t& next = impl_->next_request_id_[executor];
-    const std::uint64_t request_id = ++next;
-    current_executor_ = executor;
-    current_request_id_ = request_id;
-    current_pool_ = std::move(pool);
-    impl_->begin_request(executor, request_id, shared_from_this(), request, normalized.request);
-    start_disconnect_probe();
+    impl_->dispatch_request(pool, executor, shared_from_this(), request, normalized.request);
 }
 
 bool ListenerSession::prepare_cors(const http::request<http::string_body>& request) {
@@ -699,7 +770,10 @@ void ListenerSession::close() {
     if (current_request_id_) {
         impl_->cancel_request(*current_executor_, *current_request_id_);
         current_request_id_.reset();
+    } else if (current_pool_) {
+        impl_->cancel_queued_for_session(current_pool_.get(), shared_from_this());
     }
+    current_pool_.reset();
     beast::error_code ec;
     stream_.socket().shutdown(tcp::socket::shutdown_both, ec);
     stream_.close();
@@ -767,13 +841,26 @@ bool ManagedListenerImpl::start(std::string* error) {
         policy_.mode = RequestRoutingMode::kSubdomain;
     } else if (mode == "header") {
         policy_.mode = RequestRoutingMode::kHeader;
+        if (!options_.config.routing.header.empty()) {
+            routing_header_storage_ = ascii_lower(options_.config.routing.header);
+        } else if (!options_.config.routing.suffix.empty()) {
+            routing_header_storage_ = ascii_lower(options_.config.routing.suffix);
+        } else {
+            routing_header_storage_ = "capsid-app";
+        }
+        policy_.routing_header = routing_header_storage_;
+    } else if (mode == "single") {
+        policy_.mode = RequestRoutingMode::kSingle;
+        policy_.single_application = options_.config.routing.single_app;
     } else {
         if (error != nullptr) {
-            *error = "listener routing mode must be path, subdomain or header";
+            *error = "listener routing mode must be path, subdomain, header or single";
         }
         return false;
     }
-    policy_.public_scheme = options_.config.public_scheme;
+    policy_.public_scheme = (mode == "single" && options_.config.public_scheme.empty())
+                                ? std::string_view("http")
+                                : std::string_view(options_.config.public_scheme);
     policy_.subdomain_suffix = options_.config.routing.suffix;
     policy_.public_authority = options_.config.public_authority;
     policy_.trusted_header_routing = options_.config.trusted;
@@ -786,35 +873,20 @@ bool ManagedListenerImpl::start(std::string* error) {
         return false;
     }
 
-    // config.tcp is "host" or "host:port" (bracketed IPv6 is deferred and
-    // fails closed here — the last-':' split cannot address it).
-    const std::string& tcp = options_.config.tcp;
-    const std::string::size_type colon = tcp.rfind(':');
-    const std::string host = colon == std::string::npos ? tcp : tcp.substr(0, colon);
-    const std::string port_text = colon == std::string::npos ? "" : tcp.substr(colon + 1);
-    std::uint16_t port = 80; // "host" alone means the default HTTP port
-    if (!port_text.empty()) {
-        bool valid = !port_text.empty();
-        std::uint32_t value = 0;
-        for (const char c : port_text) {
-            if (c < '0' || c > '9') {
-                valid = false;
-                break;
-            }
-            value = value * 10 + static_cast<std::uint32_t>(c - '0');
-            if (value > 65535) {
-                valid = false;
-                break;
-            }
+    // config.tcp accepts "host", "host:port", "[ipv6]", or "[ipv6]:port".
+    const std::string& tcp_text = options_.config.tcp;
+    std::string host;
+    std::uint16_t port = 80;
+    if (!tcp_text.empty() && tcp_text.front() == '[' && tcp_text.back() == ']') {
+        host = tcp_text.substr(1, tcp_text.size() - 2);
+    } else if (tcp_text.find(':') == std::string::npos) {
+        host = tcp_text;
+    } else if (!capsid::parse_tcp_endpoint(tcp_text, &host, &port, /*allow_zero_port=*/true)) {
+        if (error != nullptr) {
+            *error =
+                "listener " + options_.config.name + ": invalid tcp endpoint '" + tcp_text + "'";
         }
-        if (!valid) {
-            if (error != nullptr) {
-                *error =
-                    "listener " + options_.config.name + ": invalid tcp port '" + port_text + "'";
-            }
-            return false;
-        }
-        port = static_cast<std::uint16_t>(value);
+        return false;
     }
     if (host.empty()) {
         if (error != nullptr) {
@@ -957,6 +1029,16 @@ void ManagedListenerImpl::request_stop() {
 
 void ManagedListenerImpl::stop_from_io() {
     acceptor_.reset(); // cancels the pending async_accept
+    for (auto& [pool_key, pq] : pool_queues_) {
+        (void)pool_key;
+        if (pq.timer) {
+            pq.timer->cancel();
+            pq.timer.reset();
+        }
+        pq.entries.clear();
+        pq.queued_bytes = 0;
+    }
+    pool_queues_.clear();
     const std::vector<std::uint64_t> session_ids = [this] {
         std::vector<std::uint64_t> ids;
         ids.reserve(sessions_.size());
@@ -998,11 +1080,194 @@ void ManagedListenerImpl::drop_session(const std::shared_ptr<ListenerSession>& s
     }
 }
 
-void ManagedListenerImpl::begin_request(const WorkerExecutor* executor, std::uint64_t request_id,
+void ManagedListenerImpl::dispatch_request(const std::shared_ptr<GenerationPool>& pool,
+                                           WorkerExecutor* executor,
+                                           const std::shared_ptr<ListenerSession>& session,
+                                           const http::request<http::string_body>& request,
+                                           const NormalizedPublicRequest& normalized) {
+    std::uint64_t& next = next_request_id_[executor];
+    const std::uint64_t request_id = ++next;
+    session->current_executor_ = executor;
+    session->current_request_id_ = request_id;
+    session->current_pool_ = pool;
+    begin_request(pool, executor, request_id, session, request, normalized);
+    session->start_disconnect_probe();
+}
+
+void ManagedListenerImpl::enqueue_or_reject(const std::shared_ptr<GenerationPool>& pool,
+                                            const std::shared_ptr<ListenerSession>& session,
+                                            http::request<http::string_body> request,
+                                            const NormalizedPublicRequest& normalized) {
+    const std::uint64_t max_q = pool->max_queued_requests();
+    if (max_q == 0) {
+        session->current_pool_.reset();
+        session->send_simple(http::status::too_many_requests, "worker at capacity",
+                             request.keep_alive(), request.version());
+        return;
+    }
+    const std::size_t req_bytes = estimate_request_bytes(request);
+    const std::uint64_t max_hdr_bytes = pool->queue_header_bytes();
+    PoolQueue& pq = pool_queues_[pool.get()];
+    if (pq.entries.size() >= max_q ||
+        (max_hdr_bytes != 0 && pq.queued_bytes + req_bytes > max_hdr_bytes)) {
+        session->current_pool_.reset();
+        if (pq.entries.empty()) {
+            pool_queues_.erase(pool.get());
+        }
+        session->send_simple(http::status::too_many_requests, "request queue full",
+                             request.keep_alive(), request.version());
+        return;
+    }
+    const std::uint64_t q_timeout_ms = pool->queue_timeout_ms();
+    QueuedRequest entry;
+    entry.session = session;
+    entry.pool = pool;
+    entry.request = std::move(request);
+    entry.normalized = normalized;
+    entry.bytes = req_bytes;
+    if (q_timeout_ms != 0) {
+        entry.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(q_timeout_ms);
+    }
+    pq.queue_timeout_ms = q_timeout_ms;
+    pq.entries.push_back(std::move(entry));
+    pq.queued_bytes += req_bytes;
+    arm_queue_timer(pool.get());
+}
+
+void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
+    if (pool_key == nullptr) {
+        return;
+    }
+    const auto q_it = pool_queues_.find(pool_key);
+    if (q_it == pool_queues_.end()) {
+        return;
+    }
+    PoolQueue& pq = q_it->second;
+    const auto now = std::chrono::steady_clock::now();
+    while (!pq.entries.empty()) {
+        QueuedRequest& front = pq.entries.front();
+        if (front.deadline && now >= *front.deadline) {
+            QueuedRequest expired = std::move(front);
+            pq.entries.pop_front();
+            pq.queued_bytes -= expired.bytes;
+            if (expired.session && !expired.session->closed()) {
+                expired.session->current_pool_.reset();
+                expired.session->send_simple(http::status::gateway_timeout,
+                                             "queued request timeout", expired.request.keep_alive(),
+                                             expired.request.version());
+            }
+            continue;
+        }
+        std::shared_ptr<GenerationPool> pool = front.pool;
+        WorkerExecutor* executor = pool ? pool->pick_worker() : nullptr;
+        if (!executor) {
+            QueuedRequest unavailable = std::move(front);
+            pq.entries.pop_front();
+            pq.queued_bytes -= unavailable.bytes;
+            if (unavailable.session && !unavailable.session->closed()) {
+                unavailable.session->current_pool_.reset();
+                unavailable.session->send_simple(
+                    http::status::service_unavailable, "worker unavailable",
+                    unavailable.request.keep_alive(), unavailable.request.version());
+            }
+            continue;
+        }
+        const std::uint64_t max_inflight = pool->max_inflight_per_worker();
+        if (max_inflight != 0 && executor->inflight() >= max_inflight) {
+            break;
+        }
+        QueuedRequest entry = std::move(front);
+        pq.entries.pop_front();
+        pq.queued_bytes -= entry.bytes;
+        if (!entry.session || entry.session->closed()) {
+            continue;
+        }
+        dispatch_request(entry.pool, executor, entry.session, entry.request, entry.normalized);
+    }
+    arm_queue_timer(pool_key);
+}
+
+void ManagedListenerImpl::arm_queue_timer(const GenerationPool* pool_key) {
+    const auto q_it = pool_queues_.find(pool_key);
+    if (q_it == pool_queues_.end()) {
+        return;
+    }
+    PoolQueue& pq = q_it->second;
+    if (pq.entries.empty()) {
+        if (pq.timer) {
+            pq.timer->cancel();
+            pq.timer.reset();
+        }
+        pool_queues_.erase(q_it);
+        return;
+    }
+    if (pq.queue_timeout_ms == 0 || !pq.entries.front().deadline) {
+        if (pq.timer) {
+            pq.timer->cancel();
+            pq.timer.reset();
+        }
+        return;
+    }
+    if (!pq.timer) {
+        pq.timer.emplace(mailbox_->ioc);
+    }
+    pq.timer->expires_at(*pq.entries.front().deadline);
+    pq.timer->async_wait([weak = weak_from_this(), pool_key](const beast::error_code ec) {
+        if (const std::shared_ptr<ManagedListenerImpl> self = weak.lock()) {
+            self->on_queue_timer(pool_key, ec);
+        }
+    });
+}
+
+void ManagedListenerImpl::on_queue_timer(const GenerationPool* pool_key,
+                                         const beast::error_code ec) {
+    if (ec == asio::error::operation_aborted || stop_requested_.load(std::memory_order_acquire)) {
+        return;
+    }
+    const auto q_it = pool_queues_.find(pool_key);
+    if (q_it == pool_queues_.end()) {
+        return;
+    }
+    PoolQueue& pq = q_it->second;
+    const auto now = std::chrono::steady_clock::now();
+    while (!pq.entries.empty() && pq.entries.front().deadline &&
+           now >= *pq.entries.front().deadline) {
+        QueuedRequest expired = std::move(pq.entries.front());
+        pq.entries.pop_front();
+        pq.queued_bytes -= expired.bytes;
+        if (expired.session && !expired.session->closed()) {
+            expired.session->current_pool_.reset();
+            expired.session->send_simple(http::status::gateway_timeout, "queued request timeout",
+                                         expired.request.keep_alive(), expired.request.version());
+        }
+    }
+    arm_queue_timer(pool_key);
+}
+
+void ManagedListenerImpl::cancel_queued_for_session(
+    const GenerationPool* pool_key, const std::shared_ptr<ListenerSession>& session) {
+    const auto q_it = pool_queues_.find(pool_key);
+    if (q_it == pool_queues_.end()) {
+        return;
+    }
+    PoolQueue& pq = q_it->second;
+    for (auto it = pq.entries.begin(); it != pq.entries.end(); ++it) {
+        if (it->session == session) {
+            pq.queued_bytes -= it->bytes;
+            pq.entries.erase(it);
+            arm_queue_timer(pool_key);
+            return;
+        }
+    }
+}
+
+void ManagedListenerImpl::begin_request(const std::shared_ptr<GenerationPool>& pool,
+                                        const WorkerExecutor* executor, std::uint64_t request_id,
                                         const std::shared_ptr<ListenerSession>& session,
                                         const http::request<http::string_body>& request,
                                         const NormalizedPublicRequest& normalized) {
     PendingRequest pending;
+    pending.pool = pool;
     std::vector<PublicRequestHeaderView> upgrade_views;
     for (const auto& field : request.base())
         upgrade_views.push_back({field.name_string(), field.value()});
@@ -1010,12 +1275,18 @@ void ManagedListenerImpl::begin_request(const WorkerExecutor* executor, std::uin
         check_websocket_upgrade(upgrade_views, request.method_string(), request.version()) ==
         WebSocketUpgradeCheck::kValid;
     if (upgrade && !(executor->effective_channel_caps() & CAPSID_PROTOCOL_CAP_UPGRADE)) {
+        session->current_request_id_.reset();
+        session->current_executor_.reset();
+        session->current_pool_.reset();
         session->send_simple(http::status::service_unavailable, "worker does not support WebSocket",
                              false, request.version());
         return;
     }
     pending.lease = std::make_shared<ChannelLease>(channel_ledger_, upgrade);
     if (!pending.lease->valid()) {
+        session->current_request_id_.reset();
+        session->current_executor_.reset();
+        session->current_pool_.reset();
         session->send_simple(http::status::too_many_requests, "channel capacity exhausted", false,
                              request.version());
         return;
@@ -1137,7 +1408,9 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
             session->buffer_.consume(leftovers.size());
             websockets_.emplace(std::make_pair(executor, event.channel_id), connection);
             requests_.erase(it);
+            const std::shared_ptr<GenerationPool> pool = pending.pool;
             const_cast<WorkerExecutor*>(executor)->retire_terminal_request(event.request_id);
+            pump_pool_queue(pool.get());
             connection->start(std::move(handshake), std::move(leftovers));
             return;
         }
@@ -1159,6 +1432,17 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
         }
         if (!sanitize_response_headers(&event.headers)) {
             reject_response_head(executor, event.request_id, "invalid worker response headers");
+            return;
+        }
+        bool is_sse = false;
+        for (const auto& [name, value] : event.headers) {
+            if (ascii_lower(name) == "content-type") {
+                is_sse = is_event_stream_content_type(value);
+                break;
+            }
+        }
+        if (is_sse && !acquire_streaming_permit(executor, pending)) {
+            reject_response_head(executor, event.request_id, "streaming capacity exhausted");
             return;
         }
         pending.head_only = pending.method == "HEAD";
@@ -1268,6 +1552,9 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
                     return;
                 }
                 pending.head_sent = true;
+                if (pending.holds_streaming_permit && !pending.end_seen) {
+                    self->arm_stream_idle_timer(executor, request_id, pending);
+                }
                 if (!pending.body_queue.empty()) {
                     PendingRequest::QueuedBody queued =
                         take_coalesced_response_body(&pending.body_queue, &pending.body_queue_bytes,
@@ -1290,6 +1577,9 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
             return;
         }
         PendingRequest& pending = it->second;
+        if (pending.holds_streaming_permit && !pending.end_seen) {
+            arm_stream_idle_timer(executor, event.request_id, pending);
+        }
         if (pending.fixed_response) {
             if (pending.fixed_body_received > pending.fixed_body_expected ||
                 event.body.size() > pending.fixed_body_expected - pending.fixed_body_received) {
@@ -1309,13 +1599,11 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
         // per-request write queue stays shallow — one fewer host
         // round-trip per frame. Beyond the window credit falls back to
         // write-completion, so a slow client cannot make the host buffer
-        // unboundedly. Without any return path the worker exhausts its
-        // initial response window (256 KiB) and the transfer stalls
-        // forever, which the WP-09 §13.6 soak's /big endpoint exposed.
+        // unboundedly.
         const bool credit_returned_early = pending.body_queue_bytes < kEarlyCreditWindow;
         if (credit_returned_early) {
             pending.pending_response_credit += static_cast<std::uint32_t>(event.body.size());
-            flush_pending_credit(executor, event.request_id, pending);
+            flush_pending_credit(executor, event.request_id, pending, false);
         }
         if (pending.head_only) {
             // HEAD consumes the worker body without exposing it.
@@ -1340,29 +1628,40 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
         }
         PendingRequest& pending = it->second;
         pending.end_seen = true;
+        if (pending.idle_timer) {
+            pending.idle_timer->cancel();
+            pending.idle_timer.reset();
+        }
         // Drain any remaining pending credit; the Runtime erased the
         // request, so the grant frame is queued only to satisfy the
         // terminal retirement (single_worker_server does the same).
-        flush_pending_credit(executor, event.request_id, pending);
+        flush_pending_credit(executor, event.request_id, pending, true);
         // The Runtime erased this request with RESPONSE_END. Purge queued
         // stale frames and retire the tombstone after the worker's current
         // command batch, without a redundant Runtime cancel.
+        const std::shared_ptr<GenerationPool> pool = pending.pool;
         const_cast<WorkerExecutor*>(executor)->retire_terminal_request(event.request_id);
-        if (pending.fixed_response) {
-            if (pending.fixed_body_received != pending.fixed_body_expected) {
-                fail_request(executor, event.request_id, pending.session);
+        pump_pool_queue(pool.get());
+        auto still_it = requests_.find({executor, event.request_id});
+        if (still_it == requests_.end()) {
+            return;
+        }
+        PendingRequest& active_pending = still_it->second;
+        if (active_pending.fixed_response) {
+            if (active_pending.fixed_body_received != active_pending.fixed_body_expected) {
+                fail_request(executor, event.request_id, active_pending.session);
                 return;
             }
             write_fixed_response(executor, event.request_id);
             return;
         }
-        if (pending.head_only) {
-            if (!pending.writing) {
-                finalize_request(executor, event.request_id, pending.session);
+        if (active_pending.head_only) {
+            if (!active_pending.writing) {
+                finalize_request(executor, event.request_id, active_pending.session);
             }
             return;
         }
-        if (!pending.writing) {
+        if (!active_pending.writing) {
             write_end_block(executor, event.request_id);
         }
         return;
@@ -1575,7 +1874,8 @@ void ManagedListenerImpl::write_body_block(const WorkerExecutor* executor, std::
             // rejected, so it is skipped.
             if (!pending.end_seen && !pending.outgoing_credit_returned_early) {
                 pending.pending_response_credit += static_cast<std::uint32_t>(bytes);
-                self->flush_pending_credit(executor, request_id, pending);
+                const bool force_credit = pending.body_queue.empty();
+                self->flush_pending_credit(executor, request_id, pending, force_credit);
             }
             pending.outgoing_credit_returned_early = false;
             pending.outgoing.clear();
@@ -1590,13 +1890,13 @@ void ManagedListenerImpl::write_body_block(const WorkerExecutor* executor, std::
         });
 }
 
-// Spec §8.1: submit any accumulated response credit as one grant command.
-// Immediate grant (no threshold), matching the reference implementation's
-// default. The executor drops grants for tombstoned ids, so a stale grant
-// raced with RESPONSE_END is harmless.
+// Spec §8.1: submit accumulated response credit in >=16 KiB batches mid-stream,
+// or force-flush smaller tails at write completion / end.
 void ManagedListenerImpl::flush_pending_credit(const WorkerExecutor* executor,
-                                               std::uint64_t request_id, PendingRequest& pending) {
-    if (pending.pending_response_credit == 0) {
+                                               std::uint64_t request_id, PendingRequest& pending,
+                                               bool force) {
+    if (pending.pending_response_credit == 0 ||
+        (!force && pending.pending_response_credit < kCreditFlushThreshold)) {
         return;
     }
     Command grant;
@@ -1686,8 +1986,10 @@ void ManagedListenerImpl::write_end_block(const WorkerExecutor* executor,
                               self->fail_request(executor, request_id, pending.session);
                               return;
                           }
+                          self->release_streaming_permit(pending);
                           const bool keep_alive = pending.keep_alive;
                           std::shared_ptr<ListenerSession> session = pending.session;
+                          const std::shared_ptr<GenerationPool> pool = pending.pool;
                           self->requests_.erase(it);
                           if (session && !session->closed()) {
                               if (keep_alive) {
@@ -1696,6 +1998,7 @@ void ManagedListenerImpl::write_end_block(const WorkerExecutor* executor,
                                   session->close();
                               }
                           }
+                          self->pump_pool_queue(pool.get());
                       });
 }
 
@@ -1720,7 +2023,9 @@ void ManagedListenerImpl::finalize_request(const WorkerExecutor* executor, std::
     if (it == requests_.end()) {
         return;
     }
+    release_streaming_permit(it->second);
     const bool keep_alive = it->second.keep_alive;
+    const std::shared_ptr<GenerationPool> pool = it->second.pool;
     requests_.erase(it);
     if (session && !session->closed()) {
         if (keep_alive) {
@@ -1729,6 +2034,7 @@ void ManagedListenerImpl::finalize_request(const WorkerExecutor* executor, std::
             session->close();
         }
     }
+    pump_pool_queue(pool.get());
 }
 
 void ManagedListenerImpl::cancel_request(const WorkerExecutor* executor, std::uint64_t request_id) {
@@ -1736,12 +2042,14 @@ void ManagedListenerImpl::cancel_request(const WorkerExecutor* executor, std::ui
     if (it == requests_.end()) {
         return;
     }
+    release_streaming_permit(it->second);
     // Queued response bytes never reach the wire; return their client-bytes
     // accounting (the in-flight write returns its own on completion).
     mailbox_->sub_client_bytes(executor, it->second.body_queue_bytes);
     if (it->second.fixed_response && !it->second.fixed_write_started && !it->second.head_only) {
         mailbox_->sub_client_bytes(executor, it->second.fixed_body_received);
     }
+    const std::shared_ptr<GenerationPool> pool = it->second.pool;
     requests_.erase(it);
     // const: the §9.2 sink signature; tombstones and cancels are the
     // listener's.
@@ -1750,6 +2058,7 @@ void ManagedListenerImpl::cancel_request(const WorkerExecutor* executor, std::ui
     cancel.type = CommandType::kCancel;
     cancel.request_id = request_id;
     const_cast<WorkerExecutor*>(executor)->submit(std::move(cancel));
+    pump_pool_queue(pool.get());
 }
 
 void ManagedListenerImpl::fail_request(const WorkerExecutor* executor, std::uint64_t request_id,
@@ -1828,8 +2137,99 @@ bool ManagedListenerImpl::sanitize_response_headers(
     return true;
 }
 
+bool ManagedListenerImpl::acquire_streaming_permit(const WorkerExecutor* executor,
+                                                   PendingRequest& pending) {
+    std::uint64_t max_sse = 2;
+    if (pending.pool && pending.pool->max_streaming_inflight_per_worker() != 0) {
+        max_sse = pending.pool->max_streaming_inflight_per_worker();
+    }
+    if (pending.pool && pending.pool->max_inflight_per_worker() == 1 && max_sse > 1) {
+        max_sse = 1;
+    }
+    std::uint64_t& active = streaming_inflight_[executor];
+    if (active >= max_sse) {
+        return false;
+    }
+    ++active;
+    pending.holds_streaming_permit = true;
+    return true;
+}
+
+void ManagedListenerImpl::release_streaming_permit(PendingRequest& pending) {
+    if (!pending.holds_streaming_permit) {
+        return;
+    }
+    pending.holds_streaming_permit = false;
+    if (pending.idle_timer) {
+        pending.idle_timer->cancel();
+        pending.idle_timer.reset();
+    }
+    auto it = streaming_inflight_.find(pending.executor);
+    if (it != streaming_inflight_.end()) {
+        if (it->second <= 1) {
+            streaming_inflight_.erase(it);
+        } else {
+            --it->second;
+        }
+    }
+}
+
+std::uint64_t
+ManagedListenerImpl::resolve_stream_idle_timeout_ms(const PendingRequest& pending) const {
+    if (pending.pool && pending.pool->stream_idle_timeout_ms() != 0) {
+        return pending.pool->stream_idle_timeout_ms();
+    }
+    if (options_.config.limits.stream_idle_timeout_ms != 0) {
+        return options_.config.limits.stream_idle_timeout_ms;
+    }
+    return 60000;
+}
+
+std::uint64_t ManagedListenerImpl::resolve_write_timeout_ms(const PendingRequest& pending) const {
+    if (pending.pool && pending.pool->write_timeout_ms() != 0) {
+        return pending.pool->write_timeout_ms();
+    }
+    if (options_.config.limits.write_timeout_ms != 0) {
+        return options_.config.limits.write_timeout_ms;
+    }
+    return options_.config.limits.stream_idle_timeout_ms;
+}
+
+void ManagedListenerImpl::arm_stream_idle_timer(const WorkerExecutor* executor,
+                                                std::uint64_t request_id, PendingRequest& pending) {
+    const std::uint64_t ms = resolve_stream_idle_timeout_ms(pending);
+    if (ms == 0) {
+        return;
+    }
+    if (!pending.idle_timer) {
+        pending.idle_timer.emplace(mailbox_->ioc);
+    }
+    pending.idle_timer->expires_after(std::chrono::milliseconds(ms));
+    pending.idle_timer->async_wait(
+        [self = shared_from_this(), executor, request_id](const beast::error_code ec) {
+            self->on_stream_idle_timer(executor, request_id, ec);
+        });
+}
+
+void ManagedListenerImpl::on_stream_idle_timer(const WorkerExecutor* executor,
+                                               std::uint64_t request_id,
+                                               const beast::error_code ec) {
+    if (ec) {
+        return;
+    }
+    auto it = requests_.find({executor, request_id});
+    if (it == requests_.end()) {
+        return;
+    }
+    const std::shared_ptr<ListenerSession> session = it->second.session;
+    cancel_request(executor, request_id);
+    if (session && !session->closed()) {
+        session->close();
+    }
+}
+
 void ManagedListenerImpl::arm_write_timer(std::uint64_t request_id, PendingRequest& pending) {
-    const std::uint64_t ms = options_.config.limits.stream_idle_timeout_ms;
+    const std::uint64_t ms = resolve_write_timeout_ms(pending);
     if (ms == 0) {
         return;
     }

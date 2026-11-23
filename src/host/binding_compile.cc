@@ -8,7 +8,10 @@
 #include "host/binding_compile.h"
 
 #include "host/config.h"
+#include "host/json_codec.h"
+#include "host/units.h"
 #include "ipc_validation.h"
+#include "net_target.h"
 #include "sandbox.h"
 
 #include <jansson.h>
@@ -73,109 +76,12 @@ bool read_string_array(json_t* parent, const char* key, std::vector<std::string>
     return true;
 }
 
-// Static net-target containment. Returns true when `app` is provably
-// covered by `manifest`; both were grammar-validated at schema time.
-bool net_target_contained(const std::string& app, const std::string& manifest) {
-    if (app == manifest) {
-        return true;
-    }
-    const auto split = [](const std::string& target, std::string* host, std::string* port) {
-        if (target.empty()) {
-            return false;
-        }
-        if (target[0] == '[') {
-            const std::size_t close = target.find(']');
-            if (close == std::string::npos || close + 1 >= target.size() ||
-                target[close + 1] != ':') {
-                return false;
-            }
-            *host = target.substr(1, close - 1);
-            *port = target.substr(close + 2);
-            return true;
-        }
-        const std::size_t colon = target.find(':');
-        if (colon == std::string::npos || target.find(':', colon + 1) != std::string::npos) {
-            return false;
-        }
-        *host = target.substr(0, colon);
-        *port = target.substr(colon + 1);
-        return true;
-    };
-    std::string app_host;
-    std::string app_port;
-    std::string manifest_host;
-    std::string manifest_port;
-    if (!split(app, &app_host, &app_port) || !split(manifest, &manifest_host, &manifest_port) ||
-        app_port != manifest_port) {
-        return false;
-    }
-    if (manifest_host == "*") {
-        return app_host != "*";
-    }
-    if (app_host == "*") {
-        return false;
-    }
-    // Wildcard-label suffix: app a.b.c is contained by *.b.c.
-    if (manifest_host.size() >= 2 && manifest_host[0] == '*' && manifest_host[1] == '.') {
-        const std::string suffix = manifest_host.substr(1); // ".b.c"
-        return app_host.size() > suffix.size() &&
-               app_host.compare(app_host.size() - suffix.size(), suffix.size(), suffix) == 0;
-    }
-    if (app_host.find('*') != std::string::npos || manifest_host.find('*') != std::string::npos) {
-        return false;
-    }
-    // CIDR containment: same address family, manifest prefix no wider,
-    // networks equal after masking.
-    const std::size_t app_slash = app_host.find('/');
-    const std::size_t manifest_slash = manifest_host.find('/');
-    if (app_slash == std::string::npos || manifest_slash == std::string::npos) {
-        return false;
-    }
-    const std::string app_address = app_host.substr(0, app_slash);
-    const std::string manifest_address = manifest_host.substr(0, manifest_slash);
-    const unsigned int app_prefix =
-        static_cast<unsigned int>(std::stoul(app_host.substr(app_slash + 1)));
-    const unsigned int manifest_prefix =
-        static_cast<unsigned int>(std::stoul(manifest_host.substr(manifest_slash + 1)));
-    if (manifest_prefix > app_prefix) {
-        return false;
-    }
-    unsigned char app_bytes[16] = {};
-    unsigned char manifest_bytes[16] = {};
-    const bool app_v6 = app_address.find(':') != std::string::npos;
-    const bool manifest_v6 = manifest_address.find(':') != std::string::npos;
-    if (app_v6 != manifest_v6) {
-        return false;
-    }
-    if (app_v6) {
-        if (inet_pton(AF_INET6, app_address.c_str(), app_bytes) != 1 ||
-            inet_pton(AF_INET6, manifest_address.c_str(), manifest_bytes) != 1 ||
-            manifest_prefix > 128 || app_prefix > 128) {
-            return false;
-        }
-    } else {
-        if (inet_pton(AF_INET, app_address.c_str(), app_bytes) != 1 ||
-            inet_pton(AF_INET, manifest_address.c_str(), manifest_bytes) != 1 ||
-            manifest_prefix > 32 || app_prefix > 32) {
-            return false;
-        }
-    }
-    for (unsigned int bit = 0; bit < manifest_prefix; ++bit) {
-        const unsigned int byte = bit / 8;
-        const unsigned int shift = 7 - (bit % 8);
-        if (((app_bytes[byte] >> shift) & 1) != ((manifest_bytes[byte] >> shift) & 1)) {
-            return false;
-        }
-    }
-    return true;
+inline bool net_target_contained(const std::string& app, const std::string& manifest) {
+    return capsid::net_target_contained(app, manifest);
 }
 
-bool fs_path_contained(const std::string& app, const std::string& manifest) {
-    if (app == manifest) {
-        return true;
-    }
-    return app.size() > manifest.size() && app.compare(0, manifest.size(), manifest) == 0 &&
-           app[manifest.size()] == '/';
+inline bool fs_path_contained(const std::string& app, const std::string& manifest) {
+    return units::fs_path_contained(app, manifest);
 }
 
 bool contains_exact(const std::vector<std::string>& list, const std::string& value) {
@@ -189,11 +95,11 @@ bool parse_manifest_fields(const std::string& manifest_json, std::vector<std::st
                            std::vector<std::string>* fs_read, std::vector<std::string>* fs_write,
                            std::vector<std::string>* env, std::vector<std::string>* stdio,
                            std::string* error) {
-    json_error_t parse_error;
-    json_t* root = json_loads(manifest_json.c_str(), JSON_REJECT_DUPLICATES, &parse_error);
-    if (root == nullptr) {
+    StrictJsonResult parsed = parse_strict_json(manifest_json, kMaxBindingManifestBytes, 64U, true);
+    if (!parsed.ok) {
         return fail(error, "binding manifest is unparseable");
     }
+    json_t* root = parsed.root.release();
     json_t* sandbox = json_object_get(root, "sandbox");
     json_t* permissions = json_object_get(root, "permissions");
     if (sandbox != nullptr && !read_string_array(sandbox, "requires", profiles, error)) {
@@ -354,6 +260,16 @@ capsid::WorkerReadyProof expected_worker_ready_proof(const std::vector<Effective
     expected.applied_feature_bits = strict_sandbox
                                         ? static_cast<uint32_t>(CAPSID_SANDBOX_FEATURE_STRICT_BASE)
                                         : resource_features;
+    if (strict_sandbox) {
+        expected.applied_feature_bits |=
+            (config.sandbox_required_features &
+             (CAPSID_SANDBOX_FEATURE_USER_NAMESPACE | CAPSID_SANDBOX_FEATURE_MOUNT_NAMESPACE |
+              CAPSID_SANDBOX_FEATURE_IPC_NAMESPACE | CAPSID_SANDBOX_FEATURE_UTS_NAMESPACE |
+              CAPSID_SANDBOX_FEATURE_CGROUP_V2 | CAPSID_SANDBOX_FEATURE_NETWORK_NAMESPACE));
+        if (config.sandbox_cgroup_path != nullptr && config.sandbox_cgroup_path[0] != '\0') {
+            expected.applied_feature_bits |= CAPSID_SANDBOX_FEATURE_CGROUP_V2;
+        }
+    }
     expected.seccomp_mode = strict_sandbox ? capsid::kSeccompModeFilter : 0;
     expected.landlock_abi = strict_sandbox ? host_landlock_abi() : 0;
     expected.network_namespace_identity.clear();

@@ -247,6 +247,326 @@ bool read_binding_list(const uint8_t** cursor, const uint8_t* end, std::vector<s
     return true;
 }
 
+bool is_valid_utf8_bytes(const std::string& text) {
+    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(text.data());
+    const size_t n = text.size();
+    size_t i = 0;
+    while (i < n) {
+        const unsigned char b0 = bytes[i];
+        if (b0 <= 0x7Fu) {
+            ++i;
+            continue;
+        }
+        if (b0 >= 0xC2u && b0 <= 0xDFu) {
+            if (i + 1 >= n || (bytes[i + 1] & 0xC0u) != 0x80u) {
+                return false;
+            }
+            i += 2;
+            continue;
+        }
+        if (b0 >= 0xE0u && b0 <= 0xEFu) {
+            if (i + 2 >= n || (bytes[i + 1] & 0xC0u) != 0x80u || (bytes[i + 2] & 0xC0u) != 0x80u) {
+                return false;
+            }
+            const unsigned char b1 = bytes[i + 1];
+            if ((b0 == 0xE0u && b1 < 0xA0u) || (b0 == 0xEDu && b1 >= 0xA0u)) {
+                return false;
+            }
+            i += 3;
+            continue;
+        }
+        if (b0 >= 0xF0u && b0 <= 0xF4u) {
+            if (i + 3 >= n || (bytes[i + 1] & 0xC0u) != 0x80u || (bytes[i + 2] & 0xC0u) != 0x80u ||
+                (bytes[i + 3] & 0xC0u) != 0x80u) {
+                return false;
+            }
+            const unsigned char b1 = bytes[i + 1];
+            if ((b0 == 0xF0u && b1 < 0x90u) || (b0 == 0xF4u && b1 > 0x8Fu)) {
+                return false;
+            }
+            i += 4;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+struct BindingConfigJsonParser {
+    const std::string& s;
+    size_t pos;
+    size_t depth;
+
+    explicit BindingConfigJsonParser(const std::string& input) : s(input), pos(0), depth(0) {}
+
+    void skip_ws() {
+        while (pos < s.size()) {
+            const char c = s[pos];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                ++pos;
+            } else {
+                break;
+            }
+        }
+    }
+
+    static bool hex4(const char* p, uint16_t* out) {
+        uint16_t v = 0;
+        for (int i = 0; i < 4; ++i) {
+            const char c = p[i];
+            int d = -1;
+            if (c >= '0' && c <= '9')
+                d = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                d = 10 + (c - 'a');
+            else if (c >= 'A' && c <= 'F')
+                d = 10 + (c - 'A');
+            else
+                return false;
+            v = static_cast<uint16_t>((v << 4) | static_cast<uint16_t>(d));
+        }
+        *out = v;
+        return true;
+    }
+
+    bool parse_string() {
+        if (pos >= s.size() || s[pos] != '"') {
+            return false;
+        }
+        ++pos;
+        while (pos < s.size()) {
+            const unsigned char c = static_cast<unsigned char>(s[pos++]);
+            if (c == '"') {
+                return true;
+            }
+            if (c < 0x20u) {
+                return false;
+            }
+            if (c == '\\') {
+                if (pos >= s.size()) {
+                    return false;
+                }
+                const char esc = s[pos++];
+                switch (esc) {
+                case '"':
+                case '\\':
+                case '/':
+                case 'b':
+                case 'f':
+                case 'n':
+                case 'r':
+                case 't':
+                    break;
+                case 'u': {
+                    if (s.size() - pos < 4) {
+                        return false;
+                    }
+                    uint16_t cp = 0;
+                    if (!hex4(&s[pos], &cp) || cp == 0) {
+                        return false;
+                    }
+                    pos += 4;
+                    if (cp >= 0xDC00u && cp <= 0xDFFFu) {
+                        return false; // unpaired low surrogate
+                    }
+                    if (cp >= 0xD800u && cp <= 0xDBFFu) {
+                        if (s.size() - pos < 6 || s[pos] != '\\' || s[pos + 1] != 'u') {
+                            return false; // unpaired high surrogate
+                        }
+                        uint16_t low = 0;
+                        if (!hex4(&s[pos + 2], &low) || low < 0xDC00u || low > 0xDFFFu) {
+                            return false;
+                        }
+                        pos += 6;
+                    }
+                    break;
+                }
+                default:
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool parse_number() {
+        const size_t start = pos;
+        bool negative = false;
+        if (pos < s.size() && s[pos] == '-') {
+            negative = true;
+            ++pos;
+        }
+        if (pos >= s.size()) {
+            return false;
+        }
+        const size_t int_start = pos;
+        if (s[pos] == '0') {
+            ++pos;
+            if (pos < s.size() && s[pos] >= '0' && s[pos] <= '9') {
+                return false;
+            }
+        } else if (s[pos] >= '1' && s[pos] <= '9') {
+            ++pos;
+            while (pos < s.size() && s[pos] >= '0' && s[pos] <= '9') {
+                ++pos;
+            }
+        } else {
+            return false;
+        }
+        const size_t int_end = pos;
+        bool is_float = false;
+        if (pos < s.size() && s[pos] == '.') {
+            is_float = true;
+            ++pos;
+            if (pos >= s.size() || s[pos] < '0' || s[pos] > '9') {
+                return false;
+            }
+            while (pos < s.size() && s[pos] >= '0' && s[pos] <= '9') {
+                ++pos;
+            }
+        }
+        if (pos < s.size() && (s[pos] == 'e' || s[pos] == 'E')) {
+            is_float = true;
+            ++pos;
+            if (pos < s.size() && (s[pos] == '+' || s[pos] == '-')) {
+                ++pos;
+            }
+            if (pos >= s.size() || s[pos] < '0' || s[pos] > '9') {
+                return false;
+            }
+            while (pos < s.size() && s[pos] >= '0' && s[pos] <= '9') {
+                ++pos;
+            }
+        }
+        if (pos == start) {
+            return false;
+        }
+        if (!is_float) {
+            (void)negative;
+            static const uint64_t kMaxSafeInt = UINT64_C(9007199254740991);
+            uint64_t mag = 0;
+            for (size_t i = int_start; i < int_end; ++i) {
+                const uint64_t d = static_cast<uint64_t>(s[i] - '0');
+                if (mag > (kMaxSafeInt - d) / UINT64_C(10)) {
+                    return false;
+                }
+                mag = mag * UINT64_C(10) + d;
+            }
+        }
+        return true;
+    }
+
+    bool parse_value() {
+        skip_ws();
+        if (pos >= s.size()) {
+            return false;
+        }
+        const char c = s[pos];
+        if (c == '{') {
+            if (++depth > 64) {
+                return false;
+            }
+            ++pos;
+            skip_ws();
+            if (pos < s.size() && s[pos] == '}') {
+                ++pos;
+                --depth;
+                return true;
+            }
+            for (;;) {
+                skip_ws();
+                if (!parse_string()) {
+                    return false;
+                }
+                skip_ws();
+                if (pos >= s.size() || s[pos] != ':') {
+                    return false;
+                }
+                ++pos;
+                if (!parse_value()) {
+                    return false;
+                }
+                skip_ws();
+                if (pos < s.size() && s[pos] == ',') {
+                    ++pos;
+                    continue;
+                }
+                if (pos < s.size() && s[pos] == '}') {
+                    ++pos;
+                    --depth;
+                    return true;
+                }
+                return false;
+            }
+        }
+        if (c == '[') {
+            if (++depth > 64) {
+                return false;
+            }
+            ++pos;
+            skip_ws();
+            if (pos < s.size() && s[pos] == ']') {
+                ++pos;
+                --depth;
+                return true;
+            }
+            for (;;) {
+                if (!parse_value()) {
+                    return false;
+                }
+                skip_ws();
+                if (pos < s.size() && s[pos] == ',') {
+                    ++pos;
+                    continue;
+                }
+                if (pos < s.size() && s[pos] == ']') {
+                    ++pos;
+                    --depth;
+                    return true;
+                }
+                return false;
+            }
+        }
+        if (c == '"') {
+            return parse_string();
+        }
+        if (c == 't') {
+            if (s.size() - pos >= 4 && s.compare(pos, 4, "true") == 0) {
+                pos += 4;
+                return true;
+            }
+            return false;
+        }
+        if (c == 'f') {
+            if (s.size() - pos >= 5 && s.compare(pos, 5, "false") == 0) {
+                pos += 5;
+                return true;
+            }
+            return false;
+        }
+        if (c == 'n') {
+            if (s.size() - pos >= 4 && s.compare(pos, 4, "null") == 0) {
+                pos += 4;
+                return true;
+            }
+            return false;
+        }
+        return parse_number();
+    }
+};
+
+bool valid_binding_config_json(const std::string& json) {
+    if (json.empty() || !is_valid_utf8_bytes(json)) {
+        return false;
+    }
+    BindingConfigJsonParser parser(json);
+    if (!parser.parse_value()) {
+        return false;
+    }
+    parser.skip_ws();
+    return parser.pos == json.size();
+}
+
 bool parse_binding_blob(const std::vector<uint8_t>& blob, capsid::WorkerBindingDescriptor* out,
                         std::string* error) {
     if (blob.size() < sizeof(uint32_t)) {
@@ -269,7 +589,8 @@ bool parse_binding_blob(const std::vector<uint8_t>& blob, capsid::WorkerBindingD
         return reject(error, "invalid binding name");
     }
     if (!read_string32(&cursor, descriptor_end, &decoded.config_json) ||
-        contains_nul(decoded.config_json) || decoded.config_json.size() > kMaxBindingConfigBytes) {
+        contains_nul(decoded.config_json) || decoded.config_json.size() > kMaxBindingConfigBytes ||
+        !valid_binding_config_json(decoded.config_json)) {
         return reject(error, "invalid binding config");
     }
 
@@ -745,6 +1066,9 @@ bool WorkerStartupState::consume(const protocol::Frame& frame, std::string* erro
         bundle_started_ = true;
         bundle_name_ = new_name;
         bundle_is_trusted_bytecode_ = (frame.flags & protocol::kFlagTrustedBytecode) != 0;
+        if ((frame.flags & protocol::kFlagEnd) != 0 && !bundle_is_trusted_bytecode_) {
+            bundle_.reserve(payload_size + 1);
+        }
     }
     bundle_.insert(bundle_.end(), frame.payload.begin() + static_cast<ptrdiff_t>(payload_offset),
                    frame.payload.end());
@@ -915,6 +1239,31 @@ bool parse_ready_proof(const std::vector<uint8_t>& payload, std::string* compati
     }
     proof->extended = true;
     return true;
+}
+
+void WorkerStartupState::clear_sensitive_and_release() {
+    for (size_t i = 0; i < bindings_.size(); ++i) {
+        for (size_t s = 0; s < bindings_[i].secrets.size(); ++s) {
+            std::vector<uint8_t>& val = bindings_[i].secrets[s].value;
+            for (size_t k = 0; k < val.size(); ++k) {
+                volatile uint8_t* p = &val[k];
+                *p = 0;
+            }
+            std::vector<uint8_t>().swap(val);
+        }
+        std::vector<WorkerBindingSecret>().swap(bindings_[i].secrets);
+        std::vector<uint8_t>().swap(bindings_[i].source);
+        std::string().swap(bindings_[i].config_json);
+    }
+    std::vector<WorkerBindingDescriptor>().swap(bindings_);
+    for (size_t k = 0; k < binding_blob_.size(); ++k) {
+        volatile uint8_t* p = &binding_blob_[k];
+        *p = 0;
+    }
+    std::vector<uint8_t>().swap(binding_blob_);
+    std::vector<uint8_t>().swap(bundle_);
+    std::string().swap(bundle_name_);
+    config_.tls_ca_bundle_path.clear();
 }
 
 } // namespace capsid

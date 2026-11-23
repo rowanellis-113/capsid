@@ -33,6 +33,11 @@ void close_unrelated_descriptors(int ipc_fd, int network_namespace_fd) {
         static_cast<unsigned int>(network_namespace_fd > ipc_fd ? network_namespace_fd : ipc_fd);
     if (max_reserved >= 3 &&
         syscall(__NR_close_range, max_reserved + 1, ~static_cast<unsigned int>(0), 0) == 0) {
+        for (int fd = 3; fd <= static_cast<int>(max_reserved); ++fd) {
+            if (fd != ipc_fd && fd != network_namespace_fd) {
+                (void)close(fd);
+            }
+        }
         return;
     }
 #endif

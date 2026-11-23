@@ -92,6 +92,11 @@ struct GenerationPoolOptions {
     // exposes them for diagnostics.
     std::uint64_t max_inflight_per_worker = 0;
     std::uint64_t max_queued_requests = 0;
+    std::uint64_t queue_header_bytes = 0;
+    std::uint64_t queue_timeout_ms = 0;
+    std::uint64_t max_streaming_inflight_per_worker = 0;
+    std::uint64_t stream_idle_timeout_ms = 0;
+    std::uint64_t write_timeout_ms = 0;
     // §8.2 drain deadline for wait()/stop_and_join(): the whole-fleet
     // bound. Per-request cancellation is the executor's shutdown grace.
     std::chrono::milliseconds drain_deadline = std::chrono::seconds(10);
@@ -267,6 +272,14 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // The generation's immutable per-worker inflight ceiling (0 = the
     // session layer imposes no cap beyond the worker's own limit).
     std::uint64_t max_inflight_per_worker() const { return options_.max_inflight_per_worker; }
+    std::uint64_t max_queued_requests() const { return options_.max_queued_requests; }
+    std::uint64_t queue_header_bytes() const { return options_.queue_header_bytes; }
+    std::uint64_t queue_timeout_ms() const { return options_.queue_timeout_ms; }
+    std::uint64_t max_streaming_inflight_per_worker() const {
+        return options_.max_streaming_inflight_per_worker;
+    }
+    std::uint64_t stream_idle_timeout_ms() const { return options_.stream_idle_timeout_ms; }
+    std::uint64_t write_timeout_ms() const { return options_.write_timeout_ms; }
     // The configured fleet size (the count the ledger reserved for this
     // pool; distinct from ready_workers(), which can drop below it while
     // the generation is reaping). PR-10 §9.4.
@@ -335,7 +348,11 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     std::vector<Slot> slots_;
     // Replaced (dead) executors with pinned requests: kept alive until
     // the pool dies so a pinned request never touches freed memory.
-    std::vector<std::shared_ptr<WorkerExecutor>> retired_;
+    struct RetiredExecutor {
+        std::shared_ptr<WorkerExecutor> executor;
+        bool joined = false;
+    };
+    std::vector<RetiredExecutor> retired_;
     // Slots covered by a scheduled-or-running replacement: the per-App
     // singleflight counter the recovery controller sees.
     std::uint64_t replacements_scheduled_ = 0;
@@ -358,8 +375,12 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     std::optional<std::chrono::steady_clock::time_point> drain_until_;
     std::uint64_t stable_since_ms_ = 0;         // continuous-READY base
     std::uint32_t ready_workers_locked() const; // caller holds mutex_
+    struct ReplacementWorker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
     std::thread pump_thread_;
-    std::vector<std::thread> replacement_threads_;
+    std::vector<ReplacementWorker> replacement_threads_;
     std::once_flag wait_once_;
 };
 

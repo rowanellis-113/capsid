@@ -1,48 +1,14 @@
 #include "host/structured_log.h"
 
+#include "json_escape.h"
+
 #include <chrono>
 
 namespace capsid::host {
 
 namespace {
 
-// JSON string escaping for field values. Log values are already sanitized
-// at the call site (secrets, headers, bodies and raw errors never arrive
-// here); escaping keeps the single-line JSON contract even for unusual
-// application payloads in the message field.
-std::string json_escape(const std::string& value) {
-    std::string out;
-    out.reserve(value.size() + 8);
-    for (const unsigned char c : value) {
-        switch (c) {
-        case '"':
-            out += "\\\"";
-            break;
-        case '\\':
-            out += "\\\\";
-            break;
-        case '\n':
-            out += "\\n";
-            break;
-        case '\r':
-            out += "\\r";
-            break;
-        case '\t':
-            out += "\\t";
-            break;
-        default:
-            if (c < 0x20) {
-                static constexpr char kHex[] = "0123456789abcdef";
-                out += "\\u00";
-                out.push_back(kHex[(c >> 4) & 0xF]);
-                out.push_back(kHex[c & 0xF]);
-            } else {
-                out.push_back(static_cast<char>(c));
-            }
-        }
-    }
-    return out;
-}
+using capsid::json_escape;
 
 } // namespace
 

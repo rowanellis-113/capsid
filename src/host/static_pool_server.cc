@@ -421,6 +421,8 @@ class StaticPoolServerImpl : public std::enable_shared_from_this<StaticPoolServe
             case RequestRoutingMode::kHeader:
                 probe_capsid_app = worker_options.application;
                 break;
+            case RequestRoutingMode::kSingle:
+                break;
             }
             std::string probe_error;
             const bool probe_ok = probe_local_health(

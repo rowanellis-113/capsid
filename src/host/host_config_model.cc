@@ -10,13 +10,12 @@
 #include "host/host_config_model.h"
 
 #include "host/config.h"
+#include "host/units.h"
 #include "protocol.h"
 #include "host/listener_cors.h"
 #include "host/request_normalization.h"
 
 #include <jansson.h>
-
-#include <sys/stat.h>
 
 #include <cerrno>
 #include <cstdlib>
@@ -58,78 +57,17 @@ bool parse_string_array(json_t* parent, const char* key, std::vector<std::string
 
 // "256MiB" style size with explicit suffix (the frozen size grammar).
 bool parse_size_bytes_text(const std::string& text, std::uint64_t* out) {
-    if (text.empty()) {
-        return false;
-    }
-    char* end = nullptr;
-    errno = 0;
-    const unsigned long long base = std::strtoull(text.c_str(), &end, 10);
-    if (errno != 0 || end == text.c_str()) {
-        return false;
-    }
-    std::uint64_t multiplier = 0;
-    const std::string suffix(end);
-    if (suffix == "KiB") {
-        multiplier = 1024ULL;
-    } else if (suffix == "MiB") {
-        multiplier = 1024ULL * 1024ULL;
-    } else if (suffix == "GiB") {
-        multiplier = 1024ULL * 1024ULL * 1024ULL;
-    } else if (suffix == "KB") {
-        multiplier = 1000ULL;
-    } else if (suffix == "MB") {
-        multiplier = 1000ULL * 1000ULL;
-    } else if (suffix == "GB") {
-        multiplier = 1000ULL * 1000ULL * 1000ULL;
-    } else {
-        return false;
-    }
-    if (base > std::numeric_limits<std::uint64_t>::max() / multiplier) {
-        return false;
-    }
-    *out = static_cast<std::uint64_t>(base) * multiplier;
-    return true;
+    return units::parse_size_bytes(text, out, /*allow_bare_bytes=*/false);
 }
 
 // "250ms" / "5s" / "1m" duration (the frozen duration grammar); unit is
 // required and the value must be a positive integer.
 bool parse_duration_ms_text(const std::string& text, std::uint64_t* out) {
-    std::string::size_type number_end = 0;
-    for (std::string::size_type index = 0; index < text.size(); ++index) {
-        const char c = text[index];
-        if (c < '0' || c > '9') {
-            break;
-        }
-        number_end = index + 1;
-    }
-    if (number_end == 0 || number_end == text.size()) {
+    std::uint64_t parsed = 0;
+    if (!units::parse_duration_ms(text, &parsed, /*allow_hours=*/false) || parsed == 0) {
         return false;
     }
-    std::uint64_t multiplier = 0;
-    const std::string unit = text.substr(number_end);
-    if (unit == "ms") {
-        multiplier = 1;
-    } else if (unit == "s") {
-        multiplier = 1000;
-    } else if (unit == "m") {
-        multiplier = 60U * 1000U;
-    } else {
-        return false;
-    }
-    errno = 0;
-    char* end = nullptr;
-    // The strtoull end-pointer must not outlive the string it points into;
-    // a temporary from substr() would be destroyed at the end of the full
-    // expression, leaving *end a stack-use-after-scope read (ASAN caught
-    // this). Keep the substring alive for the duration of the check.
-    const std::string numeric_text = text.substr(0, number_end);
-    const unsigned long long parsed = std::strtoull(numeric_text.c_str(), &end, 10);
-    if (errno != 0 || end == nullptr || *end != '\0' || parsed == 0 ||
-        parsed > static_cast<unsigned long long>(std::numeric_limits<std::uint64_t>::max() /
-                                                 multiplier)) {
-        return false;
-    }
-    *out = static_cast<std::uint64_t>(parsed) * multiplier;
+    *out = parsed;
     return true;
 }
 
@@ -236,6 +174,7 @@ bool parse_listeners(json_t* root, std::vector<ListenerConfig>* out) {
         if (json_is_object(routing)) {
             config.routing.mode = json_string_field(routing, "mode");
             config.routing.suffix = json_string_field(routing, "suffix");
+            config.routing.header = json_string_field(routing, "header");
         }
         json_t* limits = json_object_get(listener, "limits");
         if (json_is_object(limits)) {
@@ -246,7 +185,9 @@ bool parse_listeners(json_t* root, std::vector<ListenerConfig>* out) {
                 !parse_duration_text_field(limits, "bodyIdleTimeout",
                                            &config.limits.body_idle_timeout_ms) ||
                 !parse_duration_text_field(limits, "streamIdleTimeout",
-                                           &config.limits.stream_idle_timeout_ms)) {
+                                           &config.limits.stream_idle_timeout_ms) ||
+                !parse_duration_text_field(limits, "writeTimeout",
+                                           &config.limits.write_timeout_ms)) {
                 return false;
             }
             if (!parse_uint_field(limits, "channels", &config.limits.channels) ||
@@ -643,10 +584,10 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
             char* end = nullptr;
             const unsigned long parsed = std::strtoul(mode_text.c_str(), &end, 8);
             if (end == nullptr || *end != '\0' || parsed > 07777 ||
-                static_cast<mode_t>(parsed) != 0600) {
+                static_cast<unsigned>(parsed) != 0600) {
                 return reject("admin.mode must be 0600");
             }
-            config.admin_mode = static_cast<mode_t>(parsed);
+            config.admin_mode = static_cast<unsigned>(parsed);
         }
     }
 
@@ -660,6 +601,8 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
                          &config.isolation_cgroup_root)) {
         return reject("isolation.mode must be strict");
     }
+    config.policy.isolation_required = config.isolation_required;
+    config.policy.isolation_cgroup_root = config.isolation_cgroup_root;
     if (!parse_trusted_bytecode_keys(root, &config.trusted_keys)) {
         return reject("invalid host.json trustedBytecodeKeys");
     }
@@ -668,12 +611,32 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
     if (defaults != nullptr && !parse_tier(defaults, &config.defaults)) {
         return reject("invalid host.json defaults");
     }
+    if (!config.defaults.worker.js_heap.empty() &&
+        !parse_size_bytes_text(config.defaults.worker.js_heap,
+                               &config.policy.default_js_heap_bytes)) {
+        return reject("invalid defaults.worker.jsHeap");
+    }
+    if (!config.defaults.worker.memory_max.empty() &&
+        !parse_size_bytes_text(config.defaults.worker.memory_max,
+                               &config.policy.default_worker_memory_bytes)) {
+        return reject("invalid defaults.worker.memoryMax");
+    }
+    config.policy.default_file_descriptors = config.defaults.worker.file_descriptors;
     if (!config.defaults.request.timeout.empty()) {
         if (!parse_duration_ms_text(config.defaults.request.timeout,
                                     &config.policy.default_request_timeout_ms)) {
             return reject("invalid defaults.request.timeout");
         }
     }
+    config.policy.default_requests_per_worker = config.defaults.request.max_inflight_per_worker;
+    config.policy.default_max_streaming_inflight_per_worker =
+        config.defaults.request.max_streaming_inflight_per_worker;
+    config.policy.default_stream_idle_timeout_ms = config.defaults.request.stream_idle_timeout_ms;
+    config.policy.default_write_timeout_ms = config.defaults.request.write_timeout_ms;
+    config.policy.default_queue_requests = config.defaults.pool.queue_requests;
+    config.policy.default_queue_header_bytes = config.defaults.pool.queue_header_bytes;
+    config.policy.default_queue_timeout_ms = config.defaults.pool.queue_timeout_ms;
+
     json_t* maximums = json_object_get(root, "maximums");
     if (maximums != nullptr) {
         if (!parse_tier(maximums, &config.maximums)) {
@@ -691,6 +654,12 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
             config.maximums.request.max_streaming_inflight_per_worker;
         config.policy.max_stream_idle_timeout_ms = config.maximums.request.stream_idle_timeout_ms;
         config.policy.max_write_timeout_ms = config.maximums.request.write_timeout_ms;
+        if (!config.maximums.worker.js_heap.empty()) {
+            if (!parse_size_bytes_text(config.maximums.worker.js_heap,
+                                       &config.policy.max_js_heap_bytes)) {
+                return reject("invalid maximums.worker.jsHeap");
+            }
+        }
         if (!config.maximums.worker.memory_max.empty()) {
             std::uint64_t bytes = 0;
             if (!parse_size_bytes_text(config.maximums.worker.memory_max, &bytes)) {
@@ -698,13 +667,35 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
             }
             config.policy.max_worker_memory_bytes = bytes;
         }
+        config.policy.max_file_descriptors = config.maximums.worker.file_descriptors;
         config.policy.max_queue_requests = config.maximums.pool.queue_requests;
         config.policy.max_queue_header_bytes = config.maximums.pool.queue_header_bytes;
         config.policy.max_queue_timeout_ms = config.maximums.pool.queue_timeout_ms;
     }
-    if (config.policy.max_request_timeout_ms != 0 &&
-        config.policy.default_request_timeout_ms > config.policy.max_request_timeout_ms) {
-        return reject("default request timeout exceeds the Host maximum");
+    if ((config.policy.max_request_timeout_ms != 0 &&
+         config.policy.default_request_timeout_ms > config.policy.max_request_timeout_ms) ||
+        (config.policy.max_worker_memory_bytes != 0 &&
+         config.policy.default_worker_memory_bytes > config.policy.max_worker_memory_bytes) ||
+        (config.policy.max_js_heap_bytes != 0 &&
+         config.policy.default_js_heap_bytes > config.policy.max_js_heap_bytes) ||
+        (config.policy.max_file_descriptors != 0 &&
+         config.policy.default_file_descriptors > config.policy.max_file_descriptors) ||
+        (config.policy.max_requests_per_worker != 0 &&
+         config.policy.default_requests_per_worker > config.policy.max_requests_per_worker) ||
+        (config.policy.max_queue_requests != 0 &&
+         config.policy.default_queue_requests > config.policy.max_queue_requests) ||
+        (config.policy.max_queue_header_bytes != 0 &&
+         config.policy.default_queue_header_bytes > config.policy.max_queue_header_bytes) ||
+        (config.policy.max_queue_timeout_ms != 0 &&
+         config.policy.default_queue_timeout_ms > config.policy.max_queue_timeout_ms) ||
+        (config.policy.max_streaming_inflight_per_worker != 0 &&
+         config.policy.default_max_streaming_inflight_per_worker >
+             config.policy.max_streaming_inflight_per_worker) ||
+        (config.policy.max_stream_idle_timeout_ms != 0 &&
+         config.policy.default_stream_idle_timeout_ms > config.policy.max_stream_idle_timeout_ms) ||
+        (config.policy.max_write_timeout_ms != 0 &&
+         config.policy.default_write_timeout_ms > config.policy.max_write_timeout_ms)) {
+        return reject("host.json default value exceeds the Host maximum");
     }
     if (!parse_capacity(root, &config.capacity)) {
         return reject("invalid host.json capacity");
@@ -741,11 +732,13 @@ ResolvedRecoveryPolicy resolve_recovery_policy(const RecoveryConfig& config) {
     // The jitter text is a percent or decimal-basis-points grammar; the
     // schema validated it, so an unparseable value here is a startup error.
     ResolvedRecoveryPolicy out;
-    out.policy.max_events = config.crash_budget.max_events > 0 ? config.crash_budget.max_events : 5;
-    if (out.policy.max_events > kMaxTrackedInstabilityEvents) {
+    const std::uint64_t max_events =
+        config.crash_budget.max_events > 0 ? config.crash_budget.max_events : 5;
+    if (max_events > kMaxTrackedInstabilityEvents) {
         out.error = "crash budget exceeds the tracked-event window";
         return out;
     }
+    out.policy.max_events = static_cast<std::uint32_t>(max_events);
     out.policy.window_ms =
         config.crash_budget.window_ms > 0 ? config.crash_budget.window_ms : 60000;
     out.policy.backoff_initial_ms =
@@ -775,8 +768,13 @@ ResolvedRecoveryPolicy resolve_recovery_policy(const RecoveryConfig& config) {
     // PROBE cadence, not the backoff reset); the Host default always
     // applies.
     out.policy.stable_reset_ms = 60000;
-    out.policy.replacements_concurrent_per_app =
+    const std::uint64_t replacements =
         config.replacements_concurrent_per_app > 0 ? config.replacements_concurrent_per_app : 1;
+    if (replacements > std::numeric_limits<std::uint32_t>::max()) {
+        out.error = "replacementsConcurrentPerApp exceeds uint32 range";
+        return out;
+    }
+    out.policy.replacements_concurrent_per_app = static_cast<std::uint32_t>(replacements);
     out.ok = true;
     return out;
 }

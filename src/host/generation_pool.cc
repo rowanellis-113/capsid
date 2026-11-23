@@ -9,6 +9,7 @@
 #include "host/managed_admin_backend.h"
 #include "host/metrics.h"
 #include "host/structured_log.h"
+#include "host/worker_cgroup.h"
 #include "host/worker_recovery.h"
 #include "host/worker_capacity_ledger.h"
 
@@ -179,6 +180,7 @@ std::shared_ptr<GenerationPool> GenerationPool::create_adopted(GenerationPoolOpt
         // transferred ownership by calling create_adopted.
         for (capsid_worker* worker : warmed) {
             capsid_worker_destroy(worker);
+            release_worker_cgroup(worker);
         }
         return nullptr;
     }
@@ -189,6 +191,7 @@ std::shared_ptr<GenerationPool> GenerationPool::create_adopted(GenerationPoolOpt
         }
         for (capsid_worker* worker : warmed) {
             capsid_worker_destroy(worker);
+            release_worker_cgroup(worker);
         }
         return nullptr;
     }
@@ -207,6 +210,7 @@ std::shared_ptr<GenerationPool> GenerationPool::create_adopted(GenerationPoolOpt
         }
         for (capsid_worker* worker : warmed) {
             capsid_worker_destroy(worker);
+            release_worker_cgroup(worker);
         }
         return nullptr;
     }
@@ -217,6 +221,7 @@ std::shared_ptr<GenerationPool> GenerationPool::create_adopted(GenerationPoolOpt
         }
         for (capsid_worker* worker : warmed) {
             capsid_worker_destroy(worker);
+            release_worker_cgroup(worker);
         }
         return nullptr;
     }
@@ -236,6 +241,7 @@ std::shared_ptr<GenerationPool> GenerationPool::create_adopted(GenerationPoolOpt
             // destroy all of them. The adopted prefix has its own reapers.
             for (std::size_t remaining = index; remaining < warmed.size(); ++remaining) {
                 capsid_worker_destroy(warmed[remaining]);
+                release_worker_cgroup(warmed[remaining]);
             }
             for (const Slot& slot : pool->slots_) {
                 slot.executor->stop_and_join();
@@ -302,9 +308,9 @@ bool GenerationPool::wait(std::string* error) {
         if (pump_thread_.joinable()) {
             pump_thread_.join();
         }
-        for (std::thread& thread : replacement_threads_) {
-            if (thread.joinable()) {
-                thread.join();
+        for (ReplacementWorker& entry : replacement_threads_) {
+            if (entry.thread.joinable()) {
+                entry.thread.join();
             }
         }
         replacement_threads_.clear();
@@ -346,11 +352,9 @@ WorkerExecutor* GenerationPool::pick_worker() {
         if (!candidate->available()) {
             continue;
         }
-        // §8.2 load: inflight + pending client bytes (session-layer hook,
-        // keyed by the executor identity; 0 when unset) + unhealthy penalty
-        // (reserved for the session layer's notion of unhealthy — an exited
-        // worker is excluded above, not penalized).
-        std::uint64_t load = candidate->inflight() + candidate->channels();
+        // §8.2 load: inflight + connection_owners + pending client bytes
+        // (session-layer hook, keyed by the executor identity; 0 when unset).
+        std::uint64_t load = candidate->load_score();
         if (options_.client_bytes_loader) {
             load += options_.client_bytes_loader(candidate);
         }
@@ -518,8 +522,8 @@ std::uint64_t GenerationPool::inflight() const {
     for (const Slot& slot : slots_) {
         total += slot.executor->inflight();
     }
-    for (const std::shared_ptr<WorkerExecutor>& executor : retired_) {
-        total += executor->inflight();
+    for (const RetiredExecutor& retired : retired_) {
+        total += retired.executor->inflight();
     }
     return total;
 }
@@ -612,13 +616,58 @@ void GenerationPool::pump_loop() {
                 if (replacement_due_ms_[index] != kNoDue && replacement_due_ms_[index] <= now) {
                     replacement_due_ms_[index] = kNoDue;
                     ++replacements_in_flight_;
-                    replacement_threads_.emplace_back([owner = this, index] {
-                        // wait() joins replacement producers too;
-                        // they must not release the last pool owner
-                        // on a thread that its destructor would join.
-                        owner->run_replacement(index);
-                    });
+                    auto done = std::make_shared<std::atomic<bool>>(false);
+                    replacement_threads_.push_back(ReplacementWorker{
+                        std::thread([owner = this, index, done] {
+                            struct FinishGuard {
+                                std::shared_ptr<std::atomic<bool>> flag;
+                                ~FinishGuard() {
+                                    if (flag) {
+                                        flag->store(true, std::memory_order_release);
+                                    }
+                                }
+                            } guard{done};
+                            // wait() joins replacement producers too;
+                            // they must not release the last pool owner
+                            // on a thread that its destructor would join.
+                            owner->run_replacement(index);
+                        }),
+                        done});
                 }
+            }
+        }
+        // Reap finished replacement threads and exited retired executors out
+        // from under the mutex so long-lived pools do not accumulate threads.
+        {
+            std::vector<std::thread> finished_replacements;
+            for (std::size_t i = 0; i < replacement_threads_.size();) {
+                if (replacement_threads_[i].finished &&
+                    replacement_threads_[i].finished->load(std::memory_order_acquire)) {
+                    finished_replacements.push_back(std::move(replacement_threads_[i].thread));
+                    replacement_threads_.erase(replacement_threads_.begin() +
+                                               static_cast<std::ptrdiff_t>(i));
+                } else {
+                    ++i;
+                }
+            }
+            std::vector<std::shared_ptr<WorkerExecutor>> join_retired;
+            for (RetiredExecutor& retired : retired_) {
+                if (!retired.joined && retired.executor->exited()) {
+                    retired.joined = true;
+                    join_retired.push_back(retired.executor);
+                }
+            }
+            if (!finished_replacements.empty() || !join_retired.empty()) {
+                lock.unlock();
+                for (std::thread& thread : finished_replacements) {
+                    if (thread.joinable()) {
+                        thread.join();
+                    }
+                }
+                for (const auto& executor : join_retired) {
+                    executor->stop_and_join();
+                }
+                lock.lock();
             }
         }
         // Wait for work: an event notification, a replacement deadline, or
@@ -692,11 +741,11 @@ void GenerationPool::pump_loop() {
         // events must reach the session layer even after its slot was
         // replaced, or the request hangs forever. Nothing to bookkeep: a
         // retired executor is never replaced again.
-        for (const std::shared_ptr<WorkerExecutor>& retired : retired_) {
-            std::deque<WorkerEvent> batch = retired->drain_events();
+        for (const RetiredExecutor& retired : retired_) {
+            std::deque<WorkerEvent> batch = retired.executor->drain_events();
             for (const WorkerEvent& event : batch) {
                 if (options_.event_sink) {
-                    options_.event_sink(retired.get(), event);
+                    options_.event_sink(retired.executor.get(), event);
                 }
             }
         }
@@ -712,8 +761,8 @@ bool GenerationPool::fleet_exited() const {
             return false;
         }
     }
-    for (const auto& executor : retired_) {
-        if (!executor->exited())
+    for (const RetiredExecutor& retired : retired_) {
+        if (!retired.executor->exited())
             return false;
     }
     return true;
@@ -883,7 +932,7 @@ void GenerationPool::install_replacement(std::size_t slot,
         // freed memory (§8.2 pinning). The retired executor is reaped at
         // finalize_drain, outside the mutex, where its destructor's join
         // cannot deadlock against the event notifier.
-        retired_.push_back(std::move(s.executor));
+        retired_.push_back(RetiredExecutor{std::move(s.executor), false});
         s.executor = std::move(replacement);
         s.ready = true; // the fleet is N again (§8.3)
         // A replacement installed into a draining pool is shut down right
@@ -959,8 +1008,8 @@ void GenerationPool::finalize_drain() {
             reaped.push_back(std::move(slot.executor));
         }
         slots_.clear();
-        for (std::shared_ptr<WorkerExecutor>& executor : retired_) {
-            reaped.push_back(std::move(executor));
+        for (RetiredExecutor& retired : retired_) {
+            reaped.push_back(std::move(retired.executor));
         }
         retired_.clear();
         cv_.notify_all();
