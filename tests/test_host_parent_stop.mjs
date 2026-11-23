@@ -130,6 +130,7 @@ export default {fetch(request) {
   return new Response('parent-stop-healthy');
 }};`,
   );
+  const workers = mode === 'static-pool' ? 2 : 1;
   const config = path.join(dir, 'capsid.json');
   fs.writeFileSync(
     config,
@@ -138,32 +139,56 @@ export default {fetch(request) {
       entry: 'main.mjs',
       permissions: { modules: [], fetch: { allow: ['127.0.0.1'] } },
       pool: {
-        minReady: mode === 'static-pool' ? 2 : 1,
-        maxWorkers: mode === 'static-pool' ? 2 : 1,
+        minReady: workers,
+        maxWorkers: workers,
       },
+      request: { timeout: '20s' },
+    }),
+  );
+  const hostConfig = path.join(dir, 'host.json');
+  fs.writeFileSync(
+    hostConfig,
+    JSON.stringify({
+      apiVersion: 'capsid/host-v1',
+      applicationsRoot: '/var/lib/capsid/apps',
+      stateRoot: '/var/lib/capsid/state',
+      secretRootTemplate: '/run/capsid/secrets/{application}',
+      admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+      permissions: {
+        modules: [],
+        environmentNames: [],
+        fsReadRoots: [],
+        fetchTargets: ['127.0.0.1'],
+        storageNamespaces: [],
+        stdioStreams: [],
+      },
+      isolation: { mode: 'strict', required: [] },
+      capacity: { workersTotal: workers, startupsConcurrent: workers },
+      listeners: [
+        {
+          name: 'public',
+          tcp: '127.0.0.1:0',
+          publicScheme: 'http',
+          publicAuthority: 'public.example',
+          trusted: false,
+          routing: { mode: 'path' },
+        },
+      ],
     }),
   );
   const args = [
-    '--mode',
-    mode,
-    '--worker',
-    worker,
-    '--source-bundle',
-    bundle,
-    '--source-name',
-    pathToFileURL(bundle).href,
-    '--application',
+    '--app-dir',
+    dir,
+    '--app',
     'orders',
+    '--host-config',
+    hostConfig,
     '--listen',
     '127.0.0.1:0',
-    '--routing',
-    'path',
-    '--public-scheme',
-    'http',
-    '--public-authority',
-    'public.example',
-    '--request-timeout-ms',
-    '20000',
+    '--worker',
+    worker,
+    '--workers',
+    String(workers),
     '--strict-sandbox',
     'off',
     '--ready-fd',
@@ -171,10 +196,7 @@ export default {fetch(request) {
     '--stop-fd',
     { 'invalid-fd': '99', 'ready-alias': '3', 'stdio-fd': '2', 'malformed-fd': 'four' }[scenario] ??
       '4',
-    '--capsid-json',
-    config,
   ];
-  if (mode === 'static-pool') args.push('--workers', '2');
   if (scenario === 'file-fd') fileFd = fs.openSync(bundle, 'r');
   child = spawn(host, args, {
     stdio: ['ignore', 'pipe', 'pipe', 'pipe', fileFd ?? 'pipe'],

@@ -1,14 +1,8 @@
-// Frozen M2 Batch B RED: compose one independently owned HTTP/reactor/worker
-// shard per fixed-pool member. This batch freezes only shared-port ownership
-// and atomic lifecycle; queueing, P2C and SSE admission belong to later work.
+// Multi-worker LocalDevHost integration tests: shared-port lifecycle, local
+// binding policy, drain semantics, atomic start failure, oversized pool
+// rejection, stop-before-start, start/stop race, and WebSocket I/O.
 
-#if __has_include("host/static_pool_server.h")
-#include "host/static_pool_server.h"
-#define CAPSID_HAS_STATIC_POOL_SERVER 1
-#else
-#define CAPSID_HAS_STATIC_POOL_SERVER 0
-#endif
-
+#include "host/local_dev_host.h"
 #include "host/binding_registry.h"
 #include "host/generation_identity.h"
 #include <boost/asio/io_context.hpp>
@@ -77,8 +71,6 @@ void require(bool condition, const std::string& message) {
         fail(message);
     }
 }
-
-#if CAPSID_HAS_STATIC_POOL_SERVER
 
 std::string read_one_ready_line(int fd) {
     std::string line;
@@ -215,22 +207,28 @@ void require_port_closed(std::uint16_t port) {
     require(connected != 0, "stopped static pool still accepted connections");
 }
 
-capsid::host::StaticPoolServerOptions make_options(const char* worker_path, int ready_fd,
-                                                   std::uint32_t workers) {
-    capsid::host::StaticPoolServerOptions options;
-    options.workers = workers;
-    options.worker_options.worker_path = worker_path;
-    options.worker_options.source_bundle_path = "static-pool-inline";
-    options.worker_options.source_name = "file://orders/v1/bundle.mjs";
-    options.worker_options.application = "orders";
-    options.worker_options.listen_address = "127.0.0.1";
-    options.worker_options.listen_port = 0;
-    options.worker_options.public_scheme = "http";
-    options.worker_options.public_authority = "public.example";
-    options.worker_options.request_timeout_ms = 5000;
-    options.worker_options.initial_stream_window = 64U * 1024U;
-    options.worker_options.strict_sandbox = false;
-    options.worker_options.ready_fd = ready_fd;
+capsid::host::LocalDevHostOptions make_options(const char* worker_path, int ready_fd,
+                                               std::uint32_t workers, std::uint16_t listen_port = 0,
+                                               const char* request_timeout = "5s") {
+    capsid::host::LocalDevHostOptions options;
+    options.worker_path = worker_path;
+    options.source_name = "file://orders/v1/bundle.mjs";
+    options.application = "orders";
+    options.capsid_json_text =
+        std::string(R"json({"apiVersion":"capsid/app-v2","pool":{"workers":)json") +
+        std::to_string(workers == 0 ? 1 : workers) + R"json(},"request":{"timeout":")json" +
+        request_timeout + R"json("}})json";
+    options.workers_override = workers;
+    capsid::host::ListenerConfig listener;
+    listener.name = "public";
+    listener.tcp = "127.0.0.1:" + std::to_string(listen_port);
+    listener.public_scheme = "http";
+    listener.public_authority = "public.example";
+    listener.routing.mode = "path";
+    options.listener_override = std::move(listener);
+    options.initial_stream_window = 64U * 1024U;
+    options.strict_sandbox = false;
+    options.ready_fd = ready_fd;
     return options;
 }
 
@@ -263,7 +261,7 @@ void test_binding_local_policy(const char* worker_path) {
         std::ofstream output(policy_path, std::ios::binary | std::ios::trunc);
         require(static_cast<bool>(output), "cannot create static-pool Binding policy");
         output
-            << R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"pool-binding:"}}},"pool":{"minReady":1,"maxWorkers":1}})json";
+            << R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"pool-binding:"}}}})json";
         require(static_cast<bool>(output), "cannot write static-pool Binding policy");
     }
     const std::string source = "import echo from 'capsid:binding/echo';"
@@ -274,10 +272,11 @@ void test_binding_local_policy(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create Binding pool READY pipe");
     auto options = make_options(worker_path, ready[1], 2);
-    options.worker_options.capsid_json_path = policy_path;
-    options.worker_options.capsid_json_required = true;
-    options.worker_options.binding_registry = make_pool_binding_registry();
-    capsid::host::StaticPoolServer pool(std::move(options));
+    options.capsid_json_text.reset();
+    options.capsid_json_path = policy_path;
+    options.capsid_json_required = true;
+    options.binding_registry = make_pool_binding_registry();
+    capsid::host::LocalDevHost pool(std::move(options));
     std::string error;
     require(pool.start(bundle, &error), "cannot start Binding static pool: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -366,7 +365,7 @@ std::string read_until_close(int fd) {
 void test_drain_inflight_completes(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create drain READY pipe");
-    capsid::host::StaticPoolServer pool(make_options(worker_path, ready[1], 1));
+    capsid::host::LocalDevHost pool(make_options(worker_path, ready[1], 1));
     std::string error;
     const bool started = pool.start(slow_bundle(), &error);
     require(started, "cannot start draining pool: " + error);
@@ -399,7 +398,7 @@ void test_drain_inflight_completes(const char* worker_path) {
     require(pool.active_workers() == 0, "drained pool still reports active worker shards");
 
     // Row 7: the drain report.
-    const capsid::host::SingleWorkerServer::DrainMetrics metrics = pool.drain_metrics();
+    const capsid::host::LocalDevHost::DrainMetrics metrics = pool.drain_metrics();
     require(metrics.draining && metrics.finished,
             "drain report does not describe a finished drain");
     require(metrics.forced_cancellations == 0,
@@ -416,9 +415,8 @@ void test_drain_inflight_completes(const char* worker_path) {
 void test_drain_deadline_forces(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create drain deadline READY pipe");
-    auto options = make_options(worker_path, ready[1], 1);
-    options.worker_options.request_timeout_ms = 0; // wedged worker model
-    capsid::host::StaticPoolServer pool(std::move(options));
+    auto options = make_options(worker_path, ready[1], 1, 0, "60s");
+    capsid::host::LocalDevHost pool(std::move(options));
     std::string error;
     const bool started = pool.start(hang_bundle(), &error);
     require(started, "cannot start drain deadline pool: " + error);
@@ -444,7 +442,7 @@ void test_drain_deadline_forces(const char* worker_path) {
             "force drain exceeded its bounded window");
     require(pool.active_workers() == 0, "force-drained pool still reports active worker shards");
 
-    const capsid::host::SingleWorkerServer::DrainMetrics metrics = pool.drain_metrics();
+    const capsid::host::LocalDevHost::DrainMetrics metrics = pool.drain_metrics();
     require(metrics.finished, "force drain report is not finished");
     require(metrics.forced_cancellations == 1,
             "drain deadline did not count its forced cancellation");
@@ -458,7 +456,7 @@ void test_drain_deadline_forces(const char* worker_path) {
 void test_drain_idle_exits(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create idle drain READY pipe");
-    capsid::host::StaticPoolServer pool(make_options(worker_path, ready[1], 1));
+    capsid::host::LocalDevHost pool(make_options(worker_path, ready[1], 1));
     std::string error;
     const bool started = pool.start(fixture_bundle(), &error);
     require(started, "cannot start idle draining pool: " + error);
@@ -470,7 +468,7 @@ void test_drain_idle_exits(const char* worker_path) {
     require(std::chrono::steady_clock::now() - began < std::chrono::seconds(3),
             "idle drain did not shut down promptly");
 
-    const capsid::host::SingleWorkerServer::DrainMetrics metrics = pool.drain_metrics();
+    const capsid::host::LocalDevHost::DrainMetrics metrics = pool.drain_metrics();
     require(metrics.finished && metrics.forced_cancellations == 0,
             "idle drain reported an unexpected forced cancellation");
     close(ready[0]);
@@ -480,7 +478,7 @@ void test_drain_idle_exits(const char* worker_path) {
 void test_shared_port_lifecycle(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create static-pool READY pipe");
-    capsid::host::StaticPoolServer pool(make_options(worker_path, ready[1], 3));
+    capsid::host::LocalDevHost pool(make_options(worker_path, ready[1], 3));
     std::string error;
     const bool started = pool.start(fixture_bundle(), &error);
     require(started, "cannot start three-shard static pool: " + error);
@@ -511,16 +509,8 @@ void test_atomic_start_failure(const char* worker_path) {
     const int read_only_ready_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
 #endif
     require(read_only_ready_fd >= 0, "cannot create failed pool READY fixture");
-#if defined(_WIN32)
-    // A one-worker pool has no SO_REUSEPORT dependency on Windows, so this
-    // scenario reaches the intended unwritable-READY-fd failure instead of
-    // stopping earlier at the shared-port gate.
-    auto options = make_options(worker_path, read_only_ready_fd, 1);
-#else
-    auto options = make_options(worker_path, read_only_ready_fd, 3);
-#endif
-    options.worker_options.listen_port = port;
-    capsid::host::StaticPoolServer pool(std::move(options));
+    auto options = make_options(worker_path, read_only_ready_fd, 3, port);
+    capsid::host::LocalDevHost pool(std::move(options));
     std::string error;
     const auto began = std::chrono::steady_clock::now();
     require(!pool.start(fixture_bundle(), &error),
@@ -533,10 +523,13 @@ void test_atomic_start_failure(const char* worker_path) {
     require(pool.wait(&error), "failed pool could not complete wait: " + error);
     close(read_only_ready_fd);
 
-    auto zero_options = make_options(worker_path, -1, 0);
-    capsid::host::StaticPoolServer zero(std::move(zero_options));
-    require(!zero.start(fixture_bundle(), &error), "zero-worker static pool activated");
-    require(zero.active_workers() == 0, "zero-worker static pool reported an active shard");
+    auto zero_options = make_options(worker_path, -1, 1);
+    zero_options.workers_override = 0;
+    zero_options.capsid_json_text =
+        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":0,"maxWorkers":0}})json";
+    capsid::host::LocalDevHost zero(std::move(zero_options));
+    require(!zero.start(fixture_bundle(), &error), "zero-worker local pool activated");
+    require(zero.active_workers() == 0, "zero-worker local pool reported an active worker");
 }
 
 // A syntactically valid uint32 worker count must never reach vector::reserve
@@ -544,7 +537,7 @@ void test_atomic_start_failure(const char* worker_path) {
 // fail synchronously instead.
 void test_oversized_pool_is_rejected(const char* worker_path) {
     auto options = make_options(worker_path, -1, std::numeric_limits<std::uint32_t>::max());
-    capsid::host::StaticPoolServer pool(std::move(options));
+    capsid::host::LocalDevHost pool(std::move(options));
     std::string error;
     require(!pool.start(fixture_bundle(), &error), "oversized static pool was accepted");
     require(error.find("worker limit") != std::string::npos,
@@ -558,7 +551,7 @@ void test_oversized_pool_is_rejected(const char* worker_path) {
 void test_stop_before_start(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create static-pool READY pipe");
-    capsid::host::StaticPoolServer pool(make_options(worker_path, ready[1], 2));
+    capsid::host::LocalDevHost pool(make_options(worker_path, ready[1], 2));
     pool.request_stop();
     std::string error;
     require(!pool.start(fixture_bundle(), &error),
@@ -573,17 +566,15 @@ void test_stop_before_start(const char* worker_path) {
 
 // Lifecycle hardening: a stop that arrives while start() is mid-shard must
 // never leave a partial pool running. The stop gate fails start, and the
-// starting shard is reclaimed by the atomic rollback (starting_shard_
-// publication) rather than leaked into a live pool.
+// starting shard is reclaimed by the atomic rollback rather than leaked into
+// a live pool.
 void test_start_stop_race(const char* worker_path) {
 #if defined(_WIN32)
-    // Windows has no fork: the probe runs on a plain thread (the pool
-    // facade is thread-safe and the probe is crash-free by contract).
     std::thread child_thread([&]() {
         for (int round = 0; round < 8; ++round) {
             int ready[2];
             require(capsid::win32::create_socket_pair(ready), "cannot create race READY pipe");
-            capsid::host::StaticPoolServer pool(make_options(worker_path, ready[1], 1));
+            capsid::host::LocalDevHost pool(make_options(worker_path, ready[1], 1));
             std::thread racer([&]() {
                 capsid::win32::usleep(static_cast<unsigned long>(round % 3) * 200U);
                 pool.request_stop();
@@ -604,13 +595,10 @@ void test_start_stop_race(const char* worker_path) {
     const pid_t child = fork();
     require(child >= 0, "cannot fork static-pool start/stop race probe");
     if (child == 0) {
-        // Eight rounds of one shard: each round spawns and tears down a
-        // real worker process, so the probe stays inside its bounded
-        // window while still interleaving stop across every start phase.
         for (int round = 0; round < 8; ++round) {
             int ready[2];
             require(capsid::win32::create_socket_pair(ready), "cannot create race READY pipe");
-            capsid::host::StaticPoolServer pool(make_options(worker_path, ready[1], 1));
+            capsid::host::LocalDevHost pool(make_options(worker_path, ready[1], 1));
             std::thread racer([&]() {
                 usleep(static_cast<useconds_t>(round % 3) * 200U);
                 pool.request_stop();
@@ -659,7 +647,7 @@ void test_websocket_io(const char* worker_path, std::uint32_t workers) {
                                "s.onmessage = e => s.send(e.data);"
                                "return new Response(null, {status: 101, webSocket: p[0]}); } };";
     const std::vector<std::uint8_t> bundle(source.begin(), source.end());
-    capsid::host::StaticPoolServer pool(std::move(options));
+    capsid::host::LocalDevHost pool(std::move(options));
     std::string error;
     require(pool.start(bundle, &error), "cannot start WebSocket pool: " + error);
     close(ready[1]);
@@ -728,16 +716,10 @@ void test_websocket_io(const char* worker_path, std::uint32_t workers) {
                 "WebSocket client " + std::to_string(client) + ": " + failures[client]);
 }
 
-#endif // CAPSID_HAS_STATIC_POOL_SERVER
-
 } // namespace
 
 int main(int argc, char** argv) {
     require(argc == 3, "expected mode and capsid-worker path");
-#if !CAPSID_HAS_STATIC_POOL_SERVER
-    (void)argv;
-    fail("StaticPoolServer is not implemented");
-#else
     const std::string mode = argv[1];
     if (mode == "lifecycle") {
         test_shared_port_lifecycle(argv[2]);
@@ -766,5 +748,4 @@ int main(int argc, char** argv) {
     }
     std::cout << "PASS" << std::endl;
     return 0;
-#endif
 }

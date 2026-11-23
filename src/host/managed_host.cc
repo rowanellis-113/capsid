@@ -1573,6 +1573,12 @@ std::string host_policy_identity(const HostPolicy& host) {
     if (host.default_write_timeout_ms != 0) {
         out << ";defWtimeout:" << host.default_write_timeout_ms;
     }
+    if (host.default_workers != 0) {
+        out << ";defWorkers:" << host.default_workers;
+    }
+    if (host.max_pool_workers != 0) {
+        out << ";maxPoolWorkers:" << host.max_pool_workers;
+    }
     if (!host.isolation_required.empty()) {
         std::set<std::string> iso_req(host.isolation_required.begin(),
                                       host.isolation_required.end());

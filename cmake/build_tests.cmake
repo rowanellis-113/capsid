@@ -791,10 +791,6 @@ if(BUILD_TESTING)
                 OpenSSL::Crypto
                 capsid_sanitizers)
             if(Boost_FOUND)
-                # ActivationPlan owns the legacy StaticPoolServer facade.
-                # Its Debug destructor pulls the single-worker transport
-                # from the static host core even for generation-only tests.
-                target_sources(test-host-managed PRIVATE src/host/single_worker_server.cc)
                 target_link_libraries(test-host-managed PRIVATE Boost::system)
                 if(CAPSID_STRICT_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
                     # Same Boost.Beast false-positive allowance as capsid-host.
@@ -933,8 +929,6 @@ if(BUILD_TESTING)
             target_link_options(test-host-managed-activation-fd PRIVATE
                 "-Wl,--wrap=close")
             if(Boost_FOUND)
-                target_sources(test-host-managed-activation-fd PRIVATE
-                    src/host/single_worker_server.cc)
                 target_link_libraries(test-host-managed-activation-fd PRIVATE Boost::system)
                 if(CAPSID_STRICT_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
                     target_compile_options(test-host-managed-activation-fd PRIVATE
@@ -1031,35 +1025,6 @@ if(BUILD_TESTING)
         add_test(
             NAME host_policy_compiler
             COMMAND test-host-policy-compiler)
-
-        add_executable(
-            test-host-static-pool
-            tests/test_host_static_pool.cc)
-        target_include_directories(
-            test-host-static-pool PRIVATE include src)
-        target_link_libraries(test-host-static-pool PRIVATE
-            capsid_host_core
-            capsid_sanitizers)
-        set_target_properties(test-host-static-pool PROPERTIES
-            CXX_STANDARD 20
-            CXX_STANDARD_REQUIRED ON
-            CXX_EXTENSIONS OFF)
-        if(CAPSID_STRICT_WARNINGS)
-            if(MSVC)
-                target_compile_options(
-                    test-host-static-pool PRIVATE /W4 /WX)
-            else()
-                target_compile_options(
-                    test-host-static-pool PRIVATE
-                    -Wall -Wextra -Wpedantic -Werror)
-            endif()
-        endif()
-        add_test(
-            NAME host_static_pool_activates_only_when_all_ready
-            COMMAND test-host-static-pool all-ready)
-        add_test(
-            NAME host_static_pool_preserves_owner_shard
-            COMMAND test-host-static-pool owner-shard)
 
         add_executable(
             test-host-secret-snapshot
@@ -1320,8 +1285,7 @@ if(BUILD_TESTING)
         if(TARGET capsid-host AND TARGET capsid-worker)
             add_executable(
                 test-host-single-worker-lifecycle
-                tests/test_host_single_worker_lifecycle.cc
-                src/host/single_worker_server.cc)
+                tests/test_host_single_worker_lifecycle.cc)
             target_include_directories(
                 test-host-single-worker-lifecycle PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -1330,6 +1294,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(
                 test-host-single-worker-lifecycle PROPERTIES
@@ -1366,8 +1332,7 @@ if(BUILD_TESTING)
             # explicitly requested missing file all fail startup closed.
             add_executable(
                 test-host-local-capsid-policy
-                tests/test_host_local_capsid_policy.cc
-                src/host/single_worker_server.cc)
+                tests/test_host_local_capsid_policy.cc)
             target_include_directories(
                 test-host-local-capsid-policy PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -1376,6 +1341,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(
                 test-host-local-capsid-policy PROPERTIES
@@ -1423,18 +1390,9 @@ if(BUILD_TESTING)
                     TIMEOUT 40 LABELS "host;worker;binding;integration")
             endif()
 
-            # Batch B begins RED before the production source exists. The
-            # CONFIGURE_DEPENDS glob adds it to this isolated test target as
-            # soon as the implementation is created, without requiring the
-            # implementation agent to edit the frozen test registration.
-            file(GLOB CAPSID_STATIC_POOL_SERVER_TEST_SOURCE
-                CONFIGURE_DEPENDS
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/host/static_pool_server.cc")
             add_executable(
                 test-host-static-pool-server
-                tests/test_host_static_pool_server.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
+                tests/test_host_static_pool_server.cc)
             target_include_directories(
                 test-host-static-pool-server PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -1443,6 +1401,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(
                 test-host-static-pool-server PROPERTIES
@@ -1539,9 +1499,7 @@ if(BUILD_TESTING)
             # v1 fixed-pool form, frozen RED/GREEN in test_host_admission.cc.
             add_executable(
                 test-host-admission
-                tests/test_host_admission.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
+                tests/test_host_admission.cc)
             target_include_directories(
                 test-host-admission PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -1550,6 +1508,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(
                 test-host-admission PROPERTIES
@@ -1635,9 +1595,7 @@ if(BUILD_TESTING)
             # completion/cancel path, stream idle timeout, 1/1 boundary.
             add_executable(
                 test-host-sse-permit
-                tests/test_host_sse_permit.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
+                tests/test_host_sse_permit.cc)
             target_include_directories(
                 test-host-sse-permit PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -1646,6 +1604,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(
                 test-host-sse-permit PROPERTIES
@@ -1714,9 +1674,7 @@ if(BUILD_TESTING)
             # request timeout (§8.3); fast responses untouched.
             add_executable(
                 test-host-write-timeout
-                tests/test_host_write_timeout.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
+                tests/test_host_write_timeout.cc)
             target_include_directories(
                 test-host-write-timeout PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -1725,6 +1683,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(
                 test-host-write-timeout PROPERTIES
@@ -1784,9 +1744,7 @@ if(BUILD_TESTING)
 
             add_executable(
                 test-host-static-pool-integration
-                tests/test_host_static_pool_integration.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
+                tests/test_host_static_pool_integration.cc)
             target_include_directories(
                 test-host-static-pool-integration PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -1795,6 +1753,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(
                 test-host-static-pool-integration PROPERTIES
@@ -2810,13 +2770,12 @@ if(BUILD_TESTING)
                 endforeach()
             endforeach()
             add_executable(test-host-static-pool-faults
-                tests/test_host_static_pool_faults.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
+                tests/test_host_static_pool_faults.cc)
             target_include_directories(test-host-static-pool-faults PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
             target_link_libraries(test-host-static-pool-faults PRIVATE
-                capsid_runtime capsid_host_core Boost::system capsid_sanitizers)
+                capsid_runtime capsid_host_core Boost::system capsid_jansson OpenSSL::Crypto
+                capsid_sanitizers)
             set_target_properties(test-host-static-pool-faults PROPERTIES
                 CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
             if(CAPSID_STRICT_WARNINGS)
@@ -2845,114 +2804,24 @@ if(BUILD_TESTING)
                 set_tests_properties("host_static_pool_fault_${pool_fault}" PROPERTIES
                     LABELS "host;integration;lifecycle;websocket" TIMEOUT 45)
             endforeach()
-            add_executable(test-host-static-pool-adoption
-                tests/test_host_static_pool_adoption.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
-            target_include_directories(test-host-static-pool-adoption PRIVATE
-                include src "${CAPSID_GENERATED_DIR}")
-            target_link_libraries(test-host-static-pool-adoption PRIVATE
-                capsid_runtime capsid_host_core Boost::system capsid_sanitizers)
-            set_target_properties(test-host-static-pool-adoption PROPERTIES
-                CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-            # Only this fixture needs local function symbols to identify a
-            # real adoption allocation. Optimization remains the build's own.
-            if(MSVC)
-                target_compile_options(test-host-static-pool-adoption PRIVATE /Zi)
-                target_link_options(test-host-static-pool-adoption PRIVATE /DEBUG:FULL /OPT:REF /OPT:ICF)
-                target_link_libraries(test-host-static-pool-adoption PRIVATE dbghelp)
-                if(CAPSID_STRICT_WARNINGS)
-                    target_compile_options(test-host-static-pool-adoption PRIVATE /W4 /WX)
-                endif()
-            else()
-                target_compile_options(test-host-static-pool-adoption PRIVATE -g -fno-omit-frame-pointer)
-                target_link_libraries(test-host-static-pool-adoption PRIVATE ${CMAKE_DL_LIBS})
-                if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
-                   CMAKE_EXE_LINKER_FLAGS MATCHES "(^| )-static( |$)")
-                    target_compile_definitions(test-host-static-pool-adoption PRIVATE
-                        CAPSID_TEST_STATIC_SYMBOLS=1
-                        "CAPSID_TEST_NM_PATH=\"${CMAKE_NM}\"")
-                else()
-                    set_target_properties(test-host-static-pool-adoption PROPERTIES ENABLE_EXPORTS ON)
-                endif()
-                if(CAPSID_STRICT_WARNINGS)
-                    target_compile_options(test-host-static-pool-adoption PRIVATE -Wall -Wextra -Wpedantic -Werror)
-                    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-                        target_compile_options(test-host-static-pool-adoption PRIVATE -Wno-maybe-uninitialized)
-                    endif()
-                endif()
-            endif()
-            foreach(pool_adoption IN ITEMS reselect-worker-exit reselect-last-workers-exit
-                pre-post-stop pre-post-drain active-drain)
-                add_test(NAME "host_static_pool_adoption_${pool_adoption}"
-                    COMMAND "${CAPSID_HOST_TEST_NODE}"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_host_static_pool_adoption.mjs"
-                        --fixture $<TARGET_FILE:test-host-static-pool-adoption>
-                        --worker $<TARGET_FILE:capsid-worker> --case "${pool_adoption}"
-                        ${CAPSID_POOL_FAULT_CLIENT_ARGS})
-                set_tests_properties("host_static_pool_adoption_${pool_adoption}" PROPERTIES
-                    LABELS "host;integration;lifecycle;websocket" TIMEOUT 60)
-            endforeach()
-            add_executable(test-host-external-drain
-                tests/test_host_external_drain.cc
-                src/host/single_worker_server.cc)
-            target_include_directories(test-host-external-drain PRIVATE
-                include src "${CAPSID_GENERATED_DIR}")
-            target_link_libraries(test-host-external-drain PRIVATE
-                capsid_runtime capsid_host_core Boost::system capsid_sanitizers)
-            set_target_properties(test-host-external-drain PROPERTIES
+            add_executable(test-host-static-pool-local-shutdown
+                tests/test_host_static_pool_local_shutdown.cc)
+            target_include_directories(test-host-static-pool-local-shutdown PRIVATE include src "${CAPSID_GENERATED_DIR}")
+            target_link_libraries(test-host-static-pool-local-shutdown PRIVATE
+                capsid_runtime capsid_host_core Boost::system capsid_jansson OpenSSL::Crypto
+                capsid_sanitizers)
+            set_target_properties(test-host-static-pool-local-shutdown PROPERTIES
                 CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
             if(CAPSID_STRICT_WARNINGS)
                 if(MSVC)
-                    target_compile_options(test-host-external-drain PRIVATE /W4 /WX)
+                    target_compile_options(test-host-static-pool-local-shutdown PRIVATE /W4 /WX)
                 else()
-                    target_compile_options(test-host-external-drain PRIVATE -Wall -Wextra -Wpedantic -Werror)
+                    target_compile_options(test-host-static-pool-local-shutdown PRIVATE -Wall -Wextra -Wpedantic -Werror)
                     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-                        target_compile_options(test-host-external-drain PRIVATE -Wno-maybe-uninitialized)
+                        target_compile_options(test-host-static-pool-local-shutdown PRIVATE -Wno-maybe-uninitialized)
                     endif()
                 endif()
             endif()
-            foreach(drain_case IN ITEMS drain-before-submit drain-during-prepare queued-before-drain
-                owner-drain-before-submit healthy-control)
-                add_test(NAME "host_external_drain_${drain_case}"
-                    COMMAND "${CAPSID_HOST_TEST_NODE}"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_host_external_drain.mjs"
-                        --fixture $<TARGET_FILE:test-host-external-drain>
-                        --worker $<TARGET_FILE:capsid-worker> --case "${drain_case}"
-                        ${CAPSID_POOL_FAULT_CLIENT_ARGS})
-                set_tests_properties("host_external_drain_${drain_case}" PROPERTIES
-                    LABELS "host;integration;lifecycle;websocket" TIMEOUT 60)
-            endforeach()
-            add_executable(test-host-unavailable-lifecycle
-                tests/test_host_unavailable_lifecycle.cc
-                src/host/single_worker_server.cc)
-            add_executable(test-host-static-pool-local-shutdown
-                tests/test_host_static_pool_local_shutdown.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
-            foreach(local_target IN ITEMS test-host-unavailable-lifecycle test-host-static-pool-local-shutdown)
-                target_include_directories(${local_target} PRIVATE include src "${CAPSID_GENERATED_DIR}")
-                target_link_libraries(${local_target} PRIVATE
-                    capsid_runtime capsid_host_core Boost::system capsid_sanitizers)
-                set_target_properties(${local_target} PROPERTIES
-                    CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-                if(CAPSID_STRICT_WARNINGS)
-                    if(MSVC)
-                        target_compile_options(${local_target} PRIVATE /W4 /WX)
-                    else()
-                        target_compile_options(${local_target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
-                        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-                            target_compile_options(${local_target} PRIVATE -Wno-maybe-uninitialized)
-                        endif()
-                    endif()
-                endif()
-            endforeach()
-            foreach(local_case IN ITEMS get-close-before-completion head-close-before-completion get-normal-completion)
-                add_test(NAME "host_unavailable_lifecycle_${local_case}"
-                    COMMAND $<TARGET_FILE:test-host-unavailable-lifecycle> "${local_case}")
-                set_tests_properties("host_unavailable_lifecycle_${local_case}" PROPERTIES
-                    LABELS "host;integration;lifecycle" TIMEOUT 20)
-            endforeach()
             foreach(local_case IN ITEMS stop drain)
                 add_test(NAME "host_static_pool_local_shutdown_${local_case}"
                     COMMAND "${CAPSID_HOST_TEST_NODE}"
@@ -2962,16 +2831,6 @@ if(BUILD_TESTING)
                         ${CAPSID_POOL_FAULT_CLIENT_ARGS})
                 set_tests_properties("host_static_pool_local_shutdown_${local_case}" PROPERTIES
                     LABELS "host;integration;lifecycle;websocket" TIMEOUT 45)
-            endforeach()
-            foreach(exit_case IN ITEMS before-completion before-adoption cancel-pending queued-before-exit
-                idle-after-adoption keepalive-after-adoption pre-post-worker-exit pre-post-stop pre-post-drain)
-                add_test(NAME "host_external_accept_exit_${exit_case}"
-                    COMMAND "${CAPSID_HOST_TEST_NODE}"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_host_external_accept_exit.mjs"
-                        --fixture $<TARGET_FILE:test-host-single-worker-lifecycle>
-                        --worker $<TARGET_FILE:capsid-worker> --case "${exit_case}")
-                set_tests_properties("host_external_accept_exit_${exit_case}" PROPERTIES
-                    LABELS "host;integration;lifecycle" TIMEOUT 45)
             endforeach()
             add_test(NAME websocket_host_cleanup_contract
                 COMMAND "${CAPSID_HOST_TEST_NODE}" --test
@@ -2985,9 +2844,7 @@ if(BUILD_TESTING)
             # "stopped" claim).
             add_executable(
                 test-host-concurrent-wait
-                tests/test_host_concurrent_wait.cc
-                src/host/single_worker_server.cc
-                ${CAPSID_STATIC_POOL_SERVER_TEST_SOURCE})
+                tests/test_host_concurrent_wait.cc)
             target_include_directories(
                 test-host-concurrent-wait PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
@@ -2995,6 +2852,8 @@ if(BUILD_TESTING)
                 capsid_runtime
                 capsid_host_core
                 Boost::system
+                capsid_jansson
+                OpenSSL::Crypto
                 capsid_sanitizers)
             set_target_properties(test-host-concurrent-wait PROPERTIES
                 CXX_STANDARD 20
@@ -6750,10 +6609,6 @@ if(BUILD_TESTING)
         add_executable(
             test-host-worker-executor
             tests/test_host_worker_executor.cc)
-        # Debug also pulls the pool implementation from the Host core.
-        # Supply its single-worker implementation without relying on DCE.
-        target_sources(test-host-worker-executor PRIVATE
-            src/host/single_worker_server.cc)
         target_include_directories(
             test-host-worker-executor PRIVATE
             include src "${CAPSID_GENERATED_DIR}")
@@ -6862,10 +6717,6 @@ if(BUILD_TESTING)
         target_link_libraries(test-host-worker-supervisor-ownership PRIVATE
             capsid_runtime capsid_host_core capsid_jansson OpenSSL::Crypto capsid_sanitizers)
         if(Boost_FOUND AND NOT WIN32)
-            # ManagedHostOptions owns legacy activation callbacks whose
-            # Debug destructors reference the single-worker transport.
-            # Keep the actual dependency, including under project TSan.
-            target_sources(test-host-worker-supervisor-ownership PRIVATE src/host/single_worker_server.cc)
             target_link_libraries(test-host-worker-supervisor-ownership PRIVATE Boost::system)
             if(CAPSID_STRICT_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
                 target_compile_options(test-host-worker-supervisor-ownership PRIVATE -Wno-maybe-uninitialized)
@@ -6949,14 +6800,13 @@ if(BUILD_TESTING)
         set_tests_properties(host_generation_quarantine_callback_lock host_generation_retired_exit_barrier
             PROPERTIES TIMEOUT 40 LABELS "host;lifecycle")
         if(Boost_FOUND)
-            target_sources(test-host-generation-pool PRIVATE src/host/single_worker_server.cc)
             target_link_libraries(test-host-generation-pool PRIVATE Boost::system)
             if(CAPSID_STRICT_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
                 target_compile_options(test-host-generation-pool PRIVATE -Wno-maybe-uninitialized)
             endif()
 
             add_executable(test-host-process-observation
-                tests/test_host_process_observation.cc src/host/single_worker_server.cc)
+                tests/test_host_process_observation.cc)
             target_include_directories(test-host-process-observation PRIVATE
                 include src "${CAPSID_GENERATED_DIR}")
             target_link_libraries(test-host-process-observation PRIVATE
@@ -6985,8 +6835,7 @@ if(BUILD_TESTING)
         endif()
 
         add_executable(test-host-generation-adoption
-            tests/test_host_generation_adoption.cc
-            src/host/single_worker_server.cc)
+            tests/test_host_generation_adoption.cc)
         target_include_directories(test-host-generation-adoption PRIVATE
             include src "${CAPSID_GENERATED_DIR}")
         target_link_libraries(test-host-generation-adoption PRIVATE

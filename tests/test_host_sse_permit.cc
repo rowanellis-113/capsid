@@ -19,12 +19,7 @@
 // permit; idle timeout cancels; plain chunked never holds the permit;
 // 1/1 boundary starts and serves.
 
-#if __has_include("host/single_worker_server.h")
-#include "host/single_worker_server.h"
-#define CAPSID_HAS_SINGLE_WORKER_SERVER 1
-#else
-#define CAPSID_HAS_SINGLE_WORKER_SERVER 0
-#endif
+#include "host/local_dev_host.h"
 
 #include "win32_compat.h"
 #if defined(_WIN32)
@@ -73,8 +68,6 @@ void require(bool condition, const std::string& message) {
         fail(message);
     }
 }
-
-#if CAPSID_HAS_SINGLE_WORKER_SERVER
 
 std::string read_one_ready_line(int fd) {
     std::string line;
@@ -355,17 +348,27 @@ RawHttpResponse http_get(std::uint16_t port, const std::string& target) {
     return response;
 }
 
-capsid::host::SingleWorkerServerOptions make_options(const char* worker_path, int ready_fd) {
-    capsid::host::SingleWorkerServerOptions options;
+capsid::host::LocalDevHostOptions make_options(const char* worker_path, int ready_fd,
+                                               std::uint64_t max_inflight = 2,
+                                               std::uint64_t max_streaming = 1,
+                                               std::uint64_t stream_idle_ms = 60000) {
+    capsid::host::LocalDevHostOptions options;
     options.worker_path = worker_path;
-    options.source_bundle_path = "sse-inline";
     options.source_name = "file://sse/v1/bundle.mjs";
     options.application = "orders";
-    options.listen_address = "127.0.0.1";
-    options.listen_port = 0;
-    options.public_scheme = "http";
-    options.public_authority = "public.example";
-    options.request_timeout_ms = 5000;
+    options.capsid_json_text =
+        std::string(
+            R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"maxWorkers":1},"request":{"timeout":"5s","maxInflightPerWorker":)json") +
+        std::to_string(max_inflight) + R"json(,"maxStreamingInflightPerWorker":)json" +
+        std::to_string(max_streaming) + R"json(,"streamIdleTimeoutMs":)json" +
+        std::to_string(stream_idle_ms) + R"json(}})json";
+    capsid::host::ListenerConfig listener;
+    listener.name = "public";
+    listener.tcp = "127.0.0.1:0";
+    listener.public_scheme = "http";
+    listener.public_authority = "public.example";
+    listener.routing.mode = "path";
+    options.listener_override = std::move(listener);
     options.initial_stream_window = 64U * 1024U;
     options.strict_sandbox = false;
     options.ready_fd = ready_fd;
@@ -378,10 +381,7 @@ capsid::host::SingleWorkerServerOptions make_options(const char* worker_path, in
 void test_permit_full_rejects_503(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 2;
-    options.max_streaming_inflight_per_worker = 1;
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
     std::string error;
     require(server.start(sse_open_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -413,10 +413,7 @@ void test_permit_full_rejects_503(const char* worker_path) {
 void test_permit_released_on_completion(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 2;
-    options.max_streaming_inflight_per_worker = 1;
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
     std::string error;
     require(server.start(sse_done_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -436,11 +433,7 @@ void test_permit_released_on_completion(const char* worker_path) {
 void test_idle_timeout_cancels_and_releases(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 2;
-    options.max_streaming_inflight_per_worker = 1;
-    options.stream_idle_timeout_ms = 250; // well below the 60s default
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1, 250));
     std::string error;
     require(server.start(sse_open_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -474,10 +467,7 @@ void test_idle_timeout_cancels_and_releases(const char* worker_path) {
 void test_plain_chunked_does_not_hold_permit(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 2;
-    options.max_streaming_inflight_per_worker = 1;
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
     std::string error;
     require(server.start(plain_chunked_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -507,10 +497,7 @@ void test_mime_matching_holds_permit(const char* worker_path,
                                      const std::vector<std::uint8_t>& bundle) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 2;
-    options.max_streaming_inflight_per_worker = 1;
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
     std::string error;
     require(server.start(bundle, &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -539,10 +526,7 @@ void test_mime_matching_holds_permit(const char* worker_path,
 void test_max_inflight_one_boundary(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 1;
-    options.max_streaming_inflight_per_worker = 1;
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 1, 1));
     std::string error;
     require(server.start(sse_done_bundle(), &error), "1/1 SSE boundary must start: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -554,16 +538,10 @@ void test_max_inflight_one_boundary(const char* worker_path) {
     require(server.wait(&error), "SSE server wait failed: " + error);
 }
 
-#endif // CAPSID_HAS_SINGLE_WORKER_SERVER
-
 } // namespace
 
 int main(int argc, char** argv) {
     require(argc == 3, "expected mode and capsid-worker path");
-#if !CAPSID_HAS_SINGLE_WORKER_SERVER
-    (void)argv;
-    fail("SingleWorkerServer is not implemented");
-#else
     const std::string mode = argv[1];
     if (mode == "permit-full-rejects-503") {
         test_permit_full_rejects_503(argv[2]);
@@ -584,5 +562,4 @@ int main(int argc, char** argv) {
     }
     std::cout << "PASS" << std::endl;
     return 0;
-#endif
 }

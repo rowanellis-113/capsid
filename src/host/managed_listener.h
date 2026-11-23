@@ -28,6 +28,7 @@
 #include "host/routing_snapshot.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -52,6 +53,10 @@ struct ManagedListenerOptions {
     StructuredLog* log = nullptr;
     MetricsRegistry* metrics = nullptr;
     std::shared_ptr<ServiceChannelBudget> channel_service_budget;
+    std::uint32_t initial_stream_window = 65536U;
+    // When non-empty (LocalDevHost), requests routed to a different app name
+    // answer 404 "app not found" instead of 503.
+    std::string expected_application;
     // Beast request body limit for the buffered upload (413 beyond it).
     std::uint64_t max_request_body_bytes = 16U * 1024U * 1024U;
 };
@@ -77,10 +82,17 @@ class ManagedListener {
     // Precondition: the pool has no in-flight requests yet — call before
     // publishing it into the RoutingTable.
     void wire_pool(const std::shared_ptr<GenerationPool>& pool);
+    // Stops accepting new connections without closing existing sessions
+    // (used during bounded drain before full request_stop()).
+    void stop_accepting();
     // Stops accepting, closes every session and joins the io thread. The
     // pool's event sink keeps working (posts drain into the mailbox queue
     // and are dropped with it) — the pool outlives the listener.
     void request_stop();
+    // Overload invoking on_io_stopped once stop_from_io() has closed active HTTP
+    // sessions (and queued kCancel frames) on the IO thread, or immediately if
+    // the IO loop is already stopped/unstarted.
+    void request_stop(std::function<void()> on_io_stopped);
     bool wait(std::string* error);
     // The bound port (useful with "host:0" — the OS-assigned port).
     std::uint16_t bound_port() const;

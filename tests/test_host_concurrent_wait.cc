@@ -10,8 +10,7 @@
 // (a concurrent caller must BLOCK until the joins complete), not a
 // reproducible-bug fix.
 
-#include "host/single_worker_server.h"
-#include "host/static_pool_server.h"
+#include "host/local_dev_host.h"
 
 #include <chrono>
 #include <cstdint>
@@ -34,18 +33,24 @@ void require(bool condition, const std::string& message) {
     }
 }
 
-capsid::host::SingleWorkerServerOptions worker_options(const char* worker_path) {
-    capsid::host::SingleWorkerServerOptions options;
+capsid::host::LocalDevHostOptions worker_options(const char* worker_path, std::uint32_t workers) {
+    capsid::host::LocalDevHostOptions options;
     options.worker_path = worker_path;
-    options.source_bundle_path = "concurrent-wait-inline";
     options.source_name = "file://orders/v1/bundle.mjs";
     options.application = "orders";
-    options.listen_address = "127.0.0.1";
-    options.listen_port = 0;
-    options.public_scheme = "http";
-    options.public_authority = "public.example";
-    options.request_timeout_ms = 5000;
-    options.initial_stream_window = 64U * 1024U;
+    options.capsid_json_text = R"json({
+        "apiVersion": "capsid/app-v2",
+        "pool": { "workers": 1 },
+        "request": { "timeout": "5s" }
+    })json";
+    options.workers_override = workers;
+    capsid::host::ListenerConfig listener;
+    listener.name = "public";
+    listener.tcp = "127.0.0.1:0";
+    listener.public_scheme = "http";
+    listener.public_authority = "public.example";
+    listener.routing.mode = "path";
+    options.listener_override = std::move(listener);
     options.strict_sandbox = false;
     options.ready_fd = -1;
     options.write_ready_record = false;
@@ -60,12 +65,12 @@ const std::vector<std::uint8_t>& fixture_bundle() {
 }
 
 void test_concurrent_shard_wait(const char* worker_path) {
-    capsid::host::SingleWorkerServer server(worker_options(worker_path));
+    capsid::host::LocalDevHost server(worker_options(worker_path, 1));
     std::string error;
     require(server.start(fixture_bundle(), &error),
             "concurrent shard wait: start failed: " + error);
 
-    // Stop first: wait() blocks until the server is stopped, so without a
+    // Stop first: wait() blocks until the host is stopped, so without a
     // stop request both callers would legitimately block forever. The
     // concurrency under test is two callers racing INTO wait() at once —
     // the first owns the joins, the second must block until they complete
@@ -87,20 +92,16 @@ void test_concurrent_shard_wait(const char* worker_path) {
     require(std::chrono::steady_clock::now() - began < std::chrono::seconds(5),
             "concurrent shard wait exceeded its bounded window");
     require(first_ok && second_ok, "a concurrent shard wait() failed");
-    // The server must be fully stopped: worker_available is false and the
-    // facade teardown (destructor) must not crash on the joined threads.
-    require(!server.worker_available(),
+    require(server.active_workers() == 0,
             "concurrent wait returned while the worker was still available");
 }
 
 void test_concurrent_pool_wait(const char* worker_path) {
-    capsid::host::StaticPoolServerOptions options;
-    options.workers = 2;
-    options.worker_options = worker_options(worker_path);
-    capsid::host::StaticPoolServer pool(std::move(options));
+    capsid::host::LocalDevHost pool(worker_options(worker_path, 2));
     std::string error;
     require(pool.start(fixture_bundle(), &error), "concurrent pool wait: start failed: " + error);
-    require(pool.active_workers() == 2, "concurrent pool wait fixture did not activate two shards");
+    require(pool.active_workers() == 2,
+            "concurrent pool wait fixture did not activate two workers");
 
     pool.request_stop();
     bool first_ok = false;

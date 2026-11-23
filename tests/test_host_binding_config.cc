@@ -68,9 +68,20 @@ void require_error(ConfigDocument document, std::string_view json, ConfigErrorCo
             std::string(label) + " did not provide a safe diagnostic");
 }
 
+std::string host_v2_base(std::string_view extra = "") {
+    std::string json =
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}]})json";
+    if (!extra.empty()) {
+        json.pop_back();
+        json.push_back(',');
+        json.append(extra);
+        json.push_back('}');
+    }
+    return json;
+}
+
 std::string app_with_binding(std::string_view bindings_json) {
-    return "{\"apiVersion\":\"capsid/app-v2\",\"bindings\":" + std::string(bindings_json) +
-           ",\"pool\":{\"minReady\":1,\"maxWorkers\":1}}";
+    return "{\"apiVersion\":\"capsid/app-v2\",\"bindings\":" + std::string(bindings_json) + "}";
 }
 
 std::string app_with_binding_entry(std::string_view id, std::string_view entry_json) {
@@ -83,20 +94,16 @@ std::string app_with_binding_net(std::string_view target) {
 }
 
 void test_v2_minimal_documents_are_valid() {
-    require_valid(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v2"})json",
-                  "minimal Host v2 config");
+    require_valid(ConfigDocument::kHost, host_v2_base(), "minimal Host v2 config");
     require_valid(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v2","bindingsRoot":"/etc/capsid/bindings"})json",
-        "Host v2 config with a bindingsRoot");
-    require_valid(
-        ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1}})json",
-        "minimal App v2 config without bindings");
-    require_valid(
-        ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1,"maxWorkers":1},"bindings":{}})json",
-        "App v2 config with an empty bindings map");
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}","bindings":"/etc/capsid/bindings"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}]})json",
+        "Host v2 config with paths.bindings");
+    require_valid(ConfigDocument::kApplication, R"json({"apiVersion":"capsid/app-v2"})json",
+                  "minimal App v2 config without pool or bindings");
+    require_valid(ConfigDocument::kApplication,
+                  R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","bindings":{}})json",
+                  "App v2 config with an empty bindings map");
 }
 
 void test_v1_documents_reject_binding_fields() {
@@ -108,13 +115,8 @@ void test_v1_documents_reject_binding_fields() {
         ConfigDocument::kApplication,
         R"json({"apiVersion":"capsid/app-v1","bindings":{},"pool":{"minReady":1,"maxWorkers":1}})json",
         "/bindings", "App v1 bindings");
-    require_unknown_field(ConfigDocument::kHost,
-                          R"json({"apiVersion":"capsid/host-v2","bindings":{}})json", "/bindings",
-                          "Host v2 app-only bindings field");
-    require_unknown_field(
-        ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v2","bindingsRoot":"/x","pool":{"minReady":1,"maxWorkers":1}})json",
-        "/bindingsRoot", "App v2 host-only bindingsRoot field");
+    require_unknown_field(ConfigDocument::kHost, host_v2_base(R"json("bindings":{})json"),
+                          "/bindings", "Host v2 app-only bindings field");
 }
 
 void test_v2_document_shapes_are_valid() {
@@ -137,13 +139,12 @@ void test_v2_document_shapes_are_valid() {
               "secrets":{"password":{"valueFrom":"mongo-password"}}
             }
           },
-          "pool":{"minReady":1,"maxWorkers":1}
+          "pool":{"workers":2,"queueRequests":16,"queueTimeout":"5s"}
         })json",
                   "App v2 with the design's mongo binding");
-    require_valid(
-        ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1,"maxWorkers":1},"bindings":{"redis":{}}})json",
-        "App v2 with an all-deny binding entry");
+    require_valid(ConfigDocument::kApplication,
+                  R"json({"apiVersion":"capsid/app-v2","bindings":{"redis":{}}})json",
+                  "App v2 with an all-deny binding entry");
 }
 
 void test_binding_alias_fields_are_strictly_rejected() {
@@ -287,9 +288,17 @@ void test_binding_net_target_grammar_is_exact() {
     require_valid(ConfigDocument::kApplication, app_with_binding_net("255.255.255.255:65535"),
                   "maximum port net target");
 
-    require_error(ConfigDocument::kApplication, app_with_binding_net("example.com"),
-                  ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
-                  "net target without a port");
+    require_valid(ConfigDocument::kApplication, app_with_binding_net("example.com"),
+                  "unified outbound target without port (any port)");
+    require_valid(ConfigDocument::kApplication, app_with_binding_net("example.com:443,8443"),
+                  "unified outbound target with comma port list");
+    require_valid(ConfigDocument::kApplication, app_with_binding_net("10.0.0.0/8:3306,3307"),
+                  "IPv4 CIDR outbound target with comma port list");
+    require_valid(ConfigDocument::kApplication, app_with_binding_net("host:*"),
+                  "wildcard port on binding net target");
+    require_valid(ConfigDocument::kApplication, app_with_binding_net("example.com:8000-8010"),
+                  "port range on binding net target");
+
     require_error(ConfigDocument::kApplication, app_with_binding_net("example.com:0"),
                   ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
                   "zero port");
@@ -307,7 +316,10 @@ void test_binding_net_target_grammar_is_exact() {
                   "empty host");
     require_error(ConfigDocument::kApplication, app_with_binding_net("example.com:80:90"),
                   ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
-                  "port range");
+                  "double colon port spec");
+    require_error(ConfigDocument::kApplication, app_with_binding_net("example.com:90-80"),
+                  ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
+                  "descending port range");
     require_error(ConfigDocument::kApplication, app_with_binding_net("mongo://host:80"),
                   ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
                   "scheme net target");
@@ -319,7 +331,7 @@ void test_binding_net_target_grammar_is_exact() {
                   "IPv4 prefix above 32");
     require_error(ConfigDocument::kApplication, app_with_binding_net("[::1]:80:90"),
                   ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
-                  "bracketed IPv6 with a range");
+                  "bracketed IPv6 with double colon port spec");
     require_error(ConfigDocument::kApplication, app_with_binding_net("[::1]80"),
                   ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
                   "bracketed IPv6 without the port separator");
@@ -332,9 +344,6 @@ void test_binding_net_target_grammar_is_exact() {
     require_error(ConfigDocument::kApplication, app_with_binding_net("*:0"),
                   ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
                   "any-host with port zero");
-    require_error(ConfigDocument::kApplication, app_with_binding_net("host:*"),
-                  ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
-                  "wildcard port");
     require_error(ConfigDocument::kApplication, app_with_binding_net("*.bad..com:80"),
                   ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
                   "wildcard host with an empty label");
@@ -418,19 +427,19 @@ void test_v2_api_version_matrix_is_exact() {
     require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/app-v2"})json",
                   ConfigErrorCode::kInvalidValue, "/apiVersion",
                   "App v2 apiVersion used as Host config");
-    require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/host-v2","pool":{"minReady":1,"maxWorkers":1}})json",
+    require_error(ConfigDocument::kApplication, R"json({"apiVersion":"capsid/host-v2"})json",
                   ConfigErrorCode::kInvalidValue, "/apiVersion",
                   "Host v2 apiVersion used as App config");
-    require_error(ConfigDocument::kHost,
-                  R"json({"apiVersion":"capsid/host-v2","bindingsRoot":7})json",
-                  ConfigErrorCode::kInvalidValue, "/bindingsRoot", "non-string Host bindingsRoot");
-    require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v2","bindings":{"mongo":{}}})json",
-                  ConfigErrorCode::kInvalidValue, "/pool", "App v2 without an explicit pool");
-    require_unknown_field(ConfigDocument::kHost,
-                          R"json({"apiVersion":"capsid/host-v2","mystery":true})json", "/mystery",
-                          "Host v2 unrelated unknown field");
+    require_unknown_field(ConfigDocument::kHost, host_v2_base(R"json("bindingsRoot":"/x")json"),
+                          "/bindingsRoot", "Host v2 rejects legacy bindingsRoot");
+    require_unknown_field(ConfigDocument::kApplication,
+                          R"json({"apiVersion":"capsid/app-v2","bindingsRoot":"/x"})json",
+                          "/bindingsRoot", "App v2 rejects host-only bindingsRoot");
+    require_unknown_field(ConfigDocument::kHost, host_v2_base(R"json("mystery":true)json"),
+                          "/mystery", "Host v2 unrelated unknown field");
+    require_unknown_field(ConfigDocument::kApplication,
+                          R"json({"apiVersion":"capsid/app-v2","tenant":"acme"})json", "/tenant",
+                          "App v2 rejects tenant field");
 }
 
 } // namespace

@@ -70,6 +70,9 @@ struct ListenerConfig {
     std::string tcp;           // "host" or "host:port"
     std::string public_scheme; // "https" for trusted listeners
     std::string public_authority;
+    // Config v2: true when publicOrigin was omitted (default "http://<tcp>"),
+    // allowing an ephemeral :0 port to substitute its bound port at start().
+    bool public_origin_auto = false;
     // §9.2 trust boundary: header routing requires trusted == true. The
     // field is an explicit declaration, never inferred from the transport
     // (design review §3.7/§8.1); the listener adapter fails the bind when a
@@ -101,6 +104,8 @@ struct RequestTierConfig {
 };
 
 struct PoolTierConfig {
+    std::uint32_t workers = 0;
+    bool has_queue_requests = false;
     std::uint64_t queue_requests = 0;
     std::uint64_t queue_header_bytes = 0;
     std::uint64_t queue_timeout_ms = 0;
@@ -129,6 +134,8 @@ struct CapacityConfig {
     std::uint64_t queued_requests_total = 0;
     std::uint64_t queued_header_bytes_total = 0;
     std::uint64_t worker_memory_commit_total = 0;
+    std::uint64_t max_channel_message_size = 1024ULL * 1024ULL;
+    std::uint64_t channel_idle_timeout_ms = 60000;
 };
 
 // GLM T08: host-level channel limits (FetchRPC v4 A2). Zero selects
@@ -169,6 +176,7 @@ struct RecoveryConfig {
 // ---- the model ----------------------------------------------------------
 
 struct ParsedHostConfig {
+    bool is_v2 = false;
     std::string applications_root;
     std::string state_root;
     std::string secret_root_template; // contains "{application}"

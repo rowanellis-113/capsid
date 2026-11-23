@@ -140,60 +140,122 @@ async function removeTreeRetry(target, attempts = 20) {
   }
 }
 
-// The frozen M1A CLI as an argument list, with the scenario knobs exposed
-// for the startup-failure regressions. routing knobs mirror the managed
-// routing matrix: subdomain carries --routing-suffix, header carries
-// --routing-trusted.
-function hostArgs(
+function writeLocalHostConfig(
+  dir,
+  {
+    workers = 1,
+    listen = '127.0.0.1:0',
+    routing = 'path',
+    routingSuffix,
+    routingTrusted = false,
+    fetchTargets = [],
+    modules = [],
+    envNames = [],
+    cors,
+    filename = 'host.json',
+  } = {},
+) {
+  const listener = {
+    name: 'public',
+    tcp: listen,
+    publicScheme: 'http',
+    publicAuthority: 'public.example',
+    trusted: routingTrusted,
+    routing: {
+      mode: routing,
+      ...(routingSuffix !== undefined ? { suffix: routingSuffix } : {}),
+    },
+    ...(cors !== undefined ? { cors } : {}),
+  };
+  const configPath = path.join(dir, filename);
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      apiVersion: 'capsid/host-v1',
+      applicationsRoot: '/var/lib/capsid/apps',
+      stateRoot: '/var/lib/capsid/state',
+      secretRootTemplate: '/run/capsid/secrets/{application}',
+      admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+      permissions: {
+        modules,
+        environmentNames: envNames,
+        fsReadRoots: [],
+        fetchTargets,
+        storageNamespaces: [],
+        stdioStreams: [],
+      },
+      isolation: { mode: 'strict', required: [] },
+      capacity: { workersTotal: workers, startupsConcurrent: workers },
+      listeners: [listener],
+    }),
+  );
+  return configPath;
+}
+
+function createLocalAppFixture(
   args,
   {
     requestTimeoutMs,
     listen = '127.0.0.1:0',
     routing = 'path',
     routingSuffix,
-    routingTrusted,
+    routingTrusted = false,
   } = {},
 ) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-sw-host-'));
   const bundle = path.resolve(args.get('bundle'));
-  return [
-    '--mode',
-    'single-worker',
-    '--worker',
-    path.resolve(args.get('worker')),
-    '--source-bundle',
-    bundle,
-    '--source-name',
-    pathToFileURL(bundle).href,
-    '--application',
-    'orders',
-    '--listen',
+  fs.copyFileSync(bundle, path.join(dir, 'bundle.mjs'));
+  fs.writeFileSync(
+    path.join(dir, 'capsid.json'),
+    JSON.stringify({
+      apiVersion: 'capsid/app-v1',
+      entry: 'bundle.mjs',
+      pool: { minReady: 1, maxWorkers: 1 },
+      request: { timeout: `${requestTimeoutMs}ms` },
+    }),
+  );
+  const hostConfig = writeLocalHostConfig(dir, {
+    workers: 1,
     listen,
-    '--routing',
     routing,
-    ...(routing === 'subdomain' ? ['--routing-suffix', routingSuffix] : []),
-    ...(routing === 'header' ? ['--routing-trusted', routingTrusted] : []),
-    '--public-scheme',
-    'http',
-    '--public-authority',
-    'public.example',
-    '--request-timeout-ms',
-    String(requestTimeoutMs),
-    '--initial-stream-window',
-    '1024',
-    '--strict-sandbox',
-    'off',
-    '--ready-fd',
-    '3',
-  ];
+    routingSuffix,
+    routingTrusted,
+  });
+  return {
+    dir,
+    argv: [
+      '--app-dir',
+      dir,
+      '--app',
+      'orders',
+      '--host-config',
+      hostConfig,
+      '--listen',
+      listen,
+      '--worker',
+      path.resolve(args.get('worker')),
+      '--workers',
+      '1',
+      '--strict-sandbox',
+      'off',
+      '--ready-fd',
+      '3',
+    ],
+  };
 }
 
-// Starts a capsid-host in single-worker mode and resolves with its READY
+// Starts a capsid-host in local dev mode and resolves with its READY
 // state. requestTimeoutMs selects the scenario: the correctness phase runs
 // with a loose deadline (streaming correctness is asserted, not wall-clock
 // throughput), and the timeout phase runs the frozen 100ms deadline against
 // an independent slow endpoint.
 async function startHost(args, { requestTimeoutMs, ...hostKnobs }) {
-  const child = spawn(args.get('host'), hostArgs(args, { requestTimeoutMs, ...hostKnobs }), {
+  const fixture = createLocalAppFixture(args, { requestTimeoutMs, ...hostKnobs });
+  const child = spawn(args.get('host'), fixture.argv, {
+    env: {
+      ...process.env,
+      CAPSID_INITIAL_STREAM_WINDOW: '1024',
+    },
     stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -224,6 +286,7 @@ async function startHost(args, { requestTimeoutMs, ...hostKnobs }) {
   );
   return {
     child,
+    dir: fixture.dir,
     port: ready.port,
     stdoutText: () => stdout,
     stderrText: () => stderr,
@@ -231,140 +294,135 @@ async function startHost(args, { requestTimeoutMs, ...hostKnobs }) {
 }
 
 async function stopHost(host) {
-  host.child.kill('SIGTERM');
-  const exited = await waitForExit(host.child, 3000);
-  assert.ok(
-    exited.code === 0 || exited.signal === 'SIGTERM',
-    `unexpected host exit: ${JSON.stringify(exited)}; stderr=${host.stderrText()}`,
-  );
-  assert.equal(host.stdoutText(), '', 'capsid-host wrote readiness or logs to stdout');
-  // The Host must never report an internal state mismatch: a frame that
-  // reached the Runtime ABI after the Runtime forgot its request (late
-  // credit/end/body) is a Host-side race, not a worker failure.
-  for (const pattern of [
-    /grant_response_credit failed/,
-    /write_request failed/,
-    /end_request failed/,
-    /begin_request failed/,
-    /invalid IPC frame/,
-  ]) {
-    assert.doesNotMatch(
-      host.stderrText(),
-      pattern,
-      `host reported an internal state error: ${pattern}`,
+  try {
+    host.child.kill('SIGTERM');
+    const exited = await waitForExit(host.child, 3000);
+    assert.ok(
+      exited.code === 0 || exited.signal === 'SIGTERM',
+      `unexpected host exit: ${JSON.stringify(exited)}; stderr=${host.stderrText()}`,
     );
+    assert.equal(host.stdoutText(), '', 'capsid-host wrote readiness or logs to stdout');
+    // The Host must never report an internal state mismatch: a frame that
+    // reached the Runtime ABI after the Runtime forgot its request (late
+    // credit/end/body) is a Host-side race, not a worker failure.
+    for (const pattern of [
+      /grant_response_credit failed/,
+      /write_request failed/,
+      /end_request failed/,
+      /begin_request failed/,
+      /invalid IPC frame/,
+    ]) {
+      assert.doesNotMatch(
+        host.stderrText(),
+        pattern,
+        `host reported an internal state error: ${pattern}`,
+      );
+    }
+  } finally {
+    if (host.dir) await removeTreeRetry(host.dir);
   }
 }
 
 const args = parseArgs(process.argv.slice(2));
 
-// ---- Startup-failure regressions: CLI-phase validation must fail before
+// ---- Startup-failure regressions: CLI/config validation must fail before
 // anything is spawned, and a post-spawn failure (the READY record write)
 // must tear the worker down and exit within a bounded time.
 {
-  const invalidAddress = spawn(
-    args.get('host'),
-    hostArgs(args, {
-      requestTimeoutMs: 10000,
-      listen: '999.999.999.999:0',
-    }),
-    {
+  const fixture = createLocalAppFixture(args, {
+    requestTimeoutMs: 10000,
+    listen: '999.999.999.999:0',
+  });
+  try {
+    const invalidAddress = spawn(args.get('host'), fixture.argv, {
       stdio: ['ignore', 'pipe', 'pipe', 'ignore'],
-    },
-  );
-  const invalidExit = await waitForExit(invalidAddress, 5000);
-  assert.equal(invalidExit.code, 2, 'invalid listen address must fail the CLI phase before spawn');
+    });
+    const invalidExit = await waitForExit(invalidAddress, 5000);
+    assert.equal(
+      invalidExit.code,
+      2,
+      'invalid listen address must fail the CLI phase before spawn',
+    );
+  } finally {
+    await removeTreeRetry(fixture.dir);
+  }
 }
 {
-  // Routing-argument validation mirrors the managed routing matrix at
-  // the CLI phase: subdomain needs a suffix, header needs a trusted
-  // listener, and each knob is rejected outside its mode.
-  const bundle = path.resolve(args.get('bundle'));
+  // Routing validation mirrors the managed listener contract: subdomain needs
+  // a suffix, header needs a trusted listener, and path rejects a suffix.
   const routingCases = [
-    ['--routing', 'subdomain'],
-    ['--routing', 'header'],
-    ['--routing', 'path', '--routing-suffix', '.apps.local'],
-    ['--routing', 'path', '--routing-trusted', 'on'],
+    { routing: 'subdomain' },
+    { routing: 'header', routingTrusted: false },
+    { routing: 'path', routingSuffix: '.apps.local' },
+    { routing: 'bogus' },
   ];
   for (const extra of routingCases) {
-    const child = spawn(
-      args.get('host'),
-      [
-        '--mode',
-        'single-worker',
-        ...extra,
-        '--worker',
-        path.resolve(args.get('worker')),
-        '--source-bundle',
-        bundle,
-        '--source-name',
-        pathToFileURL(bundle).href,
-        '--application',
-        'orders',
-        '--listen',
-        '127.0.0.1:0',
-        '--public-scheme',
-        'http',
-        '--public-authority',
-        'public.example',
-        '--request-timeout-ms',
-        '10000',
-        '--strict-sandbox',
-        'off',
-        '--ready-fd',
-        '3',
-      ],
-      {
-        stdio: ['ignore', 'pipe', 'pipe', 'ignore'],
-      },
-    );
-    const routingExit = await waitForExit(child, 5000);
-    assert.equal(routingExit.code, 2, `CLI must reject routing arguments: ${extra.join(' ')}`);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-routing-bad-'));
+    try {
+      fs.copyFileSync(path.resolve(args.get('bundle')), path.join(dir, 'bundle.mjs'));
+      fs.writeFileSync(
+        path.join(dir, 'capsid.json'),
+        JSON.stringify({
+          apiVersion: 'capsid/app-v1',
+          entry: 'bundle.mjs',
+          pool: { minReady: 1, maxWorkers: 1 },
+          request: { timeout: '10s' },
+        }),
+      );
+      const hostConfig = writeLocalHostConfig(dir, extra);
+      const child = spawn(
+        args.get('host'),
+        [
+          '--app-dir',
+          dir,
+          '--app',
+          'orders',
+          '--host-config',
+          hostConfig,
+          '--listen',
+          '127.0.0.1:0',
+          '--worker',
+          path.resolve(args.get('worker')),
+          '--strict-sandbox',
+          'off',
+          '--ready-fd',
+          '3',
+        ],
+        {
+          stdio: ['ignore', 'pipe', 'pipe', 'ignore'],
+        },
+      );
+      const routingExit = await waitForExit(child, 5000);
+      assert.equal(
+        routingExit.code,
+        2,
+        `Host must reject routing config: ${JSON.stringify(extra)}`,
+      );
+    } finally {
+      await removeTreeRetry(dir);
+    }
   }
   // Strict sandbox is a Linux-only capability: the CLI fails at the
   // argument phase on every other platform (fail fast, matching
   // --mode managed), never after spawn.
   if (process.platform !== 'linux') {
-    const strictChild = spawn(
-      args.get('host'),
-      [
-        '--mode',
-        'single-worker',
-        '--worker',
-        path.resolve(args.get('worker')),
-        '--source-bundle',
-        bundle,
-        '--source-name',
-        pathToFileURL(bundle).href,
-        '--application',
-        'orders',
-        '--listen',
-        '127.0.0.1:0',
-        '--routing',
-        'path',
-        '--public-scheme',
-        'http',
-        '--public-authority',
-        'public.example',
-        '--request-timeout-ms',
-        '10000',
-        '--strict-sandbox',
-        'on',
-        '--ready-fd',
-        '3',
-      ],
-      {
+    const fixture = createLocalAppFixture(args, { requestTimeoutMs: 10000 });
+    try {
+      const argv = [...fixture.argv];
+      argv[argv.indexOf('--strict-sandbox') + 1] = 'on';
+      const strictChild = spawn(args.get('host'), argv, {
         stdio: ['ignore', 'pipe', 'pipe', 'ignore'],
-      },
-    );
-    const strictExit = await waitForExit(strictChild, 5000);
-    assert.equal(strictExit.code, 2, '--strict-sandbox on must fail the CLI phase on non-Linux');
+      });
+      const strictExit = await waitForExit(strictChild, 5000);
+      assert.equal(strictExit.code, 2, '--strict-sandbox on must fail the CLI phase on non-Linux');
+    } finally {
+      await removeTreeRetry(fixture.dir);
+    }
   }
 }
 {
-  // capsid.json `entry` is a plain file name inside the capsid.json
-  // directory. Traversal and absolute/drive forms are rejected at the
-  // CLI phase, before the bundle path is composed.
+  // capsid.json `entry` is a plain file name inside the app directory.
+  // Traversal and absolute/drive forms are rejected before bundle load.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-entry-'));
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
@@ -375,25 +433,20 @@ const args = parseArgs(process.argv.slice(2));
       request: { timeout: '10s' },
     }),
   );
+  const hostConfig = writeLocalHostConfig(dir);
   const child = spawn(
     args.get('host'),
     [
-      '--mode',
-      'single-worker',
-      '--worker',
-      path.resolve(args.get('worker')),
-      '--capsid-json',
-      path.join(dir, 'capsid.json'),
-      '--application',
+      '--app-dir',
+      dir,
+      '--app',
       'orders',
+      '--host-config',
+      hostConfig,
       '--listen',
       '127.0.0.1:0',
-      '--routing',
-      'path',
-      '--public-scheme',
-      'http',
-      '--public-authority',
-      'public.example',
+      '--worker',
+      path.resolve(args.get('worker')),
       '--strict-sandbox',
       'off',
       '--ready-fd',
@@ -401,7 +454,7 @@ const args = parseArgs(process.argv.slice(2));
     ],
     {
       cwd: dir,
-      stdio: ['ignore', 'pipe', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
     },
   );
   let stderr = '';
@@ -422,9 +475,10 @@ const args = parseArgs(process.argv.slice(2));
   // fd 3 is a read-only descriptor: the READY record write fails after
   // the worker spawned and became READY, and the Host must exit with
   // code 1 instead of hanging on the worker thread.
+  const fixture = createLocalAppFixture(args, { requestTimeoutMs: 10000 });
   const readOnly = fs.openSync(process.platform === 'win32' ? '\\\\.\\NUL' : '/dev/null', 'r');
   try {
-    const brokenReady = spawn(args.get('host'), hostArgs(args, { requestTimeoutMs: 10000 }), {
+    const brokenReady = spawn(args.get('host'), fixture.argv, {
       stdio: ['ignore', 'pipe', 'pipe', readOnly],
     });
     let brokenStderr = '';
@@ -440,6 +494,7 @@ const args = parseArgs(process.argv.slice(2));
     );
   } finally {
     fs.closeSync(readOnly);
+    await removeTreeRetry(fixture.dir);
   }
 }
 
@@ -739,7 +794,7 @@ try {
   const header = await startHost(args, {
     requestTimeoutMs: 10000,
     routing: 'header',
-    routingTrusted: 'on',
+    routingTrusted: true,
   });
   try {
     const match = await request(header.port, {
@@ -806,25 +861,20 @@ try {
       healthCheck: { path: '/health', timeout: '5s' },
     }),
   );
+  const hostConfig = writeLocalHostConfig(dir, { routingTrusted: true });
   const child = spawn(
     args.get('host'),
     [
-      '--mode',
-      'single-worker',
-      '--worker',
-      path.resolve(args.get('worker')),
-      '--capsid-json',
-      path.join(dir, 'capsid.json'),
-      '--application',
+      '--app-dir',
+      dir,
+      '--app',
       'orders',
+      '--host-config',
+      hostConfig,
       '--listen',
       '127.0.0.1:0',
-      '--routing',
-      'path',
-      '--public-scheme',
-      'http',
-      '--public-authority',
-      'public.example',
+      '--worker',
+      path.resolve(args.get('worker')),
       '--strict-sandbox',
       'off',
       '--ready-fd',
@@ -876,25 +926,20 @@ try {
       healthCheck: { path: '/nope', timeout: '3s' },
     }),
   );
+  const hostConfig = writeLocalHostConfig(dir, { routingTrusted: true });
   const child = spawn(
     args.get('host'),
     [
-      '--mode',
-      'single-worker',
-      '--worker',
-      path.resolve(args.get('worker')),
-      '--capsid-json',
-      path.join(dir, 'capsid.json'),
-      '--application',
+      '--app-dir',
+      dir,
+      '--app',
       'orders',
+      '--host-config',
+      hostConfig,
       '--listen',
       '127.0.0.1:0',
-      '--routing',
-      'path',
-      '--public-scheme',
-      'http',
-      '--public-authority',
-      'public.example',
+      '--worker',
+      path.resolve(args.get('worker')),
       '--strict-sandbox',
       'off',
       '--ready-fd',
@@ -926,49 +971,43 @@ try {
 // single-listener path; static-pool must not silently skip its probe).
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-pool-health-'));
-  fs.copyFileSync(args.get('bundle'), path.join(dir, 'host-single-worker.js'));
   const spawnPool = (healthPath) => {
-    const capsidJson = path.join(dir, `capsid-${healthPath.replaceAll('/', '-')}.json`);
+    const sub = path.join(dir, healthPath === '/health' ? 'healthy' : 'broken');
+    fs.mkdirSync(sub, { recursive: true, mode: 0o700 });
+    fs.copyFileSync(args.get('bundle'), path.join(sub, 'host-single-worker.js'));
     fs.writeFileSync(
-      capsidJson,
+      path.join(sub, 'capsid.json'),
       JSON.stringify({
         apiVersion: 'capsid/app-v1',
         entry: 'host-single-worker.js',
-        // The local document schema requires minReady == maxWorkers;
-        // actual static-pool sizing comes from --workers on the CLI.
         pool: { minReady: 2, maxWorkers: 2 },
         request: { timeout: '10s' },
         healthCheck: { path: healthPath, timeout: '3s' },
       }),
     );
+    const hostConfig = writeLocalHostConfig(sub, { workers: 2 });
     return spawn(
       args.get('host'),
       [
-        '--mode',
-        'static-pool',
-        '--workers',
-        '2',
-        '--worker',
-        path.resolve(args.get('worker')),
-        '--capsid-json',
-        capsidJson,
-        '--application',
+        '--app-dir',
+        sub,
+        '--app',
         'orders',
+        '--host-config',
+        hostConfig,
         '--listen',
         '127.0.0.1:0',
-        '--routing',
-        'path',
-        '--public-scheme',
-        'http',
-        '--public-authority',
-        'public.example',
+        '--worker',
+        path.resolve(args.get('worker')),
+        '--workers',
+        '2',
         '--strict-sandbox',
         'off',
         '--ready-fd',
         '3',
       ],
       {
-        cwd: dir,
+        cwd: sub,
         stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
       },
     );
@@ -1033,28 +1072,23 @@ try {
       request: { timeout: '10s' },
     }),
   );
+  const hostConfig = writeLocalHostConfig(dir, { workers: 3 });
   const spawnPool = (workers) =>
     spawn(
       args.get('host'),
       [
-        '--mode',
-        'static-pool',
-        '--workers',
-        String(workers),
-        '--worker',
-        path.resolve(args.get('worker')),
-        '--capsid-json',
-        path.join(dir, 'capsid.json'),
-        '--application',
+        '--app-dir',
+        dir,
+        '--app',
         'orders',
+        '--host-config',
+        hostConfig,
         '--listen',
         '127.0.0.1:0',
-        '--routing',
-        'path',
-        '--public-scheme',
-        'http',
-        '--public-authority',
-        'public.example',
+        '--worker',
+        path.resolve(args.get('worker')),
+        '--workers',
+        String(workers),
         '--strict-sandbox',
         'off',
         '--ready-fd',
@@ -1118,48 +1152,46 @@ try {
       request: { timeout: '10s' },
     }),
   );
-  const spawnCors = (extraArgs) =>
-    spawn(
+  let corsIndex = 0;
+  const spawnCors = (corsConfig, workers = 1) => {
+    const cfgPath = writeLocalHostConfig(dir, {
+      workers,
+      cors: corsConfig,
+      filename: `host-cors-${corsIndex++}.json`,
+    });
+    return spawn(
       args.get('host'),
       [
-        '--mode',
-        'single-worker',
-        '--worker',
-        path.resolve(args.get('worker')),
-        '--capsid-json',
-        path.join(dir, 'capsid.json'),
-        '--application',
+        '--app-dir',
+        dir,
+        '--app',
         'orders',
+        '--host-config',
+        cfgPath,
         '--listen',
         '127.0.0.1:0',
-        '--routing',
-        'path',
-        '--public-scheme',
-        'http',
-        '--public-authority',
-        'public.example',
+        '--worker',
+        path.resolve(args.get('worker')),
+        '--workers',
+        String(workers),
         '--strict-sandbox',
         'off',
         '--ready-fd',
         '3',
-        ...extraArgs,
       ],
       {
         cwd: dir,
         stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
       },
     );
+  };
   try {
-    const child = spawnCors([
-      '--cors-origins',
-      'http://allowed.test',
-      '--cors-methods',
-      'GET,POST',
-      '--cors-headers',
-      'content-type',
-      '--cors-max-age',
-      '600',
-    ]);
+    const child = spawnCors({
+      allowedOrigins: ['http://allowed.test'],
+      allowedMethods: ['GET', 'POST'],
+      allowedHeaders: ['content-type'],
+      maxAge: '600s',
+    });
     let stderr = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
@@ -1222,12 +1254,12 @@ try {
       child.kill('SIGTERM');
       await waitForExit(child, 3000);
     }
-    // CLI validation mirrors host.json: methods are required with
-    // origins, and malformed origins fail at argument time.
+    // host.json CORS schema validation: methods are required with origins,
+    // and malformed origins fail before startup.
     for (const bad of [
-      ['--cors-origins', 'http://allowed.test'],
-      ['--cors-origins', 'not-an-origin', '--cors-methods', 'GET'],
-      ['--cors-methods', 'GET'],
+      { allowedOrigins: ['http://allowed.test'] },
+      { allowedOrigins: ['not-an-origin'], allowedMethods: ['GET'], allowedHeaders: [] },
+      { allowedMethods: ['GET'] },
     ]) {
       const badChild = spawnCors(bad);
       let badStderr = '';
@@ -1236,45 +1268,18 @@ try {
         badStderr += chunk;
       });
       const exit = await waitForExit(badChild, 10000);
-      assert.equal(exit.code, 2, `${bad.join(' ')} must exit 2`);
-      assert.match(badStderr, /cors/i, `${bad.join(' ')} must name the failure`);
+      assert.equal(exit.code, 2, `${JSON.stringify(bad)} must exit 2`);
+      assert.match(badStderr, /cors/i, `${JSON.stringify(bad)} must name the failure`);
     }
-    // static-pool: every shard answers CORS independently through the
-    // shared port (the pool reuses the same per-shard Session engine).
-    const pool = spawn(
-      args.get('host'),
-      [
-        '--mode',
-        'static-pool',
-        '--workers',
-        '2',
-        '--worker',
-        path.resolve(args.get('worker')),
-        '--capsid-json',
-        path.join(dir, 'capsid.json'),
-        '--application',
-        'orders',
-        '--listen',
-        '127.0.0.1:0',
-        '--routing',
-        'path',
-        '--public-scheme',
-        'http',
-        '--public-authority',
-        'public.example',
-        '--strict-sandbox',
-        'off',
-        '--ready-fd',
-        '3',
-        '--cors-origins',
-        'http://allowed.test',
-        '--cors-methods',
-        'GET,POST',
-      ],
+    // multi-worker pool: every worker answers CORS independently through the
+    // shared ManagedListener.
+    const pool = spawnCors(
       {
-        cwd: dir,
-        stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+        allowedOrigins: ['http://allowed.test'],
+        allowedMethods: ['GET', 'POST'],
+        allowedHeaders: [],
       },
+      2,
     );
     let poolStderr = '';
     pool.stderr.setEncoding('utf8');
@@ -1345,25 +1350,20 @@ try {
       },
     }),
   );
+  const hostConfig = writeLocalHostConfig(dir, { routingTrusted: true });
   const child = spawn(
     args.get('host'),
     [
-      '--mode',
-      'single-worker',
-      '--worker',
-      path.resolve(args.get('worker')),
-      '--capsid-json',
-      path.join(dir, 'capsid.json'),
-      '--application',
+      '--app-dir',
+      dir,
+      '--app',
       'orders',
+      '--host-config',
+      hostConfig,
       '--listen',
       '127.0.0.1:0',
-      '--routing',
-      'path',
-      '--public-scheme',
-      'http',
-      '--public-authority',
-      'public.example',
+      '--worker',
+      path.resolve(args.get('worker')),
       '--strict-sandbox',
       'off',
       '--ready-fd',
@@ -1443,27 +1443,25 @@ try {
       },
     }),
   );
+  const hostConfig = writeLocalHostConfig(dir, {
+    modules: ['capsid:env'],
+    envNames: ['DB_URL'],
+  });
   const spawnSecret = (extraArgs) =>
     spawn(
       args.get('host'),
       [
-        '--mode',
-        'single-worker',
-        '--worker',
-        path.resolve(args.get('worker')),
-        '--capsid-json',
-        capsidJson,
-        ...extraArgs,
-        '--application',
+        '--app-dir',
+        dir,
+        '--app',
         'orders',
+        '--host-config',
+        hostConfig,
         '--listen',
         '127.0.0.1:0',
-        '--routing',
-        'path',
-        '--public-scheme',
-        'http',
-        '--public-authority',
-        'public.example',
+        '--worker',
+        path.resolve(args.get('worker')),
+        ...extraArgs,
         '--strict-sandbox',
         'off',
         '--ready-fd',
@@ -1475,14 +1473,13 @@ try {
       },
     );
   try {
-    // Without --secrets-root the same document fails the CLI phase
-    // (exit 2), never a silent empty env value. Runs first: the dir
-    // is both the spawn cwd and the artifact source and must survive.
+    // Without --secrets-dir the same document fails startup (exit 2),
+    // never a silent empty env value.
     const rejected = spawnSecret([]);
     const rejectedExit = await waitForExit(rejected, 5000);
-    assert.equal(rejectedExit.code, 2, 'valueFrom without --secrets-root must fail the CLI phase');
+    assert.equal(rejectedExit.code, 2, 'valueFrom without --secrets-dir must fail the CLI phase');
 
-    const child = spawnSecret(['--secrets-root', path.join(dir, 'secrets')]);
+    const child = spawnSecret(['--secrets-dir', path.join(dir, 'secrets')]);
     let stderr = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
@@ -1495,7 +1492,7 @@ try {
         target: '/@capsid/orders/secret',
         timeoutMs: 3000,
       });
-      assert.equal(secret.status, 200, 'valueFrom must resolve through --secrets-root');
+      assert.equal(secret.status, 200, 'valueFrom must resolve through --secrets-dir');
       assert.equal(
         secret.body.toString('utf8'),
         'postgres://secret',
@@ -1514,7 +1511,7 @@ try {
       ['oversized', 'x'.repeat(16385)],
     ]) {
       fs.writeFileSync(path.join(dir, 'secrets', 'db-url'), value);
-      const bad = spawnSecret(['--secrets-root', path.join(dir, 'secrets')]);
+      const bad = spawnSecret(['--secrets-dir', path.join(dir, 'secrets')]);
       let badStderr = '';
       bad.stderr.setEncoding('utf8');
       bad.stderr.on('data', (chunk) => {
@@ -1589,25 +1586,22 @@ try {
     }),
   );
 
+  const hostConfig = writeLocalHostConfig(dir, {
+    fetchTargets: [`localhost:${upstreamPort}`],
+  });
   const child = spawn(
     args.get('host'),
     [
-      '--mode',
-      'single-worker',
-      '--worker',
-      path.resolve(args.get('worker')),
-      '--capsid-json',
-      capsidJson,
-      '--application',
+      '--app-dir',
+      dir,
+      '--app',
       'orders',
+      '--host-config',
+      hostConfig,
       '--listen',
       '127.0.0.1:0',
-      '--routing',
-      'path',
-      '--public-scheme',
-      'http',
-      '--public-authority',
-      'public.example',
+      '--worker',
+      path.resolve(args.get('worker')),
       '--strict-sandbox',
       'off',
       '--ready-fd',
@@ -1648,7 +1642,8 @@ try {
 }
 
 async function nodelayProbe(envValue) {
-  const child = spawn(args.get('host'), hostArgs(args, { requestTimeoutMs: 10000 }), {
+  const fixture = createLocalAppFixture(args, { requestTimeoutMs: 10000 });
+  const child = spawn(args.get('host'), fixture.argv, {
     env: {
       ...process.env,
       ...(envValue === null ? {} : { CAPSID_TCP_NODELAY: envValue }),
@@ -1671,6 +1666,7 @@ async function nodelayProbe(envValue) {
   } finally {
     child.kill('SIGTERM');
     await waitForExit(child, 3000);
+    await removeTreeRetry(fixture.dir);
   }
 }
 
@@ -1690,7 +1686,8 @@ async function nodelayProbe(envValue) {
 // (worker request-credit event drives an explicit kEndRequest; the request
 // must not hang waiting for a body end that never arrives).
 async function bodylessProbe(envValue) {
-  const child = spawn(args.get('host'), hostArgs(args, { requestTimeoutMs: 10000 }), {
+  const fixture = createLocalAppFixture(args, { requestTimeoutMs: 10000 });
+  const child = spawn(args.get('host'), fixture.argv, {
     env: {
       ...process.env,
       ...(envValue === null ? {} : { CAPSID_BODYLESS: envValue }),
@@ -1715,6 +1712,7 @@ async function bodylessProbe(envValue) {
   } finally {
     child.kill('SIGTERM');
     await waitForExit(child, 3000);
+    await removeTreeRetry(fixture.dir);
   }
 }
 
@@ -1781,25 +1779,22 @@ async function bodylessProbe(envValue) {
     `,
   );
 
+  const hostConfig = writeLocalHostConfig(dir, {
+    fetchTargets: [`127.0.0.1:${upstreamPort}`],
+  });
   const child = spawn(
     args.get('host'),
     [
-      '--mode',
-      'single-worker',
-      '--worker',
-      path.resolve(args.get('worker')),
-      '--capsid-json',
-      path.join(dir, 'capsid.json'),
-      '--application',
+      '--app-dir',
+      dir,
+      '--app',
       'orders',
+      '--host-config',
+      hostConfig,
       '--listen',
       '127.0.0.1:0',
-      '--routing',
-      'path',
-      '--public-scheme',
-      'http',
-      '--public-authority',
-      'public.example',
+      '--worker',
+      path.resolve(args.get('worker')),
       '--strict-sandbox',
       'off',
       '--ready-fd',

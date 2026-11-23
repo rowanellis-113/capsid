@@ -637,6 +637,82 @@ int main() {
                 "neighboring IPv6 literal inherited another address grant");
     }
 
+    // Config v2 symmetric 8-leaf inheritance: app ?? host.defaults ?? builtin,
+    // clamped/rejected against host.maximums.
+    {
+        capsid::host::HostPolicy host;
+        host.is_v2 = true;
+        host.max_workers = 16;
+        host.max_pool_workers = 8;
+        host.default_workers = 3;
+        host.default_request_timeout_ms = 5000;
+        host.max_request_timeout_ms = 10000;
+        host.default_requests_per_worker = 32;
+        host.max_requests_per_worker = 100;
+        host.default_worker_memory_bytes = 256ULL * 1024 * 1024;
+        host.max_worker_memory_bytes = 512ULL * 1024 * 1024;
+        host.default_js_heap_bytes = 64ULL * 1024 * 1024;
+        host.max_js_heap_bytes = 128ULL * 1024 * 1024;
+        host.default_file_descriptors = 64;
+        host.max_file_descriptors = 128;
+        host.has_default_queue_requests = true;
+        host.default_queue_requests = 48;
+        host.max_queue_requests = 64;
+        host.default_queue_timeout_ms = 4000;
+        host.max_queue_timeout_ms = 8000;
+
+        capsid::host::AppRequest app;
+        app.is_v2 = true;
+        app.workers = 0;
+        app.min_ready = 0;
+        const auto inherited = compile_policy(host, app, {});
+        require(inherited.ok, "v2 inheritance compile failed: " + inherited.error);
+        require(inherited.effective.workers == 3 && inherited.effective.min_ready == 3 &&
+                    inherited.effective.request_timeout_ms == 5000 &&
+                    inherited.effective.requests_per_worker == 32 &&
+                    inherited.effective.memory_bytes == 256ULL * 1024 * 1024 &&
+                    inherited.effective.js_heap_bytes == 64ULL * 1024 * 1024 &&
+                    inherited.effective.file_descriptors == 64 &&
+                    inherited.effective.queue_requests == 48 &&
+                    inherited.effective.queue_timeout_ms == 4000,
+                "v2 symmetric defaults did not propagate");
+
+        // Explicit app queueRequests: 0 overrides non-zero host default.
+        app.has_queue_requests = true;
+        app.queue_requests = 0;
+        const auto zero_override = compile_policy(host, app, {});
+        require(zero_override.ok && zero_override.effective.queue_requests == 0,
+                "explicit app-v2 queueRequests=0 did not override host default");
+
+        // Builtin clamping when neither app nor host.defaults sets timeout/maxInflight.
+        capsid::host::HostPolicy small_max;
+        small_max.is_v2 = true;
+        small_max.max_workers = 4;
+        small_max.max_request_timeout_ms = 2000;
+        small_max.max_requests_per_worker = 16;
+        capsid::host::AppRequest minimal_app;
+        minimal_app.is_v2 = true;
+        minimal_app.workers = 0;
+        minimal_app.min_ready = 0;
+        const auto clamped = compile_policy(small_max, minimal_app, {});
+        require(clamped.ok && clamped.effective.workers == 1 &&
+                    clamped.effective.request_timeout_ms == 2000 &&
+                    clamped.effective.requests_per_worker == 16,
+                "v2 builtins did not clamp to host.maximums");
+
+        // Overreach above host.maximums.pool.workers rejects.
+        app.has_workers = true;
+        app.workers = 9;
+        app.min_ready = 9;
+        require(!compile_policy(host, app, {}).ok,
+                "app-v2 pool.workers over maximums.pool.workers accepted");
+        require(capsid::host::effective_max_request_body_bytes(64ULL * 1024 * 1024) ==
+                        16ULL * 1024 * 1024 &&
+                    capsid::host::effective_max_request_body_bytes(256ULL * 1024 * 1024) ==
+                        64ULL * 1024 * 1024,
+                "effective_max_request_body_bytes formula mismatch");
+    }
+
     std::cout << "PASS" << std::endl;
     return 0;
 }

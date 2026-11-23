@@ -151,36 +151,74 @@ async function startHost(args) {
     ].join('\n'),
   );
   const mode = args.get('mode') ?? 'single-worker';
-  let hostArgs = [
-    '--mode',
-    mode,
-    '--worker',
-    path.resolve(args.get('worker')),
-    '--source-bundle',
-    bundle,
-    '--source-name',
-    pathToFileURL(bundle).href,
-    '--application',
-    'orders',
-    '--listen',
-    '127.0.0.1:0',
-    '--routing',
-    'path',
-    '--public-scheme',
-    'http',
-    '--public-authority',
-    'public.example',
-    '--request-timeout-ms',
-    '10000',
-    '--strict-sandbox',
-    'off',
-    '--ready-fd',
-    '3',
-  ];
+  const workers = mode === 'static-pool' ? 2 : 1;
+  let hostArgs = [];
   let port;
   let socketPath;
-  if (mode === 'static-pool') hostArgs.push('--workers', '2');
-  if (mode === 'managed') {
+  if (mode !== 'managed') {
+    const localDir = path.join(dir, 'local-app');
+    fs.mkdirSync(localDir, { recursive: true, mode: 0o700 });
+    fs.copyFileSync(bundle, path.join(localDir, 'bundle.mjs'));
+    fs.writeFileSync(
+      path.join(localDir, 'capsid.json'),
+      JSON.stringify({
+        apiVersion: 'capsid/app-v1',
+        entry: 'bundle.mjs',
+        permissions: { modules: ['capsid:env'] },
+        pool: { minReady: workers, maxWorkers: workers },
+        request: { timeout: '10s' },
+      }),
+    );
+    const localHostConfig = path.join(localDir, 'host.json');
+    fs.writeFileSync(
+      localHostConfig,
+      JSON.stringify({
+        apiVersion: 'capsid/host-v1',
+        applicationsRoot: '/var/lib/capsid/apps',
+        stateRoot: '/var/lib/capsid/state',
+        secretRootTemplate: '/run/capsid/secrets/{application}',
+        admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+        permissions: {
+          modules: ['capsid:env'],
+          environmentNames: [],
+          fsReadRoots: [],
+          fetchTargets: [],
+          storageNamespaces: [],
+          stdioStreams: [],
+        },
+        isolation: { mode: 'strict', required: [] },
+        capacity: { workersTotal: workers, startupsConcurrent: workers },
+        listeners: [
+          {
+            name: 'public',
+            tcp: '127.0.0.1:0',
+            publicScheme: 'http',
+            publicAuthority: 'public.example',
+            trusted: false,
+            routing: { mode: 'path' },
+          },
+        ],
+      }),
+    );
+    hostArgs = [
+      '--app-dir',
+      localDir,
+      '--app',
+      'orders',
+      '--host-config',
+      localHostConfig,
+      '--listen',
+      '127.0.0.1:0',
+      '--worker',
+      path.resolve(args.get('worker')),
+      '--workers',
+      String(workers),
+      '--strict-sandbox',
+      'off',
+      '--ready-fd',
+      '3',
+    ];
+  } else {
     port = await unusedPort();
     const applicationsRoot = path.join(dir, 'applications');
     const stateRoot = path.join(dir, 'state');

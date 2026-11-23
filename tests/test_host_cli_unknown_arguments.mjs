@@ -18,8 +18,68 @@ const output = retained
   ? path.resolve(args.get('--output'))
   : fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-cli-guard-'));
 if (retained) fs.mkdirSync(output);
-const bundle = path.join(output, 'fixture.mjs');
+const bundle = path.join(output, 'bundle.mjs');
 fs.writeFileSync(bundle, "export default {fetch(){return new Response('cli-guard-healthy')}};\n");
+const appConfig = path.join(output, 'capsid.json');
+fs.writeFileSync(
+  appConfig,
+  JSON.stringify({
+    apiVersion: 'capsid/app-v2',
+    entry: 'bundle.mjs',
+    request: {
+      timeout: '10s',
+      maxInflight: 4,
+    },
+    pool: {
+      workers: 1,
+      queueRequests: 4,
+      queueTimeout: '1s',
+    },
+  }),
+);
+const hostConfig = path.join(output, 'host.json');
+fs.writeFileSync(
+  hostConfig,
+  JSON.stringify({
+    apiVersion: 'capsid/host-v2',
+    paths: {
+      applications: path.join(output, 'apps'),
+      state: path.join(output, 'state'),
+      secrets: path.join(output, 'secrets', '{application}'),
+    },
+    admin: { unix: path.join(output, 'admin.sock') },
+    capacity: {
+      workersTotal: 2,
+      channelsTotal: 1024,
+      maxChannelMessageSize: '1MiB',
+      channelIdleTimeout: '60s',
+    },
+    maximums: {
+      pool: { workers: 2, queueRequests: 16, queueTimeout: '10s' },
+      request: {
+        timeout: '60s',
+        maxInflight: 8,
+      },
+    },
+    listeners: [
+      {
+        name: 'public',
+        tcp: '127.0.0.1:0',
+        publicOrigin: 'http://public.example',
+        routing: { mode: 'path' },
+        limits: {
+          channels: 128,
+        },
+        cors: {
+          allowedOrigins: ['https://client.example'],
+          allowedMethods: ['GET', 'POST'],
+          allowedHeaders: ['X-Test'],
+          maxAge: '60s',
+        },
+      },
+    ],
+  }),
+);
 const record = { complete: false, cases: [], mode: 'actual-host-executable' };
 const save = () =>
   fs.writeFileSync(path.join(output, 'run.json'), JSON.stringify(record, null, 2) + '\n');
@@ -112,65 +172,22 @@ async function launch(name, values) {
   return result;
 }
 
-const known = [
-  '--initial-stream-window',
-  '65536',
-  '--channels-total',
-  '1024',
-  '--pending-dials-total',
-  '128',
-  '--channel-queue-bytes-total',
-  '16MiB',
-  '--listener-channels',
-  '128',
-  '--listener-channel-queue-bytes',
-  '16MiB',
-  '--cors-origins',
-  'https://client.example',
-  '--cors-methods',
-  'GET,POST',
-  '--cors-headers',
-  'X-Test',
-  '--cors-max-age',
-  '60',
-  '--max-inflight-per-worker',
-  '4',
-  '--queue-requests',
-  '4',
-  '--queue-header-bytes',
-  '2MiB',
-  '--queue-timeout',
-  '1s',
-  '--max-streaming-inflight',
-  '2',
-  '--stream-idle-timeout',
-  '20000',
-  '--write-timeout',
-  '1000',
-];
 try {
-  for (const mode of ['single-worker', 'static-pool']) {
+  for (const workers of [1, 2]) {
+    const label = `workers-${workers}`;
     const base = [
-      '--mode',
-      mode,
-      '--worker',
-      args.get('--worker'),
-      '--source-bundle',
-      bundle,
-      '--source-name',
-      pathToFileURL(bundle).href,
-      '--application',
+      '--app-dir',
+      output,
+      '--app',
       'orders',
+      '--host-config',
+      hostConfig,
       '--listen',
       '127.0.0.1:0',
-      '--routing',
-      'path',
-      '--public-scheme',
-      'http',
-      '--public-authority',
-      'public.example',
-      '--request-timeout-ms',
-      '10000',
+      '--worker',
+      args.get('--worker'),
+      '--workers',
+      String(workers),
       '--strict-sandbox',
       'off',
       '--ready-fd',
@@ -178,8 +195,7 @@ try {
       '--stop-fd',
       '4',
     ];
-    if (mode === 'static-pool') base.push('--workers', '2');
-    const positive = await launch(mode + '-known-options', [...base, ...known]);
+    const positive = await launch(label + '-known-options', base);
     assert.ok(
       positive.ready,
       'valid documented arguments must still start and serve a real request',
@@ -190,16 +206,20 @@ try {
       'request-timout-ms',
       'max-inflight-per-workre',
       'totally-unknown',
+      'source-bundle',
+      'routing',
+      'capsid-json',
+      'cors-origins',
     ]) {
       for (const invalidPaths of [false, true]) {
         const values = [...base];
         if (invalidPaths) {
           values[values.indexOf('--worker') + 1] = path.join(output, 'absent-worker');
-          values[values.indexOf('--source-bundle') + 1] = path.join(output, 'absent-bundle');
+          values[values.indexOf('--app-dir') + 1] = path.join(output, 'absent-app-dir');
         }
         values.push('--' + name, '1');
         const result = await launch(
-          mode + '-' + name + '-' + (invalidPaths ? 'before-io' : 'full-config'),
+          label + '-' + name + '-' + (invalidPaths ? 'before-io' : 'full-config'),
           values,
         );
         assert.equal(
@@ -221,6 +241,23 @@ try {
         );
       }
     }
+  }
+  for (const legacyMode of ['single-worker', 'static-pool']) {
+    const result = await launch(`legacy-mode-${legacyMode}`, [
+      '--mode',
+      legacyMode,
+      '--app-dir',
+      path.join(output, 'absent-app-dir'),
+      '--worker',
+      path.join(output, 'absent-worker'),
+    ]);
+    assert.equal(result.ready, null);
+    assert.deepEqual(result.exit, { code: 2, signal: null });
+    assert.equal(result.readyBytes, 0);
+    assert.equal(result.stdoutBytes, 0);
+    const diagnostic = JSON.parse(result.stderr.trim().split('\n')[0]);
+    assert.equal(diagnostic.result, 'fail');
+    assert.match(diagnostic.message, /^unknown --mode /);
   }
   record.status = 'complete';
   console.log(`host CLI unknown-argument validation: PASS cases=${record.cases.length}`);

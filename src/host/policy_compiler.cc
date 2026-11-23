@@ -149,28 +149,54 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
                                    const std::vector<EffectiveEnvEntry>& resolved_secrets) {
     PolicyCompileResult result;
 
-    // Pool: a fixed N/N static pool within the Host worker ceiling. The App
-    // must state a positive pool with minReady == maxWorkers; elastic or
-    // mismatched pools reject here even though the JSON schema already
-    // forbids them (defense in depth). The Host has exactly one
-    // worker-count ceiling (capacity.workersTotal -> host.max_workers), and
-    // it must stay bounded: 0 means no worker capacity at all, not
-    // unlimited like the other Host ceilings. Isolation is host-decided
-    // only.
-    if (app.workers == 0 || app.min_ready == 0) {
-        result.error = "pool must be positive";
-        return result;
+    // Pool: a fixed N/N static pool within the Host worker ceiling. In v1,
+    // App must state a positive pool with minReady == maxWorkers; in v2,
+    // pool.workers is optional and follows app -> host.defaults -> builtin(1)
+    // while enforcing host.maximums.pool.workers and capacity.workersTotal.
+    const bool is_v2 = app.is_v2 || host.is_v2;
+    if (!is_v2) {
+        if (app.workers == 0 || app.min_ready == 0) {
+            result.error = "pool must be positive";
+            return result;
+        }
+        if (app.min_ready != app.workers) {
+            result.error = "static pool requires minReady == maxWorkers";
+            return result;
+        }
+        if (host.max_workers == 0 || app.workers > host.max_workers) {
+            result.error = "pool exceeds the Host worker ceiling";
+            return result;
+        }
+        result.effective.workers = app.workers;
+        result.effective.min_ready = app.min_ready;
+    } else {
+        if (host.max_pool_workers != 0 && host.default_workers > host.max_pool_workers) {
+            result.error = "default pool workers exceeds the Host maximum";
+            return result;
+        }
+        std::uint32_t effective_workers = 1;
+        if (app.has_workers || app.workers != 0) {
+            if (app.workers == 0) {
+                result.error = "pool must be positive";
+                return result;
+            }
+            if (host.max_pool_workers != 0 && app.workers > host.max_pool_workers) {
+                result.error = "pool exceeds the Host maximum";
+                return result;
+            }
+            effective_workers = app.workers;
+        } else if (host.default_workers != 0) {
+            effective_workers = host.default_workers;
+        } else if (host.max_pool_workers != 0 && effective_workers > host.max_pool_workers) {
+            effective_workers = host.max_pool_workers;
+        }
+        if (host.max_workers == 0 || effective_workers > host.max_workers) {
+            result.error = "pool exceeds the Host worker ceiling";
+            return result;
+        }
+        result.effective.workers = effective_workers;
+        result.effective.min_ready = effective_workers;
     }
-    if (app.min_ready != app.workers) {
-        result.error = "static pool requires minReady == maxWorkers";
-        return result;
-    }
-    if (host.max_workers == 0 || app.workers > host.max_workers) {
-        result.error = "pool exceeds the Host worker ceiling";
-        return result;
-    }
-    result.effective.workers = app.workers;
-    result.effective.min_ready = app.min_ready;
     result.effective.strict_sandbox = host.strict_sandbox;
 
     // Modules: app request must be inside the host allowlist; duplicates
@@ -404,27 +430,43 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     }
 
     // worker/request/resource: app must not exceed host maximums; a Host
-    // maximum of 0 means unlimited. Omitted App values (0) inherit Host
-    // defaults when configured.
-    const auto resolve_u64_tier = [&](std::uint64_t app_value, std::uint64_t host_default,
-                                      std::uint64_t host_max, const char* default_error,
-                                      const char* max_error, std::uint64_t* out_value) -> bool {
+    // maximum of 0 means unlimited. Omitted App values (0 or !has_*) inherit
+    // Host defaults when configured, else v2 builtin clamped to Host maximums.
+    const auto resolve_u64_tier_ex =
+        [&](bool app_present, std::uint64_t app_value, bool host_default_present,
+            std::uint64_t host_default, std::uint64_t host_max, std::uint64_t builtin_value,
+            const char* default_error, const char* max_error, std::uint64_t* out_value) -> bool {
         if (host_max != 0 && host_default > host_max) {
             result.error = default_error;
             return false;
         }
-        const std::uint64_t effective = app_value != 0 ? app_value : host_default;
-        if (host_max != 0 && effective > host_max) {
-            result.error = max_error;
-            return false;
+        std::uint64_t effective = 0;
+        if (app_present) {
+            if (host_max != 0 && app_value > host_max) {
+                result.error = max_error;
+                return false;
+            }
+            effective = app_value;
+        } else if (host_default_present) {
+            effective = host_default;
+        } else {
+            effective = (host_max != 0 && builtin_value > host_max) ? host_max : builtin_value;
         }
         *out_value = effective;
         return true;
     };
-    if (!resolve_u64_tier(
-            app.requests_per_worker, host.default_requests_per_worker, host.max_requests_per_worker,
-            "default request rate exceeds the Host maximum",
-            "request rate exceeds the Host maximum", &result.effective.requests_per_worker)) {
+    const auto resolve_u64_tier = [&](std::uint64_t app_value, std::uint64_t host_default,
+                                      std::uint64_t host_max, const char* default_error,
+                                      const char* max_error, std::uint64_t* out_value) -> bool {
+        return resolve_u64_tier_ex(app_value != 0, app_value, host_default != 0, host_default,
+                                   host_max, 0, default_error, max_error, out_value);
+    };
+    if (!resolve_u64_tier_ex(app.requests_per_worker != 0, app.requests_per_worker,
+                             host.default_requests_per_worker != 0,
+                             host.default_requests_per_worker, host.max_requests_per_worker,
+                             is_v2 ? 64ULL : 0ULL, "default request rate exceeds the Host maximum",
+                             "request rate exceeds the Host maximum",
+                             &result.effective.requests_per_worker)) {
         return result;
     }
     if (result.effective.requests_per_worker >
@@ -439,10 +481,11 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     }
     std::uint64_t request_timeout =
         app.request_timeout_ms != 0 ? app.request_timeout_ms : host.default_request_timeout_ms;
-    if (request_timeout == 0 && host.max_request_timeout_ms != 0) {
-        // capsid_worker_config_init's documented 30s default must also
-        // respect a Host ceiling when neither document states a default.
-        request_timeout = std::min<std::uint64_t>(30000, host.max_request_timeout_ms);
+    if (request_timeout == 0 && (is_v2 || host.max_request_timeout_ms != 0)) {
+        // v2 builtin default (30s) or v1 capped default respects host.maximums.
+        request_timeout = host.max_request_timeout_ms != 0
+                              ? std::min<std::uint64_t>(30000, host.max_request_timeout_ms)
+                              : 30000;
     }
     if (request_timeout > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
         result.error = "request timeout exceeds the worker limit";
@@ -453,12 +496,14 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
         return result;
     }
     result.effective.request_timeout_ms = request_timeout;
-    // E-1 admission-queue maximums (§10.3): the App queue inherits Host
-    // defaults when omitted (0) and must not exceed Host maximums.
-    if (!resolve_u64_tier(app.queue_requests, host.default_queue_requests, host.max_queue_requests,
-                          "default queue depth exceeds the Host maximum",
-                          "queue depth exceeds the Host maximum",
-                          &result.effective.queue_requests) ||
+    // E-1 admission-queue maximums (§10.3): explicit 0 in app-v2 overrides a
+    // non-zero host default.
+    if (!resolve_u64_tier_ex(
+            is_v2 ? app.has_queue_requests : (app.queue_requests != 0), app.queue_requests,
+            is_v2 ? host.has_default_queue_requests : (host.default_queue_requests != 0),
+            host.default_queue_requests, host.max_queue_requests, 0ULL,
+            "default queue depth exceeds the Host maximum", "queue depth exceeds the Host maximum",
+            &result.effective.queue_requests) ||
         !resolve_u64_tier(
             app.queue_header_bytes, host.default_queue_header_bytes, host.max_queue_header_bytes,
             "default queue header bytes exceed the Host maximum",
@@ -804,6 +849,10 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     app_stream << ";rps:" << app.requests_per_worker;
     if (app.request_timeout_ms != 0) {
         app_stream << ";timeout:" << app.request_timeout_ms;
+    }
+    if (app.is_v2) {
+        app_stream << ";v2:1;workers:" << (app.has_workers ? app.workers : 0)
+                   << ";hasQreq:" << (app.has_queue_requests ? 1 : 0);
     }
     app_stream << ";qreq:" << app.queue_requests << ";qbytes:" << app.queue_header_bytes
                << ";qtimeout:" << app.queue_timeout_ms

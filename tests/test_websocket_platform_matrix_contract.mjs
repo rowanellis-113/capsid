@@ -255,32 +255,6 @@ function sample(system) {
         properties: [{ name: 'TIMEOUT', value: 40 }],
       });
   for (const scenario of [
-    'before-completion',
-    'before-adoption',
-    'cancel-pending',
-    'queued-before-exit',
-    'idle-after-adoption',
-    'keepalive-after-adoption',
-    'pre-post-worker-exit',
-    'pre-post-stop',
-    'pre-post-drain',
-  ]) {
-    tests.push({
-      name: `host_external_accept_exit_${scenario}`,
-      command: [
-        process.execPath,
-        'test_host_external_accept_exit.mjs',
-        '--fixture',
-        '/test/test-host-single-worker-lifecycle',
-        '--worker',
-        '/test/capsid-worker',
-        '--case',
-        scenario,
-      ],
-      properties: [{ name: 'TIMEOUT', value: 45 }],
-    });
-  }
-  for (const scenario of [
     'first-worker-exit',
     'last-worker-exit',
     'first-worker-exit-websocket',
@@ -303,50 +277,6 @@ function sample(system) {
       properties: [{ name: 'TIMEOUT', value: 45 }],
     });
   }
-  for (const scenario of [
-    'reselect-worker-exit',
-    'reselect-last-workers-exit',
-    'pre-post-stop',
-    'pre-post-drain',
-    'active-drain',
-  ]) {
-    tests.push({
-      name: `host_static_pool_adoption_${scenario}`,
-      command: [
-        process.execPath,
-        'test_host_static_pool_adoption.mjs',
-        '--fixture',
-        '/test/test-host-static-pool-adoption',
-        '--worker',
-        '/test/capsid-worker',
-        '--case',
-        scenario,
-      ],
-      properties: [{ name: 'TIMEOUT', value: 60 }],
-    });
-  }
-  for (const scenario of [
-    'drain-before-submit',
-    'drain-during-prepare',
-    'queued-before-drain',
-    'owner-drain-before-submit',
-    'healthy-control',
-  ]) {
-    tests.push({
-      name: `host_external_drain_${scenario}`,
-      command: [
-        process.execPath,
-        'test_host_external_drain.mjs',
-        '--fixture',
-        '/test/test-host-external-drain',
-        '--worker',
-        '/test/capsid-worker',
-        '--case',
-        scenario,
-      ],
-      properties: [{ name: 'TIMEOUT', value: 60 }],
-    });
-  }
   for (const scenario of ['stop', 'drain']) {
     tests.push({
       name: `host_static_pool_local_shutdown_${scenario}`,
@@ -361,17 +291,6 @@ function sample(system) {
         scenario,
       ],
       properties: [{ name: 'TIMEOUT', value: 60 }],
-    });
-  }
-  for (const scenario of [
-    'get-close-before-completion',
-    'head-close-before-completion',
-    'get-normal-completion',
-  ]) {
-    tests.push({
-      name: `host_unavailable_lifecycle_${scenario}`,
-      command: ['/test/test-host-unavailable-lifecycle', scenario],
-      properties: [{ name: 'TIMEOUT', value: 20 }],
     });
   }
   return { kind: 'ctestInfo', tests };
@@ -458,7 +377,7 @@ for (const system of ['Linux', 'Windows', 'Darwin']) {
     const result = validatePlatformMatrix(inventory, system, process.execPath);
     assert.equal(
       result.required.length,
-      system === 'Linux' ? 154 : system === 'Windows' ? 133 : 118,
+      system === 'Linux' ? 132 : system === 'Windows' ? 111 : 96,
     );
     assert.deepEqual(inventory, original);
   });
@@ -946,206 +865,6 @@ for (const [name, mutate, pattern] of [
     assert.throws(() => validatePlatformMatrix(inventory, 'Windows', process.execPath), pattern);
   });
 for (const system of ['Linux', 'Windows', 'Darwin']) {
-  for (const scenario of [
-    'reselect-worker-exit',
-    'reselect-last-workers-exit',
-    'pre-post-stop',
-    'pre-post-drain',
-    'active-drain',
-  ]) {
-    test(`${system}: pool adoption ${scenario} cannot disappear`, () => {
-      const inventory = sample(system);
-      inventory.tests = inventory.tests.filter(
-        (entry) => entry.name !== `host_static_pool_adoption_${scenario}`,
-      );
-      assert.throws(
-        () => validatePlatformMatrix(inventory, system, process.execPath),
-        /missing required pool adoption test/,
-      );
-    });
-  }
-}
-for (const [name, mutate, pattern] of [
-  [
-    'case alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--case') + 1] = 'active-drain';
-    },
-    /actual pool adoption scenario/,
-  ],
-  [
-    'duplicate case',
-    (entry) => {
-      entry.command.push('--case', 'reselect-worker-exit');
-    },
-    /unique required --case/,
-  ],
-  [
-    'fixture alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--fixture') + 1] = '/test/unrelated';
-    },
-    /intended native pool adoption fixture/,
-  ],
-  [
-    'Worker alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--worker') + 1] = '/test/unrelated';
-    },
-    /actual Worker executable/,
-  ],
-  [
-    'driver alias',
-    (entry) => {
-      entry.command[1] = 'unrelated.mjs';
-    },
-    /intended pool adoption driver/,
-  ],
-  [
-    'Node alias',
-    (entry) => {
-      entry.command[0] = '/different/node';
-    },
-    /pinned Node executable/,
-  ],
-  [
-    'disabled',
-    (entry) => {
-      entry.properties.push({ name: 'DISABLED', value: true });
-    },
-    /cannot weaken pool adoption test/,
-  ],
-  [
-    'inverted pass',
-    (entry) => {
-      entry.properties.push({ name: 'WILL_FAIL', value: true });
-    },
-    /cannot weaken pool adoption test/,
-  ],
-  [
-    'skip allowance',
-    (entry) => {
-      entry.properties.push({ name: 'SKIP_RETURN_CODE', value: 77 });
-    },
-    /cannot skip/,
-  ],
-  [
-    'no timeout',
-    (entry) => {
-      entry.properties = [];
-    },
-    /bounded pool adoption timeout/,
-  ],
-])
-  test(`pool adoption registration rejects ${name}`, () => {
-    const inventory = sample('Windows');
-    mutate(
-      inventory.tests.find(
-        (entry) => entry.name === 'host_static_pool_adoption_reselect-worker-exit',
-      ),
-    );
-    assert.throws(() => validatePlatformMatrix(inventory, 'Windows', process.execPath), pattern);
-  });
-for (const system of ['Linux', 'Windows', 'Darwin']) {
-  for (const scenario of [
-    'drain-before-submit',
-    'drain-during-prepare',
-    'queued-before-drain',
-    'owner-drain-before-submit',
-    'healthy-control',
-  ]) {
-    test(`${system}: external drain ${scenario} cannot disappear`, () => {
-      const inventory = sample(system);
-      inventory.tests = inventory.tests.filter(
-        (entry) => entry.name !== `host_external_drain_${scenario}`,
-      );
-      assert.throws(
-        () => validatePlatformMatrix(inventory, system, process.execPath),
-        /missing required external drain test/,
-      );
-    });
-  }
-}
-for (const [name, mutate, pattern] of [
-  [
-    'case alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--case') + 1] = 'healthy-control';
-    },
-    /actual external drain scenario/,
-  ],
-  [
-    'duplicate case',
-    (entry) => {
-      entry.command.push('--case', 'drain-before-submit');
-    },
-    /unique required --case/,
-  ],
-  [
-    'fixture alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--fixture') + 1] = '/test/unrelated';
-    },
-    /intended native external drain fixture/,
-  ],
-  [
-    'Worker alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--worker') + 1] = '/test/unrelated';
-    },
-    /actual Worker executable/,
-  ],
-  [
-    'driver alias',
-    (entry) => {
-      entry.command[1] = 'unrelated.mjs';
-    },
-    /intended external drain driver/,
-  ],
-  [
-    'Node alias',
-    (entry) => {
-      entry.command[0] = '/different/node';
-    },
-    /pinned Node executable/,
-  ],
-  [
-    'disabled',
-    (entry) => {
-      entry.properties.push({ name: 'DISABLED', value: true });
-    },
-    /cannot weaken external drain test/,
-  ],
-  [
-    'inverted pass',
-    (entry) => {
-      entry.properties.push({ name: 'WILL_FAIL', value: true });
-    },
-    /cannot weaken external drain test/,
-  ],
-  [
-    'skip allowance',
-    (entry) => {
-      entry.properties.push({ name: 'SKIP_RETURN_CODE', value: 77 });
-    },
-    /cannot skip/,
-  ],
-  [
-    'no timeout',
-    (entry) => {
-      entry.properties = [];
-    },
-    /bounded external drain timeout/,
-  ],
-])
-  test(`external drain registration rejects ${name}`, () => {
-    const inventory = sample('Windows');
-    mutate(
-      inventory.tests.find((entry) => entry.name === 'host_external_drain_drain-before-submit'),
-    );
-    assert.throws(() => validatePlatformMatrix(inventory, 'Windows', process.execPath), pattern);
-  });
-for (const system of ['Linux', 'Windows', 'Darwin']) {
   for (const scenario of ['stop', 'drain']) {
     test(`${system}: local pool shutdown ${scenario} cannot disappear`, () => {
       const inventory = sample(system);
@@ -1234,187 +953,6 @@ for (const [name, mutate, pattern] of [
   test(`local pool shutdown registration rejects ${name}`, () => {
     const inventory = sample('Windows');
     mutate(inventory.tests.find((entry) => entry.name === 'host_static_pool_local_shutdown_stop'));
-    assert.throws(() => validatePlatformMatrix(inventory, 'Windows', process.execPath), pattern);
-  });
-for (const system of ['Linux', 'Windows', 'Darwin']) {
-  for (const scenario of [
-    'get-close-before-completion',
-    'head-close-before-completion',
-    'get-normal-completion',
-  ]) {
-    test(`${system}: unavailable lifecycle ${scenario} cannot disappear`, () => {
-      const inventory = sample(system);
-      inventory.tests = inventory.tests.filter(
-        (entry) => entry.name !== `host_unavailable_lifecycle_${scenario}`,
-      );
-      assert.throws(
-        () => validatePlatformMatrix(inventory, system, process.execPath),
-        /missing required unavailable lifecycle test/,
-      );
-    });
-  }
-}
-for (const [name, mutate, pattern] of [
-  [
-    'executable alias',
-    (entry) => {
-      entry.command[0] = '/test/unrelated';
-    },
-    /intended unavailable lifecycle executable/,
-  ],
-  [
-    'case alias',
-    (entry) => {
-      entry.command[1] = 'get-normal-completion';
-    },
-    /actual unavailable lifecycle scenario/,
-  ],
-  [
-    'extra arguments',
-    (entry) => {
-      entry.command.push('get-close-before-completion');
-    },
-    /direct native lifecycle command/,
-  ],
-  [
-    'disabled',
-    (entry) => {
-      entry.properties.push({ name: 'DISABLED', value: true });
-    },
-    /cannot weaken unavailable lifecycle test/,
-  ],
-  [
-    'inverted pass',
-    (entry) => {
-      entry.properties.push({ name: 'WILL_FAIL', value: true });
-    },
-    /cannot weaken unavailable lifecycle test/,
-  ],
-  [
-    'skip allowance',
-    (entry) => {
-      entry.properties.push({ name: 'SKIP_RETURN_CODE', value: 77 });
-    },
-    /cannot skip/,
-  ],
-  [
-    'no timeout',
-    (entry) => {
-      entry.properties = [];
-    },
-    /bounded unavailable lifecycle timeout/,
-  ],
-])
-  test(`unavailable lifecycle registration rejects ${name}`, () => {
-    const inventory = sample('Windows');
-    mutate(
-      inventory.tests.find(
-        (entry) => entry.name === 'host_unavailable_lifecycle_get-close-before-completion',
-      ),
-    );
-    assert.throws(() => validatePlatformMatrix(inventory, 'Windows', process.execPath), pattern);
-  });
-for (const system of ['Linux', 'Windows', 'Darwin']) {
-  for (const scenario of [
-    'before-completion',
-    'before-adoption',
-    'cancel-pending',
-    'queued-before-exit',
-    'idle-after-adoption',
-    'keepalive-after-adoption',
-    'pre-post-worker-exit',
-    'pre-post-stop',
-    'pre-post-drain',
-  ]) {
-    test(`${system}: external accept ${scenario} cannot disappear`, () => {
-      const inventory = sample(system);
-      inventory.tests = inventory.tests.filter(
-        (entry) => entry.name !== `host_external_accept_exit_${scenario}`,
-      );
-      assert.throws(
-        () => validatePlatformMatrix(inventory, system, process.execPath),
-        /missing required external accept test/,
-      );
-    });
-  }
-}
-for (const [name, mutate, pattern] of [
-  [
-    'case alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--case') + 1] = 'before-completion';
-    },
-    /actual accept scenario/,
-  ],
-  [
-    'duplicate case',
-    (entry) => {
-      entry.command.push('--case', 'before-adoption');
-    },
-    /unique required --case/,
-  ],
-  [
-    'fixture alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--fixture') + 1] = '/test/unrelated';
-    },
-    /intended native accept fixture/,
-  ],
-  [
-    'Worker alias',
-    (entry) => {
-      entry.command[entry.command.indexOf('--worker') + 1] = '/test/unrelated';
-    },
-    /actual Worker executable/,
-  ],
-  [
-    'driver alias',
-    (entry) => {
-      entry.command[1] = 'unrelated.mjs';
-    },
-    /intended accept driver/,
-  ],
-  [
-    'Node alias',
-    (entry) => {
-      entry.command[0] = '/different/node';
-    },
-    /pinned Node executable/,
-  ],
-  [
-    'disabled',
-    (entry) => {
-      entry.properties.push({ name: 'DISABLED', value: true });
-    },
-    /cannot weaken accept test/,
-  ],
-  [
-    'inverted pass',
-    (entry) => {
-      entry.properties.push({ name: 'WILL_FAIL', value: true });
-    },
-    /cannot weaken accept test/,
-  ],
-  [
-    'skip allowance',
-    (entry) => {
-      entry.properties.push({ name: 'SKIP_RETURN_CODE', value: 77 });
-    },
-    /cannot skip/,
-  ],
-  [
-    'no timeout',
-    (entry) => {
-      entry.properties = [];
-    },
-    /bounded accept timeout/,
-  ],
-])
-  test(`external accept registration rejects ${name}`, () => {
-    const inventory = sample('Windows');
-    mutate(
-      inventory.tests.find((entry) => entry.name === 'host_external_accept_exit_before-adoption'),
-    );
     assert.throws(() => validatePlatformMatrix(inventory, 'Windows', process.execPath), pattern);
   });
 for (const [name, mutate, pattern] of [
@@ -1752,15 +1290,6 @@ test('real CTest inventory preserves active runner files and nested registration
     fs.writeFileSync(dns, 'synthetic inventory executable path; not an application test\n');
     for (const entry of registrations.filter((value) => /^host_dns_/.test(value.name)))
       entry.command[0] = dns;
-    const lifecycle = path.join(
-      root,
-      'test-host-unavailable-lifecycle' + (process.platform === 'win32' ? '.exe' : ''),
-    );
-    fs.writeFileSync(lifecycle, 'synthetic inventory executable path; not an application test\n');
-    for (const entry of registrations.filter((entry) =>
-      entry.name.startsWith('host_unavailable_lifecycle_'),
-    ))
-      entry.command[0] = lifecycle;
     const writeDeadline = path.join(
       root,
       'test-host-write-timeout' + (process.platform === 'win32' ? '.exe' : ''),
@@ -1821,7 +1350,7 @@ test('real CTest inventory preserves active runner files and nested registration
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(
       JSON.parse(result.stdout).required.length,
-      154,
+      132,
       'nested registrations remain visible',
     );
     for (const [name, content] of markers) {

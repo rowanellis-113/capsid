@@ -390,57 +390,6 @@ export function validatePlatformMatrix(inventory, system, node) {
       required.push(name);
     }
   for (const scenario of [
-    'before-completion',
-    'before-adoption',
-    'cancel-pending',
-    'queued-before-exit',
-    'idle-after-adoption',
-    'keepalive-after-adoption',
-    'pre-post-worker-exit',
-    'pre-post-stop',
-    'pre-post-drain',
-  ]) {
-    const name = `host_external_accept_exit_${scenario}`,
-      test = byName.get(name);
-    assert.ok(test, `${system}: missing required external accept test ${name}`);
-    assert.ok(Array.isArray(test.command), `${name}: executable command`);
-    assert.equal(normalize(test.command[0]), normalize(node), `${name}: pinned Node executable`);
-    assert.equal(
-      path.basename(test.command[1]),
-      'test_host_external_accept_exit.mjs',
-      `${name}: intended accept driver`,
-    );
-    const option = (key) => {
-      const positions = test.command.flatMap((value, index) => (value === key ? [index] : []));
-      assert.equal(positions.length, 1, `${name}: unique required ${key}`);
-      return test.command[positions[0] + 1];
-    };
-    assert.equal(option('--case'), scenario, `${name}: actual accept scenario`);
-    assert.match(
-      path.basename(option('--fixture') ?? ''),
-      /^test-host-single-worker-lifecycle(?:\.exe)?$/,
-      `${name}: intended native accept fixture`,
-    );
-    assert.match(
-      path.basename(option('--worker') ?? ''),
-      /^capsid-worker(?:\.exe)?$/,
-      `${name}: actual Worker executable`,
-    );
-    const properties = Object.fromEntries(
-      (test.properties ?? []).map(({ name, value }) => [name, value]),
-    );
-    assert.ok(!properties.DISABLED && !properties.WILL_FAIL, `${name}: cannot weaken accept test`);
-    assert.ok(
-      !Object.hasOwn(properties, 'SKIP_RETURN_CODE'),
-      `${name}: required accept test cannot skip`,
-    );
-    assert.ok(
-      Number.isFinite(properties.TIMEOUT) && properties.TIMEOUT > 0 && properties.TIMEOUT <= 60,
-      `${name}: bounded accept timeout`,
-    );
-    required.push(name);
-  }
-  for (const scenario of [
     'first-worker-exit',
     'last-worker-exit',
     'first-worker-exit-websocket',
@@ -491,106 +440,6 @@ export function validatePlatformMatrix(inventory, system, node) {
     );
     required.push(name);
   }
-  for (const scenario of [
-    'reselect-worker-exit',
-    'reselect-last-workers-exit',
-    'pre-post-stop',
-    'pre-post-drain',
-    'active-drain',
-  ]) {
-    const name = `host_static_pool_adoption_${scenario}`,
-      test = byName.get(name);
-    assert.ok(test, `${system}: missing required pool adoption test ${name}`);
-    assert.ok(Array.isArray(test.command), `${name}: executable command`);
-    assert.equal(normalize(test.command[0]), normalize(node), `${name}: pinned Node executable`);
-    assert.equal(
-      path.basename(test.command[1]),
-      'test_host_static_pool_adoption.mjs',
-      `${name}: intended pool adoption driver`,
-    );
-    const option = (key) => {
-      const positions = test.command.flatMap((value, index) => (value === key ? [index] : []));
-      assert.equal(positions.length, 1, `${name}: unique required ${key}`);
-      return test.command[positions[0] + 1];
-    };
-    assert.equal(option('--case'), scenario, `${name}: actual pool adoption scenario`);
-    assert.match(
-      path.basename(option('--fixture') ?? ''),
-      /^test-host-static-pool-adoption(?:\.exe)?$/,
-      `${name}: intended native pool adoption fixture`,
-    );
-    assert.match(
-      path.basename(option('--worker') ?? ''),
-      /^capsid-worker(?:\.exe)?$/,
-      `${name}: actual Worker executable`,
-    );
-    const properties = Object.fromEntries(
-      (test.properties ?? []).map(({ name, value }) => [name, value]),
-    );
-    assert.ok(
-      !properties.DISABLED && !properties.WILL_FAIL,
-      `${name}: cannot weaken pool adoption test`,
-    );
-    assert.ok(
-      !Object.hasOwn(properties, 'SKIP_RETURN_CODE'),
-      `${name}: required pool adoption test cannot skip`,
-    );
-    assert.ok(
-      Number.isFinite(properties.TIMEOUT) && properties.TIMEOUT > 0 && properties.TIMEOUT <= 60,
-      `${name}: bounded pool adoption timeout`,
-    );
-    required.push(name);
-  }
-  for (const scenario of [
-    'drain-before-submit',
-    'drain-during-prepare',
-    'queued-before-drain',
-    'owner-drain-before-submit',
-    'healthy-control',
-  ]) {
-    const name = `host_external_drain_${scenario}`,
-      test = byName.get(name);
-    assert.ok(test, `${system}: missing required external drain test ${name}`);
-    assert.ok(Array.isArray(test.command), `${name}: executable command`);
-    assert.equal(normalize(test.command[0]), normalize(node), `${name}: pinned Node executable`);
-    assert.equal(
-      path.basename(test.command[1]),
-      'test_host_external_drain.mjs',
-      `${name}: intended external drain driver`,
-    );
-    const option = (key) => {
-      const positions = test.command.flatMap((value, index) => (value === key ? [index] : []));
-      assert.equal(positions.length, 1, `${name}: unique required ${key}`);
-      return test.command[positions[0] + 1];
-    };
-    assert.equal(option('--case'), scenario, `${name}: actual external drain scenario`);
-    assert.match(
-      path.basename(option('--fixture') ?? ''),
-      /^test-host-external-drain(?:\.exe)?$/,
-      `${name}: intended native external drain fixture`,
-    );
-    assert.match(
-      path.basename(option('--worker') ?? ''),
-      /^capsid-worker(?:\.exe)?$/,
-      `${name}: actual Worker executable`,
-    );
-    const properties = Object.fromEntries(
-      (test.properties ?? []).map(({ name, value }) => [name, value]),
-    );
-    assert.ok(
-      !properties.DISABLED && !properties.WILL_FAIL,
-      `${name}: cannot weaken external drain test`,
-    );
-    assert.ok(
-      !Object.hasOwn(properties, 'SKIP_RETURN_CODE'),
-      `${name}: required external drain test cannot skip`,
-    );
-    assert.ok(
-      Number.isFinite(properties.TIMEOUT) && properties.TIMEOUT > 0 && properties.TIMEOUT <= 60,
-      `${name}: bounded external drain timeout`,
-    );
-    required.push(name);
-  }
   for (const scenario of ['stop', 'drain']) {
     const name = `host_static_pool_local_shutdown_${scenario}`,
       test = byName.get(name);
@@ -632,38 +481,6 @@ export function validatePlatformMatrix(inventory, system, node) {
     assert.ok(
       Number.isFinite(properties.TIMEOUT) && properties.TIMEOUT > 0 && properties.TIMEOUT <= 60,
       `${name}: bounded local pool shutdown timeout`,
-    );
-    required.push(name);
-  }
-  for (const scenario of [
-    'get-close-before-completion',
-    'head-close-before-completion',
-    'get-normal-completion',
-  ]) {
-    const name = `host_unavailable_lifecycle_${scenario}`,
-      test = byName.get(name);
-    assert.ok(test, `${system}: missing required unavailable lifecycle test ${name}`);
-    assert.ok(test.command?.length === 2, `${name}: direct native lifecycle command`);
-    assert.match(
-      path.basename(test.command[0]),
-      /^test-host-unavailable-lifecycle(?:\.exe)?$/,
-      `${name}: intended unavailable lifecycle executable`,
-    );
-    assert.equal(test.command[1], scenario, `${name}: actual unavailable lifecycle scenario`);
-    const properties = Object.fromEntries(
-      (test.properties ?? []).map(({ name, value }) => [name, value]),
-    );
-    assert.ok(
-      !properties.DISABLED && !properties.WILL_FAIL,
-      `${name}: cannot weaken unavailable lifecycle test`,
-    );
-    assert.ok(
-      !Object.hasOwn(properties, 'SKIP_RETURN_CODE'),
-      `${name}: required unavailable lifecycle test cannot skip`,
-    );
-    assert.ok(
-      Number.isFinite(properties.TIMEOUT) && properties.TIMEOUT > 0 && properties.TIMEOUT <= 20,
-      `${name}: bounded unavailable lifecycle timeout`,
     );
     required.push(name);
   }

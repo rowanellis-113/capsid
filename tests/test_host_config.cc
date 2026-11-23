@@ -601,6 +601,93 @@ void test_ipv6_fetch_authorities_reach_the_app_policy() {
     }
 }
 
+void test_v2_orthogonal_host_and_app_validation() {
+    require_valid(ConfigDocument::kHost,
+                  R"json({
+          "apiVersion":"capsid/host-v2",
+          "paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},
+          "admin":{"unix":"/run/capsid/admin.sock"},
+          "listeners":[{"name":"public","tcp":"0.0.0.0:8080","routing":{"mode":"path"}}]
+        })json",
+                  "minimal orthogonal Host v2");
+    require_valid(ConfigDocument::kHost,
+                  R"json({
+          "apiVersion":"capsid/host-v2",
+          "paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}","bindings":"/etc/capsid/bindings"},
+          "admin":{"unix":"/run/capsid/admin.sock"},
+          "isolation":{"mode":"strict","required":["cgroup-v2"],"cgroupRoot":"/sys/fs/cgroup/capsid"},
+          "trustedBytecodeKeys":{"2026-11":"/etc/capsid/keys/ed25519.pub"},
+          "listeners":[{
+            "name":"public",
+            "tcp":"0.0.0.0:8080",
+            "publicOrigin":"https://apps.example.com",
+            "trusted":false,
+            "routing":{"mode":"subdomain","suffix":".apps.example.com"},
+            "limits":{"connections":512,"headerSize":"32KiB","headerTimeout":"5s","bodyIdleTimeout":"30s","streamIdleTimeout":"60s","writeTimeout":"10s","channels":128},
+            "cors":{"allowedOrigins":["https://dev.example.com"],"allowedMethods":["GET","POST"],"allowedHeaders":["content-type"],"maxAge":"86400s"}
+          }],
+          "permissions":{
+            "modules":["capsid:env","capsid:fs"],
+            "environmentNames":["APP_MODE","DATABASE_*"],
+            "fsReadRoots":["/srv/config"],
+            "fetchTargets":["api.example.com:443","10.0.0.0/8:3306,3307","[2001:db8::/32]:443"],
+            "storageNamespaces":["session"],
+            "stdioStreams":["stdout","stderr"]
+          },
+          "defaults":{"worker":{"memoryMax":"256MiB","jsHeap":"64MiB","fileDescriptors":64},"request":{"timeout":"5s","maxInflight":64},"pool":{"workers":2,"queueRequests":0,"queueTimeout":"10s"}},
+          "maximums":{"worker":{"memoryMax":"512MiB","jsHeap":"256MiB","fileDescriptors":256},"request":{"timeout":"30s","maxInflight":128},"pool":{"workers":16,"queueRequests":1024,"queueTimeout":"30s"}},
+          "capacity":{"workersTotal":64,"channelsTotal":1024,"maxChannelMessageSize":"1MiB","channelIdleTimeout":"60s"},
+          "recovery":{"crashBudget":{"maxEvents":5,"window":"60s"},"healthCheck":{"interval":"30s","failures":3}}
+        })json",
+                  "maximal orthogonal Host v2");
+    require_valid(ConfigDocument::kApplication, R"json({"apiVersion":"capsid/app-v2"})json",
+                  "minimal orthogonal App v2");
+    require_valid(ConfigDocument::kApplication,
+                  R"json({
+          "apiVersion":"capsid/app-v2",
+          "entry":"bundle.mjs",
+          "permissions":{
+            "modules":["capsid:env"],
+            "env":{"APP_MODE":{"value":"prod"},"DB":{"valueFrom":"db-url"}},
+            "fs":{"read":{"allow":["/srv/config"],"deny":["/srv/config/secret.json"]}},
+            "fetch":{"allow":["api.example.com:443,8443","10.0.0.0/8"]},
+            "storage":{"namespaces":["session"]},
+            "stdio":["stdout"]
+          },
+          "worker":{"memoryMax":"256MiB","jsHeap":"64MiB","fileDescriptors":64},
+          "request":{"timeout":"5s","maxInflight":64},
+          "pool":{"workers":2,"queueRequests":0,"queueTimeout":"10s"},
+          "healthCheck":{"path":"/health","timeout":"2s"}
+        })json",
+                  "maximal orthogonal App v2");
+    require_error(
+        ConfigDocument::kHost,
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[]})json",
+        ConfigErrorCode::kInvalidValue, "/listeners", "Host v2 rejects empty listeners");
+    require_unknown_field(
+        ConfigDocument::kHost,
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock","mode":"0600"},"listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}]})json",
+        "/admin/mode", "Host v2 rejects removed admin.mode");
+    require_unknown_field(ConfigDocument::kApplication,
+                          R"json({"apiVersion":"capsid/app-v2","tenant":"acme"})json", "/tenant",
+                          "App v2 rejects tenant");
+    require_unknown_field(
+        ConfigDocument::kApplication,
+        R"json({"apiVersion":"capsid/app-v2","worker":{"processAddressSpace":"256MiB"}})json",
+        "/worker/processAddressSpace", "App v2 rejects removed worker.processAddressSpace");
+    require_unknown_field(
+        ConfigDocument::kApplication,
+        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1,"maxWorkers":1}})json",
+        "/pool/minReady", "App v2 rejects minReady");
+    require_error(
+        ConfigDocument::kApplication, R"json({"apiVersion":"capsid/app-v2","healthCheck":{}})json",
+        ConfigErrorCode::kInvalidValue, "/healthCheck/path", "App v2 healthCheck requires path");
+    require_error(ConfigDocument::kApplication,
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"workers":4097}})json",
+                  ConfigErrorCode::kResourceLimit, "/pool/workers",
+                  "App v2 pool.workers exceeds limit");
+}
+
 } // namespace
 
 int main() {
@@ -619,5 +706,6 @@ int main() {
     test_config_resource_limits_precede_json_dom_work();
     test_request_timeout_reaches_typed_app_request();
     test_ipv6_fetch_authorities_reach_the_app_policy();
+    test_v2_orthogonal_host_and_app_validation();
     return 0;
 }

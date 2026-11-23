@@ -1,6 +1,6 @@
-// A real StaticPoolServer fixture. The driver owns process-failure injection;
+// A real LocalDevHost fixture. The driver owns process-failure injection;
 // this executable uses only the public lifecycle/capacity interface.
-#include "host/static_pool_server.h"
+#include "host/local_dev_host.h"
 #include "win32_compat.h"
 
 #include <chrono>
@@ -55,25 +55,32 @@ int main(int argc, char** argv) {
     try {
         require(argc == 2, "expected actual Worker path");
         ReadyPair ready;
-        capsid::host::StaticPoolServerOptions options;
-        options.workers = 2;
-        auto& worker = options.worker_options;
-        worker.worker_path = argv[1];
-        worker.source_bundle_path = "static-pool-faults-inline";
-        worker.source_name = "file://orders/v1/bundle.mjs";
-        worker.application = "orders";
-        worker.listen_address = "127.0.0.1";
-        worker.listen_port = 0;
-        worker.public_scheme = "http";
-        worker.public_authority = "public.example";
-        worker.request_timeout_ms = 6000;
-        worker.initial_stream_window = 64U * 1024U;
-        worker.strict_sandbox = false;
-        worker.install_process_signals = false;
-        worker.ready_fd = ready.fd[1];
-        worker.cors.configured = true;
-        worker.cors.allowed_origins = {"https://client.example"};
-        worker.cors.allowed_methods = {"GET", "HEAD"};
+        capsid::host::LocalDevHostOptions options;
+        options.worker_path = argv[1];
+        options.source_name = "file://orders/v1/bundle.mjs";
+        options.application = "orders";
+        options.capsid_json_text = R"json({
+            "apiVersion": "capsid/app-v2",
+            "pool": { "workers": 2 },
+            "request": { "timeout": "6s" }
+        })json";
+        options.workers_override = 2;
+        capsid::host::ListenerConfig listener;
+        listener.name = "public";
+        listener.tcp = "127.0.0.1:0";
+        listener.public_scheme = "http";
+        listener.public_authority = "public.example";
+        listener.routing.mode = "path";
+        listener.cors.configured = true;
+        listener.cors.allowed_origins = {"https://client.example"};
+        listener.cors.allowed_methods = {"GET", "HEAD"};
+        listener.limits.connections = 128;
+        listener.limits.header_timeout_ms = 5000;
+        options.listener_override = std::move(listener);
+        options.initial_stream_window = 64U * 1024U;
+        options.strict_sandbox = false;
+        options.replace_exited_workers = false;
+        options.ready_fd = ready.fd[1];
         const std::string source = R"js(
 const instance = crypto.randomUUID();
 export default {fetch(request) {
@@ -88,7 +95,7 @@ export default {fetch(request) {
     return new Response(JSON.stringify({challenge: url.searchParams.get('challenge'), instance}));
 }};
 )js";
-        capsid::host::StaticPoolServer pool(std::move(options));
+        capsid::host::LocalDevHost pool(std::move(options));
         std::string error;
         require(pool.start(std::vector<std::uint8_t>(source.begin(), source.end()), &error),
                 "start actual pool: " + error);

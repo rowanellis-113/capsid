@@ -10,14 +10,17 @@
 // A document that passes validate_config_json must parse here; a document
 // that passes here must be a faithful projection of the schema fields.
 
+#include "host/binding_compile.h"
 #include "host/config.h"
 #include "host/host_config_model.h"
 #include "host/listener_cors.h"
 
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -374,19 +377,396 @@ void test_minimal_document_parses() {
             "absent capacity.activationSurgeWorkers must default to 0");
 }
 
-// Binding v1 P0-1: the v2 bindingsRoot maps into the typed model, so the
-// production Host actually passes it to ManagedHostOptions.
-void test_bindings_root_maps() {
-    ParsedHostConfig config;
+std::string replace_first(std::string text, const std::string& needle,
+                          const std::string& replacement) {
+    const std::size_t pos = text.find(needle);
+    require(pos != std::string::npos, "missing mutation target in maximal v2 test: " + needle);
+    text.replace(pos, needle.size(), replacement);
+    return text;
+}
+
+std::string host_v2_signature(const ParsedHostConfig& c) {
+    std::ostringstream out;
+    out << c.is_v2 << '|' << c.applications_root << '|' << c.state_root << '|'
+        << c.secret_root_template << '|' << c.bindings_root << '|' << c.admin_unix_path << '|'
+        << c.admin_mode << '|' << c.isolation_mode << '|' << c.isolation_cgroup_root << '|';
+    for (const auto& s : c.isolation_required) {
+        out << s << ',';
+    }
+    out << '|';
+    for (const auto& k : c.trusted_keys) {
+        out << k.key_id << '=' << k.key_path << ';';
+    }
+    for (const auto& l : c.listeners) {
+        out << "|L:" << l.name << ',' << l.tcp << ',' << l.public_scheme << ','
+            << l.public_authority << ',' << l.public_origin_auto << ',' << l.trusted << ','
+            << l.routing.mode << ',' << l.routing.suffix << ',' << l.routing.header << ','
+            << l.limits.connections << ',' << l.limits.header_bytes << ','
+            << l.limits.header_timeout_ms << ',' << l.limits.body_idle_timeout_ms << ','
+            << l.limits.stream_idle_timeout_ms << ',' << l.limits.write_timeout_ms << ','
+            << l.limits.channels << ',' << l.limits.channel_queue_bytes << ',' << l.cors.configured
+            << ',' << l.cors.max_age_ms << ';';
+        for (const auto& v : l.cors.allowed_origins)
+            out << v << ',';
+        out << ';';
+        for (const auto& v : l.cors.allowed_methods)
+            out << v << ',';
+        out << ';';
+        for (const auto& v : l.cors.allowed_headers)
+            out << v << ',';
+    }
+    const auto& p = c.policy;
+    out << "|P:" << p.is_v2;
+    for (const auto& v : p.module_allowlist)
+        out << v << ',';
+    out << ';';
+    for (const auto& v : p.env_patterns)
+        out << v << ',';
+    out << ';';
+    for (const auto& v : p.fs_read_roots)
+        out << v << ',';
+    out << ';';
+    for (const auto& t : p.fetch_targets) {
+        out << t.host << ':';
+        for (auto pt : t.ports)
+            out << pt << ',';
+    }
+    out << ';';
+    for (const auto& v : p.storage_namespaces)
+        out << v << ',';
+    out << ';';
+    for (const auto& v : p.stdio_streams)
+        out << v << ',';
+    out << "|D:" << p.default_worker_memory_bytes << ',' << p.default_js_heap_bytes << ','
+        << p.default_file_descriptors << ',' << p.default_request_timeout_ms << ','
+        << p.default_requests_per_worker << ',' << p.default_workers << ','
+        << p.has_default_queue_requests << ',' << p.default_queue_requests << ','
+        << p.default_queue_timeout_ms << "|M:" << p.max_worker_memory_bytes << ','
+        << p.max_js_heap_bytes << ',' << p.max_file_descriptors << ',' << p.max_request_timeout_ms
+        << ',' << p.max_requests_per_worker << ',' << p.max_pool_workers << ','
+        << p.max_queue_requests << ',' << p.max_queue_timeout_ms
+        << "|C:" << c.capacity.workers_total << ',' << c.capacity.activation_surge_workers << ','
+        << c.capacity.channels.channels << ',' << c.capacity.channels.pending_dials << ','
+        << c.capacity.channels.queue_bytes << ',' << c.capacity.max_channel_message_size << ','
+        << c.capacity.channel_idle_timeout_ms << ',' << c.channels.configured << ','
+        << c.channels.max_channels << ',' << c.channels.max_message_bytes << ','
+        << c.channels.reassembly_budget_bytes << ',' << c.channels.send_budget_bytes << ','
+        << c.channels.idle_timeout_ms << ',' << c.channels.per_channel_queue_bytes
+        << "|R:" << c.recovery.crash_budget.max_events << ',' << c.recovery.crash_budget.window_ms
+        << ',' << c.recovery.active_health_interval_ms << ',' << c.recovery.active_health_failures;
+    return out.str();
+}
+
+// 100%-schema-field-consumption gate test for orthogonal host-v2 + app-v2
+// (docs/config-v2-design.md §3.2): every single schema field must alter the
+// parsed/compiled typed model when mutated.
+void test_host_v2_orthogonal_and_full_consumption() {
+    const std::string max_host_v2 = R"json({
+      "apiVersion": "capsid/host-v2",
+      "paths": {
+        "applications": "/srv/capsid/applications",
+        "state": "/srv/capsid/state",
+        "secrets": "/srv/capsid/secrets/{application}",
+        "bindings": "/etc/capsid/bindings"
+      },
+      "admin": { "unix": "/run/capsid/admin.sock" },
+      "isolation": {
+        "mode": "strict",
+        "required": ["cgroup-v2"],
+        "cgroupRoot": "/sys/fs/cgroup/capsid"
+      },
+      "trustedBytecodeKeys": {
+        "2026-11": "/etc/capsid/keys/ed25519-2026-11.pub"
+      },
+      "listeners": [{
+        "name": "public",
+        "tcp": "0.0.0.0:8080",
+        "publicOrigin": "https://apps.example.com",
+        "trusted": false,
+        "routing": {
+          "mode": "header",
+          "suffix": ".apps.example.com",
+          "header": "x-capsid-app"
+        },
+        "limits": {
+          "connections": 512,
+          "headerSize": "32KiB",
+          "headerTimeout": "5s",
+          "bodyIdleTimeout": "30s",
+          "streamIdleTimeout": "60s",
+          "writeTimeout": "10s",
+          "channels": 128
+        },
+        "cors": {
+          "allowedOrigins": ["https://dev.example.com"],
+          "allowedMethods": ["GET", "POST"],
+          "allowedHeaders": ["content-type", "x-capsid-app"],
+          "maxAge": "86400s"
+        }
+      }],
+      "permissions": {
+        "modules": ["capsid:env", "capsid:fs", "capsid:storage", "capsid:stdio"],
+        "environmentNames": ["APP_MODE", "DATABASE_*"],
+        "fsReadRoots": ["/srv/capsid/config"],
+        "fetchTargets": ["api.example.com:443", "10.0.0.0/8:3306,3307", "[2001:db8::/32]:443"],
+        "storageNamespaces": ["session"],
+        "stdioStreams": ["stdout", "stderr"]
+      },
+      "defaults": {
+        "worker": { "memoryMax": "256MiB", "jsHeap": "64MiB", "fileDescriptors": 64 },
+        "request": { "timeout": "5s", "maxInflight": 64 },
+        "pool": { "workers": 2, "queueRequests": 256, "queueTimeout": "10s" }
+      },
+      "maximums": {
+        "worker": { "memoryMax": "512MiB", "jsHeap": "256MiB", "fileDescriptors": 256 },
+        "request": { "timeout": "30s", "maxInflight": 128 },
+        "pool": { "workers": 16, "queueRequests": 1024, "queueTimeout": "30s" }
+      },
+      "capacity": {
+        "workersTotal": 64,
+        "channelsTotal": 1024,
+        "maxChannelMessageSize": "1MiB",
+        "channelIdleTimeout": "60s"
+      },
+      "recovery": {
+        "crashBudget": { "maxEvents": 5, "window": "60s" },
+        "healthCheck": { "interval": "30s", "failures": 3 }
+      }
+    })json";
+
+    ParsedHostConfig base_host;
+    require_valid_parse(max_host_v2, "maximal host-v2", &base_host);
+    require(base_host.is_v2 && base_host.policy.is_v2 && base_host.admin_mode == 0600 &&
+                base_host.bindings_root == "/etc/capsid/bindings" &&
+                base_host.capacity.activation_surge_workers == 16 && base_host.channels.configured,
+            "maximal host-v2 projection incomplete");
+    const std::string base_host_sig = host_v2_signature(base_host);
+
+    const std::vector<std::pair<std::string, std::string>> host_mutations = {
+        {R"("applications": "/srv/capsid/applications")", R"("applications": "/srv/capsid/apps2")"},
+        {R"("state": "/srv/capsid/state")", R"("state": "/srv/capsid/state2")"},
+        {R"("secrets": "/srv/capsid/secrets/{application}")",
+         R"("secrets": "/srv/capsid/sec2/{application}")"},
+        {R"("bindings": "/etc/capsid/bindings")", R"("bindings": "/etc/capsid/bindings2")"},
+        {R"("unix": "/run/capsid/admin.sock")", R"("unix": "/run/capsid/admin2.sock")"},
+        {R"("required": ["cgroup-v2"])", R"("required": ["pid"])"},
+        {R"("cgroupRoot": "/sys/fs/cgroup/capsid")", R"("cgroupRoot": "/sys/fs/cgroup/capsid2")"},
+        {R"("2026-11": "/etc/capsid/keys/ed25519-2026-11.pub")",
+         R"("2026-12": "/etc/capsid/keys/ed25519-2026-12.pub")"},
+        {R"("name": "public")", R"("name": "edge")"},
+        {R"("tcp": "0.0.0.0:8080")", R"("tcp": "127.0.0.1:9090")"},
+        {R"("publicOrigin": "https://apps.example.com")",
+         R"("publicOrigin": "http://alt.example.com")"},
+        {R"("trusted": false)", R"("trusted": true)"},
+        {R"("mode": "header")", R"("mode": "subdomain")"},
+        {R"("suffix": ".apps.example.com")", R"("suffix": ".alt.example.com")"},
+        {R"("header": "x-capsid-app")", R"("header": "x-alt-app")"},
+        {R"("connections": 512)", R"("connections": 256)"},
+        {R"("headerSize": "32KiB")", R"("headerSize": "64KiB")"},
+        {R"("headerTimeout": "5s")", R"("headerTimeout": "6s")"},
+        {R"("bodyIdleTimeout": "30s")", R"("bodyIdleTimeout": "31s")"},
+        {R"("streamIdleTimeout": "60s")", R"("streamIdleTimeout": "61s")"},
+        {R"("writeTimeout": "10s")", R"("writeTimeout": "11s")"},
+        {R"("channels": 128)", R"("channels": 64)"},
+        {R"("allowedOrigins": ["https://dev.example.com"])",
+         R"("allowedOrigins": ["https://alt.example.com"])"},
+        {R"("allowedMethods": ["GET", "POST"])", R"("allowedMethods": ["GET", "PUT"])"},
+        {R"("allowedHeaders": ["content-type", "x-capsid-app"])",
+         R"("allowedHeaders": ["content-type", "x-other"])"},
+        {R"("maxAge": "86400s")", R"("maxAge": "3600s")"},
+        {R"("modules": ["capsid:env", "capsid:fs", "capsid:storage", "capsid:stdio"])",
+         R"("modules": ["capsid:env"])"},
+        {R"("environmentNames": ["APP_MODE", "DATABASE_*"])",
+         R"("environmentNames": ["APP_MODE"])"},
+        {R"("fsReadRoots": ["/srv/capsid/config"])", R"("fsReadRoots": ["/srv/capsid/cfg2"])"},
+        {R"("fetchTargets": ["api.example.com:443", "10.0.0.0/8:3306,3307", "[2001:db8::/32]:443"])",
+         R"("fetchTargets": ["api.example.com:8443"])"},
+        {R"("storageNamespaces": ["session"])", R"("storageNamespaces": ["cache"])"},
+        {R"("stdioStreams": ["stdout", "stderr"])", R"("stdioStreams": ["stdout"])"},
+        {R"("worker": { "memoryMax": "256MiB", "jsHeap": "64MiB", "fileDescriptors": 64 })",
+         R"("worker": { "memoryMax": "300MiB", "jsHeap": "64MiB", "fileDescriptors": 64 })"},
+        {R"("jsHeap": "64MiB", "fileDescriptors": 64)",
+         R"("jsHeap": "96MiB", "fileDescriptors": 64)"},
+        {R"("fileDescriptors": 64)", R"("fileDescriptors": 96)"},
+        {R"("request": { "timeout": "5s", "maxInflight": 64 })",
+         R"("request": { "timeout": "6s", "maxInflight": 64 })"},
+        {R"("maxInflight": 64)", R"("maxInflight": 32)"},
+        {R"("pool": { "workers": 2, "queueRequests": 256, "queueTimeout": "10s" })",
+         R"("pool": { "workers": 3, "queueRequests": 256, "queueTimeout": "10s" })"},
+        {R"("queueRequests": 256, "queueTimeout": "10s")",
+         R"("queueRequests": 128, "queueTimeout": "10s")"},
+        {R"("queueTimeout": "10s")", R"("queueTimeout": "12s")"},
+        {R"("worker": { "memoryMax": "512MiB", "jsHeap": "256MiB", "fileDescriptors": 256 })",
+         R"("worker": { "memoryMax": "640MiB", "jsHeap": "256MiB", "fileDescriptors": 256 })"},
+        {R"("jsHeap": "256MiB", "fileDescriptors": 256)",
+         R"("jsHeap": "300MiB", "fileDescriptors": 256)"},
+        {R"("fileDescriptors": 256)", R"("fileDescriptors": 300)"},
+        {R"("request": { "timeout": "30s", "maxInflight": 128 })",
+         R"("request": { "timeout": "35s", "maxInflight": 128 })"},
+        {R"("maxInflight": 128)", R"("maxInflight": 192)"},
+        {R"("pool": { "workers": 16, "queueRequests": 1024, "queueTimeout": "30s" })",
+         R"("pool": { "workers": 20, "queueRequests": 1024, "queueTimeout": "30s" })"},
+        {R"("queueRequests": 1024, "queueTimeout": "30s")",
+         R"("queueRequests": 2048, "queueTimeout": "30s")"},
+        {R"("queueTimeout": "30s")", R"("queueTimeout": "45s")"},
+        {R"("workersTotal": 64)", R"("workersTotal": 32)"},
+        {R"("channelsTotal": 1024)", R"("channelsTotal": 512)"},
+        {R"("maxChannelMessageSize": "1MiB")", R"("maxChannelMessageSize": "2MiB")"},
+        {R"("channelIdleTimeout": "60s")", R"("channelIdleTimeout": "90s")"},
+        {R"("maxEvents": 5)", R"("maxEvents": 7)"},
+        {R"("window": "60s")", R"("window": "120s")"},
+        {R"("interval": "30s")", R"("interval": "15s")"},
+        {R"("failures": 3)", R"("failures": 4)"},
+    };
+    for (const auto& mutation : host_mutations) {
+        const std::string mutated_json =
+            replace_first(max_host_v2, mutation.first, mutation.second);
+        ParsedHostConfig mutated;
+        require_valid_parse(mutated_json, ("host-v2 mutation: " + mutation.first).c_str(),
+                            &mutated);
+        require(host_v2_signature(mutated) != base_host_sig,
+                "silent dead host-v2 field detected for: " + mutation.first);
+    }
+
+    // publicOrigin omission defaults to http://<tcp> with auto port substitution.
+    ParsedHostConfig auto_origin_cfg;
     require_valid_parse(
-        R"json({"apiVersion":"capsid/host-v2","applicationsRoot":"/srv/apps","stateRoot":"/var/lib/capsid","secretRootTemplate":"/var/lib/capsid/secrets/{application}","admin":{"unix":"/run/capsid/admin.sock","mode":"0600"},"bindingsRoot":"/etc/capsid/bindings"})json",
-        "host v2 with bindingsRoot", &config);
-    require(config.bindings_root == "/etc/capsid/bindings",
-            "bindingsRoot did not map into the typed model");
-    require_valid_parse(
-        R"json({"apiVersion":"capsid/host-v1","applicationsRoot":"/srv/apps","stateRoot":"/var/lib/capsid","secretRootTemplate":"/var/lib/capsid/secrets/{application}","admin":{"unix":"/run/capsid/admin.sock","mode":"0600"}})json",
-        "host v1 without bindingsRoot", &config);
-    require(config.bindings_root.empty(), "v1 document produced a bindingsRoot");
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/a","state":"/s","secrets":"/k/{application}"},"admin":{"unix":"/u.sock"},"listeners":[{"name":"p","tcp":"127.0.0.1:0","routing":{"mode":"path"}}]})json",
+        "host-v2 omitted publicOrigin", &auto_origin_cfg);
+    require(auto_origin_cfg.listeners.size() == 1 &&
+                auto_origin_cfg.listeners[0].public_scheme == "http" &&
+                auto_origin_cfg.listeners[0].public_authority == "127.0.0.1:0" &&
+                auto_origin_cfg.listeners[0].public_origin_auto,
+            "host-v2 omitted publicOrigin did not default to http://<tcp>");
+
+    // Also prove 100% consumption of maximal capsid/app-v2 through parse_app_request +
+    // compile_policy + parse_app_bindings.
+    const std::string max_app_v2 = R"json({
+      "apiVersion": "capsid/app-v2",
+      "entry": "bundle.mjs",
+      "permissions": {
+        "modules": ["capsid:env", "capsid:fs", "capsid:storage", "capsid:stdio"],
+        "env": {
+          "APP_MODE": { "value": "production" },
+          "DATABASE_URL": { "valueFrom": "db-url" }
+        },
+        "fs": {
+          "read": {
+            "allow": ["/srv/capsid/config"],
+            "deny": ["/srv/capsid/config/private.json"]
+          }
+        },
+        "fetch": {
+          "allow": ["api.example.com:443", "10.0.0.0/8:3306"]
+        },
+        "storage": { "namespaces": ["session"] },
+        "stdio": ["stdout", "stderr"]
+      },
+      "bindings": {
+        "redis": {
+          "permissions": {
+            "net": { "allow": ["10.0.1.15:6379"] },
+            "fs": { "read": ["/srv/capsid/config/ca.pem"], "write": ["/srv/capsid/config/w"] },
+            "env": ["APP_MODE"],
+            "stdio": ["stdout"]
+          },
+          "config": { "keyPrefix": "orders:" },
+          "secrets": { "password": { "valueFrom": "redis-password" } }
+        }
+      },
+      "worker": { "memoryMax": "256MiB", "jsHeap": "64MiB", "fileDescriptors": 64 },
+      "request": { "timeout": "5s", "maxInflight": 64 },
+      "pool": { "workers": 2, "queueRequests": 256, "queueTimeout": "10s" },
+      "healthCheck": { "path": "/health", "timeout": "2s" }
+    })json";
+
+    auto app_signature = [&](const std::string& json) {
+        const auto v = validate_config_json(ConfigDocument::kApplication, json);
+        require(v.ok, "maximal app-v2 failed schema validation at " + v.error.path + ": " +
+                          v.error.message);
+        const std::vector<std::uint8_t> bytes(json.begin(), json.end());
+        capsid::host::AppRequest req;
+        std::string err;
+        require(capsid::host::parse_app_request(bytes, &req, &err),
+                "parse_app_request failed on app-v2: " + err);
+        std::vector<capsid::host::AppBindingRequest> bindings;
+        require(capsid::host::parse_app_bindings(bytes, &bindings, &err),
+                "parse_app_bindings failed on app-v2: " + err);
+        std::vector<capsid::host::EffectiveEnvEntry> resolved;
+        for (const auto& e : req.env) {
+            capsid::host::EffectiveEnvEntry out;
+            out.name = e.name;
+            out.from_secret = e.from_secret;
+            out.secret_key_id = e.secret_key_id;
+            out.secret_revision = e.from_secret ? "rev-1" : "";
+            out.literal = e.literal;
+            resolved.push_back(std::move(out));
+        }
+        capsid::host::HostPolicy host = base_host.policy;
+        host.fs_read_roots.push_back("/srv/capsid/config");
+        const auto compiled = capsid::host::compile_policy(host, req, resolved);
+        require(compiled.ok, "compile_policy failed on maximal app-v2: " + compiled.error);
+        std::ostringstream sig;
+        sig << compiled.effective.effective_digest << '|' << compiled.effective.app_config_digest
+            << "|envLits:";
+        for (const auto& e : resolved)
+            sig << e.name << '=' << e.literal << ';';
+        sig << "|B:";
+        for (const auto& b : bindings) {
+            sig << b.id << ':' << b.config_json << ';';
+            for (const auto& r : b.net_rules)
+                sig << "n:" << r << ',';
+            for (const auto& r : b.fs_read)
+                sig << "fr:" << r << ',';
+            for (const auto& r : b.fs_write)
+                sig << "fw:" << r << ',';
+            for (const auto& r : b.env)
+                sig << "e:" << r << ',';
+            for (const auto& r : b.stdio)
+                sig << "s:" << r << ',';
+            for (const auto& s : b.secrets)
+                sig << "sec:" << s.name << '=' << s.key_id << ',';
+        }
+        return sig.str();
+    };
+    const std::string base_app_sig = app_signature(max_app_v2);
+    const std::vector<std::pair<std::string, std::string>> app_mutations = {
+        {R"("modules": ["capsid:env", "capsid:fs", "capsid:storage", "capsid:stdio"])",
+         R"("modules": ["capsid:env"])"},
+        {R"("APP_MODE": { "value": "production" })", R"("APP_MODE": { "value": "staging" })"},
+        {R"("DATABASE_URL": { "valueFrom": "db-url" })",
+         R"("DATABASE_URL": { "valueFrom": "db-url-2" })"},
+        {R"("allow": ["/srv/capsid/config"])", R"("allow": ["/srv/capsid/config/sub"])"},
+        {R"("deny": ["/srv/capsid/config/private.json"])",
+         R"("deny": ["/srv/capsid/config/other.json"])"},
+        {R"("allow": ["api.example.com:443", "10.0.0.0/8:3306"])",
+         R"("allow": ["api.example.com:443"])"},
+        {R"("namespaces": ["session"])", R"("namespaces": [])"},
+        {R"("stdio": ["stdout", "stderr"])", R"("stdio": ["stdout"])"},
+        {R"("net": { "allow": ["10.0.1.15:6379"] })", R"("net": { "allow": ["10.0.1.16:6379"] })"},
+        {R"("read": ["/srv/capsid/config/ca.pem"])", R"("read": ["/srv/capsid/config/ca2.pem"])"},
+        {R"("write": ["/srv/capsid/config/w"])", R"("write": ["/srv/capsid/config/w2"])"},
+        {R"("env": ["APP_MODE"])", R"("env": ["OTHER_ENV"])"},
+        {R"("stdio": ["stdout"])", R"("stdio": ["stderr"])"},
+        {R"("config": { "keyPrefix": "orders:" })", R"("config": { "keyPrefix": "items:" })"},
+        {R"("password": { "valueFrom": "redis-password" })",
+         R"("password": { "valueFrom": "redis-password-2" })"},
+        {R"("memoryMax": "256MiB")", R"("memoryMax": "300MiB")"},
+        {R"("jsHeap": "64MiB")", R"("jsHeap": "96MiB")"},
+        {R"("fileDescriptors": 64)", R"("fileDescriptors": 96)"},
+        {R"("timeout": "5s")", R"("timeout": "7s")"},
+        {R"("maxInflight": 64)", R"("maxInflight": 32)"},
+        {R"("workers": 2)", R"("workers": 3)"},
+        {R"("queueRequests": 256)", R"("queueRequests": 128)"},
+        {R"("queueTimeout": "10s")", R"("queueTimeout": "12s")"},
+        {R"("path": "/health")", R"("path": "/ready")"},
+        {R"("timeout": "2s")", R"("timeout": "3s")"},
+    };
+    for (const auto& mutation : app_mutations) {
+        const std::string mutated = replace_first(max_app_v2, mutation.first, mutation.second);
+        require(app_signature(mutated) != base_app_sig,
+                "silent dead app-v2 field detected for: " + mutation.first);
+    }
 }
 
 void test_semantic_gates() {
@@ -701,7 +1081,7 @@ int main() {
     test_full_document_maps_every_field();
     test_channels_section_maps_and_gates();
     test_minimal_document_parses();
-    test_bindings_root_maps();
+    test_host_v2_orthogonal_and_full_consumption();
     test_semantic_gates();
     test_grammar_gates();
     test_cors_tokens_use_the_http_tchar_grammar();

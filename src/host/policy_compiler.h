@@ -23,6 +23,7 @@ struct FetchTarget {
 };
 
 struct HostPolicy {
+    bool is_v2 = false;
     std::vector<std::string> module_allowlist;
     // Env patterns in the frozen Host grammar: "NAME", "PREFIX*", "*SUFFIX"
     // or "*" (any). Longest-prefix matching wins for denials.
@@ -42,6 +43,7 @@ struct HostPolicy {
     // other Host maximums, 0 is NOT unlimited: a bounded pool is required,
     // so 0 means no worker capacity at all and rejects every App.
     std::uint32_t max_workers = 1;
+    std::uint32_t max_pool_workers = 0;        // 0 = no per-app cap beyond max_workers
     std::uint32_t min_ready = 1;               // legacy; not a ceiling (see compile_policy)
     std::uint64_t max_requests_per_worker = 0; // 0 = unlimited
     // request.timeout is finite. Zero here means no Host override/ceiling;
@@ -71,6 +73,7 @@ struct HostPolicy {
     std::uint64_t default_file_descriptors = 0;
     std::uint64_t default_requests_per_worker = 0;
     std::uint32_t default_workers = 0;
+    bool has_default_queue_requests = false;
     std::uint64_t default_queue_requests = 0;
     std::uint64_t default_queue_header_bytes = 0;
     std::uint64_t default_queue_timeout_ms = 0;
@@ -96,6 +99,7 @@ struct HealthCheckConfig {
 };
 
 struct AppRequest {
+    bool is_v2 = false;
     std::vector<std::string> modules;
     struct EnvRequest {
         std::string name;
@@ -118,6 +122,7 @@ struct AppRequest {
     std::uint64_t request_timeout_ms = 0; // request.timeout; 0 = omitted
     // pool.queue* (E-1 §10.3): the bounded per-shard admission queue.
     // 0 = queueing disabled (inflight-full rejects with 429 directly).
+    bool has_queue_requests = false;
     std::uint64_t queue_requests = 0;     // queue depth; 0 = disabled
     std::uint64_t queue_header_bytes = 0; // 0 = unbounded header bytes
     std::uint64_t queue_timeout_ms = 0;   // 0 = no queue deadline
@@ -142,7 +147,8 @@ struct AppRequest {
     std::uint64_t js_heap_bytes = 0;         // worker.jsHeap
     std::uint64_t process_address_bytes = 0; // worker.processAddressSpace
     std::uint64_t file_descriptors = 0;      // worker.fileDescriptors, 0 = unset
-    std::uint32_t workers = 1;               // fixed static pool, min_ready == workers
+    bool has_workers = false;
+    std::uint32_t workers = 1; // fixed static pool, min_ready == workers
     std::uint32_t min_ready = 1;
 };
 
@@ -209,6 +215,12 @@ struct PolicyCompileResult {
     std::string error;
     EffectiveConfig effective;
 };
+
+inline std::uint64_t effective_max_request_body_bytes(std::uint64_t memory_bytes) {
+    constexpr std::uint64_t kMinBodyBytes = 16ULL * 1024ULL * 1024ULL;
+    const std::uint64_t derived = memory_bytes / 4ULL;
+    return derived > kMinBodyBytes ? derived : kMinBodyBytes;
+}
 
 PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app,
                                    const std::vector<EffectiveEnvEntry>& resolved_secrets);

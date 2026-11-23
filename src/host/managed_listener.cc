@@ -8,6 +8,7 @@
 
 #include "host/managed_listener.h"
 #include "host/client_disconnect.h"
+#include "host/credit_limits.h"
 #include "host/metrics.h"
 #include "net_target.h"
 
@@ -382,6 +383,7 @@ class ListenerSession : public std::enable_shared_from_this<ListenerSession> {
     std::optional<ListenerCors> cors_;
     bool closed_ = false;
     bool probe_active_ = false;
+    bool last_request_head_ = false;
     std::weak_ptr<WebSocketSession> websocket_;
     std::shared_ptr<GenerationPool> current_pool_;
 };
@@ -395,7 +397,21 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
   public:
     explicit ManagedListenerImpl(ManagedListenerOptions options)
         : options_(std::move(options)), mailbox_(std::make_shared<WorkerEventMailbox>()),
-          max_request_body_bytes_(options_.max_request_body_bytes) {
+          max_request_body_bytes_(options_.max_request_body_bytes),
+          credit_grant_threshold_(
+              clamp_credit_grant_threshold(kCreditFlushThreshold, options_.initial_stream_window)) {
+        const char* bodyless_env = std::getenv("CAPSID_BODYLESS");
+        if (bodyless_env != nullptr && std::strcmp(bodyless_env, "0") == 0) {
+            bodyless_enabled_ = false;
+            if (options_.log != nullptr) {
+                options_.log->log(LogLane::kControl,
+                                  {.level = "warn",
+                                   .event = log_events::kStartup,
+                                   .message = "bodyless request fusion disabled"});
+            } else {
+                write_stderr("capsid-host: bodyless request fusion disabled");
+            }
+        }
         if (options_.metrics) {
             options_.metrics->observe_channel_budget(service_channel_budget_);
             options_.metrics->observe_channel_budget(
@@ -411,7 +427,9 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     }
 
     bool start(std::string* error);
+    void stop_accepting();
     void request_stop();
+    void request_stop(std::function<void()> on_io_stopped);
     bool wait(std::string* error);
     std::uint16_t bound_port() const { return bound_port_; }
 
@@ -486,9 +504,11 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
 
     ManagedListenerOptions options_;
     std::string routing_header_storage_ = "capsid-app";
+    std::string resolved_public_authority_ = options_.config.public_authority;
     RequestRoutingPolicy policy_;
     std::shared_ptr<WorkerEventMailbox> mailbox_;
     const std::uint64_t max_request_body_bytes_;
+    const std::uint32_t credit_grant_threshold_;
     std::optional<tcp::acceptor> acceptor_;
     std::map<std::uint64_t, std::shared_ptr<ListenerSession>> sessions_;
     std::uint64_t next_session_id_ = 1;
@@ -510,6 +530,12 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     std::uint16_t bound_port_ = 0;
     std::atomic<bool> stop_requested_ = false;
     std::atomic<bool> started_ = false;
+    std::atomic<bool> io_running_ = false;
+    bool bodyless_enabled_ = true;
+    std::mutex stop_callback_mutex_;
+    bool stop_posted_ = false;
+    bool io_stopped_ = false;
+    std::vector<std::function<void()>> stop_callbacks_;
     std::thread io_thread_;
     std::once_flag wait_once_;
 };
@@ -530,11 +556,12 @@ ListenerSession::ListenerSession(std::shared_ptr<ManagedListenerImpl> impl, tcp:
 void ListenerSession::start() { read_head(); }
 
 void ListenerSession::read_head() {
+    last_request_head_ = false;
     current_pool_.reset();
     current_executor_.reset();
     current_request_id_.reset();
     parser_ = std::make_shared<http::request_parser<http::string_body>>();
-    parser_->body_limit(impl_->max_request_body_bytes_);
+    parser_->body_limit(boost::none);
     const std::uint64_t header_bytes = impl_->options_.config.limits.header_bytes;
     if (header_bytes != 0) {
         parser_->header_limit(static_cast<std::uint32_t>(
@@ -554,6 +581,33 @@ void ListenerSession::read_head() {
                 }
                 return;
             }
+            std::uint64_t limit = self->impl_->max_request_body_bytes_;
+            if (self->impl_->options_.routing) {
+                const auto& req = parser->get();
+                std::vector<PublicRequestHeaderView> views;
+                views.reserve(16);
+                for (const auto& field : req.base()) {
+                    views.push_back({field.name_string(), field.value()});
+                }
+                const RequestNormalizationResult normalized =
+                    normalize_public_request(self->impl_->policy_, req.target(), views);
+                if (normalized.ok) {
+                    const std::shared_ptr<const RoutingSnapshot> snapshot =
+                        self->impl_->options_.routing->load();
+                    if (snapshot != nullptr) {
+                        if (const std::shared_ptr<GenerationPool> pool =
+                                snapshot->find(normalized.request.application)) {
+                            limit = pool->max_request_body_bytes();
+                        }
+                    }
+                }
+            }
+            if (parser->content_length().has_value() && *parser->content_length() > limit) {
+                self->send_simple(http::status::payload_too_large, "request body limit exceeded",
+                                  false, parser->get().version());
+                return;
+            }
+            parser->body_limit(limit);
             self->read_body();
         });
 }
@@ -578,6 +632,7 @@ void ListenerSession::read_body() {
 }
 
 void ListenerSession::handle_request(http::request<http::string_body> request) {
+    last_request_head_ = request.method() == http::verb::head;
     // Listener-level CORS runs before routing: a browser preflight can
     // never carry header-routing's control header (the custom header is
     // exactly what the preflight asks about), so the listener answers it
@@ -630,6 +685,12 @@ void ListenerSession::handle_request(http::request<http::string_body> request) {
                     request.version());
         return;
     }
+    if (!impl_->options_.expected_application.empty() &&
+        normalized.request.application != impl_->options_.expected_application) {
+        send_simple(http::status::not_found, "app not found", request.keep_alive(),
+                    request.version());
+        return;
+    }
     if (!pool) {
         send_simple(http::status::service_unavailable, "app not found", request.keep_alive(),
                     request.version());
@@ -637,7 +698,7 @@ void ListenerSession::handle_request(http::request<http::string_body> request) {
     }
     WorkerExecutor* executor = pool->pick_worker();
     if (!executor) {
-        send_simple(http::status::service_unavailable, "worker unavailable", request.keep_alive(),
+        send_simple(http::status::service_unavailable, "worker unavailable", false,
                     request.version());
         return;
     }
@@ -793,8 +854,12 @@ void ListenerSession::send_simple(http::status status, std::string_view body, bo
     if (cors_) {
         cors_->stamp(*response);
     }
-    response->body() = std::string(body);
-    response->prepare_payload();
+    if (last_request_head_) {
+        response->content_length(body.size());
+    } else {
+        response->body() = std::string(body);
+        response->prepare_payload();
+    }
     http::async_write(
         stream_, *response,
         [self = shared_from_this(), response, keep_alive](beast::error_code ec, std::size_t) {
@@ -862,7 +927,18 @@ bool ManagedListenerImpl::start(std::string* error) {
                                 ? std::string_view("http")
                                 : std::string_view(options_.config.public_scheme);
     policy_.subdomain_suffix = options_.config.routing.suffix;
-    policy_.public_authority = options_.config.public_authority;
+    resolved_public_authority_ = options_.config.public_authority;
+    const bool deferred_zero_port =
+        options_.config.public_origin_auto && resolved_public_authority_.size() >= 2 &&
+        resolved_public_authority_.compare(resolved_public_authority_.size() - 2, 2, ":0") == 0;
+    std::string prebind_authority_storage;
+    if (deferred_zero_port) {
+        prebind_authority_storage =
+            resolved_public_authority_.substr(0, resolved_public_authority_.size() - 1) + "1";
+        policy_.public_authority = prebind_authority_storage;
+    } else {
+        policy_.public_authority = resolved_public_authority_;
+    }
     policy_.trusted_header_routing = options_.config.trusted;
     RequestNormalizationError policy_error;
     if (!is_valid_routing_policy(policy_, &policy_error)) {
@@ -940,6 +1016,23 @@ bool ManagedListenerImpl::start(std::string* error) {
         }
         return false;
     }
+    if (deferred_zero_port && bound_port_ > 0) {
+        resolved_public_authority_ =
+            resolved_public_authority_.substr(0, resolved_public_authority_.size() - 1) +
+            std::to_string(bound_port_);
+        policy_.public_authority = resolved_public_authority_;
+        RequestNormalizationError bound_policy_error;
+        if (!is_valid_routing_policy(policy_, &bound_policy_error)) {
+            beast::error_code close_ec;
+            acceptor_->close(close_ec);
+            acceptor_.reset();
+            if (error != nullptr) {
+                *error = "listener " + options_.config.name +
+                         ": invalid routing policy: " + bound_policy_error.message;
+            }
+            return false;
+        }
+    }
 
     // Wire the event bridge (§9.2): every pool in the current snapshot
     // forwards its events into our mailbox, whose dispatcher routes them
@@ -964,6 +1057,7 @@ bool ManagedListenerImpl::start(std::string* error) {
             }
         });
 
+    io_running_.store(true, std::memory_order_release);
     io_thread_ = std::thread([self = shared_from_this()] { self->io_loop(); });
     return true;
 }
@@ -971,6 +1065,18 @@ bool ManagedListenerImpl::start(std::string* error) {
 void ManagedListenerImpl::io_loop() {
     do_accept();
     mailbox_->ioc.run();
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(stop_callback_mutex_);
+        io_stopped_ = true;
+        io_running_.store(false, std::memory_order_release);
+        callbacks.swap(stop_callbacks_);
+    }
+    for (auto& cb : callbacks) {
+        if (cb) {
+            cb();
+        }
+    }
 }
 
 void ManagedListenerImpl::do_accept() {
@@ -1011,20 +1117,48 @@ void ManagedListenerImpl::do_accept() {
     });
 }
 
-void ManagedListenerImpl::request_stop() {
-    if (stop_requested_.exchange(true)) {
-        return;
-    }
-    // Fail closed at the mailbox: late events drop instead of accumulating.
-    mailbox_->close();
-    // Wake the io thread; it closes the acceptor + every session, and run()
-    // drains naturally. The post goes through the mailbox, which outlives
-    // this ManagedListenerImpl (the pool's sink holds it), so the wake is always safe.
+void ManagedListenerImpl::stop_accepting() {
     asio::post(mailbox_->ioc, [weak = weak_from_this()] {
         if (std::shared_ptr<ManagedListenerImpl> self = weak.lock()) {
-            self->stop_from_io();
+            self->acceptor_.reset();
         }
     });
+}
+
+void ManagedListenerImpl::request_stop() { request_stop(std::function<void()>()); }
+
+void ManagedListenerImpl::request_stop(std::function<void()> on_io_stopped) {
+    bool invoke_now = false;
+    bool should_post = false;
+    {
+        std::lock_guard<std::mutex> lock(stop_callback_mutex_);
+        if (io_stopped_ || !io_running_.load(std::memory_order_acquire)) {
+            invoke_now = static_cast<bool>(on_io_stopped);
+        } else {
+            if (on_io_stopped) {
+                stop_callbacks_.push_back(std::move(on_io_stopped));
+            }
+            should_post = !stop_posted_;
+            stop_posted_ = true;
+        }
+    }
+    stop_requested_.store(true, std::memory_order_release);
+    // Fail closed at the mailbox: late events drop instead of accumulating.
+    mailbox_->close();
+    if (invoke_now) {
+        on_io_stopped();
+        return;
+    }
+    if (should_post) {
+        // Wake the io thread; it closes the acceptor + every session, and run()
+        // drains naturally. The post goes through the mailbox, which outlives
+        // this ManagedListenerImpl (the pool's sink holds it), so the wake is always safe.
+        asio::post(mailbox_->ioc, [weak = weak_from_this()] {
+            if (std::shared_ptr<ManagedListenerImpl> self = weak.lock()) {
+                self->stop_from_io();
+            }
+        });
+    }
 }
 
 void ManagedListenerImpl::stop_from_io() {
@@ -1047,10 +1181,31 @@ void ManagedListenerImpl::stop_from_io() {
         }
         return ids;
     }();
+    std::vector<std::shared_ptr<WebSocketSession>> active_websockets;
+    active_websockets.reserve(websockets_.size());
+    for (const auto& entry : websockets_) {
+        if (entry.second) {
+            active_websockets.push_back(entry.second);
+        }
+    }
     for (const std::uint64_t id : session_ids) {
         auto it = sessions_.find(id);
-        if (it != sessions_.end()) {
+        if (it != sessions_.end() && it->second->websocket_.expired()) {
             it->second->close();
+        }
+    }
+    for (const auto& ws : active_websockets) {
+        ws->shutdown();
+    }
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(stop_callback_mutex_);
+        io_stopped_ = true;
+        callbacks.swap(stop_callbacks_);
+    }
+    for (auto& cb : callbacks) {
+        if (cb) {
+            cb();
         }
     }
 }
@@ -1166,9 +1321,9 @@ void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
             pq.queued_bytes -= unavailable.bytes;
             if (unavailable.session && !unavailable.session->closed()) {
                 unavailable.session->current_pool_.reset();
-                unavailable.session->send_simple(
-                    http::status::service_unavailable, "worker unavailable",
-                    unavailable.request.keep_alive(), unavailable.request.version());
+                unavailable.session->send_simple(http::status::service_unavailable,
+                                                 "worker unavailable", false,
+                                                 unavailable.request.version());
             }
             continue;
         }
@@ -1318,12 +1473,13 @@ void ManagedListenerImpl::begin_request(const std::shared_ptr<GenerationPool>& p
     begin.channel_max_message = executor->channel_limits().max_message_bytes;
     if (upgrade)
         begin.headers.push_back({"upgrade", "websocket"});
-    begin.end_request = !has_body;
+    const bool send_fused_end = upgrade || (bodyless_enabled_ && !has_body);
+    begin.end_request = send_fused_end;
     requests_[{executor, request_id}] = std::move(pending);
     // const: the §9.2 sink signature; submitting commands is the listener's.
     const_cast<WorkerExecutor*>(executor)->submit(std::move(begin));
 
-    if (!has_body) {
+    if (send_fused_end && !has_body) {
         auto it = requests_.find({executor, request_id});
         if (it != requests_.end()) {
             it->second.request_ended = true;
@@ -1765,7 +1921,6 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
             const std::shared_ptr<ListenerSession> session = pending.session;
             const bool head_sent = pending.head_sent;
             const bool writing = pending.writing;
-            const bool keep_alive = pending.keep_alive;
             const unsigned version = pending.version;
             cancel_request(executor, key.second);
             if (head_sent || writing) {
@@ -1773,7 +1928,7 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
                     session->close();
                 }
             } else if (session && !session->closed()) {
-                session->send_simple(http::status::service_unavailable, "worker exited", keep_alive,
+                session->send_simple(http::status::service_unavailable, "worker exited", false,
                                      version);
             }
         }
@@ -1896,7 +2051,8 @@ void ManagedListenerImpl::flush_pending_credit(const WorkerExecutor* executor,
                                                std::uint64_t request_id, PendingRequest& pending,
                                                bool force) {
     if (pending.pending_response_credit == 0 ||
-        (!force && pending.pending_response_credit < kCreditFlushThreshold)) {
+        (credit_grant_threshold_ > 0 && !force &&
+         pending.pending_response_credit < credit_grant_threshold_)) {
         return;
     }
     Command grant;
@@ -2292,7 +2448,13 @@ void ManagedListener::wire_pool(const std::shared_ptr<GenerationPool>& pool) {
         });
 }
 
+void ManagedListener::stop_accepting() { impl_->stop_accepting(); }
+
 void ManagedListener::request_stop() { impl_->request_stop(); }
+
+void ManagedListener::request_stop(std::function<void()> on_io_stopped) {
+    impl_->request_stop(std::move(on_io_stopped));
+}
 
 bool ManagedListener::wait(std::string* error) { return impl_->wait(error); }
 

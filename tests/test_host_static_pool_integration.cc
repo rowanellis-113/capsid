@@ -1,7 +1,7 @@
-// Frozen M2 Batch C RED: prove pool-wide activation and Linux process-fault
-// isolation through the public HTTP surface. No queue/P2C/SSE policy here.
+// Prove pool-wide activation and Linux process-fault isolation through the
+// public HTTP surface on LocalDevHost + GenerationPool + ManagedListener.
 
-#include "host/static_pool_server.h"
+#include "host/local_dev_host.h"
 
 #include "win32_compat.h"
 #if defined(_WIN32)
@@ -129,22 +129,29 @@ bool http_succeeds(std::uint16_t port, int timeout_ms) {
            response.find("pool-integration-ok") != std::string::npos;
 }
 
-capsid::host::StaticPoolServerOptions make_options(const std::string& worker_path, int ready_fd,
-                                                   std::uint16_t port) {
-    capsid::host::StaticPoolServerOptions options;
-    options.workers = 3;
-    options.worker_options.worker_path = worker_path;
-    options.worker_options.source_bundle_path = "pool-integration-inline";
-    options.worker_options.source_name = "file://orders/v1/bundle.mjs";
-    options.worker_options.application = "orders";
-    options.worker_options.listen_address = "127.0.0.1";
-    options.worker_options.listen_port = port;
-    options.worker_options.public_scheme = "http";
-    options.worker_options.public_authority = "public.example";
-    options.worker_options.request_timeout_ms = 5000;
-    options.worker_options.initial_stream_window = 64U * 1024U;
-    options.worker_options.strict_sandbox = false;
-    options.worker_options.ready_fd = ready_fd;
+capsid::host::LocalDevHostOptions make_options(const std::string& worker_path, int ready_fd,
+                                               std::uint16_t port) {
+    capsid::host::LocalDevHostOptions options;
+    options.worker_path = worker_path;
+    options.source_name = "file://orders/v1/bundle.mjs";
+    options.application = "orders";
+    options.capsid_json_text = R"json({
+        "apiVersion": "capsid/app-v2",
+        "pool": { "workers": 3 },
+        "request": { "timeout": "5s" }
+    })json";
+    options.workers_override = 3;
+    capsid::host::ListenerConfig listener;
+    listener.name = "public";
+    listener.tcp = "127.0.0.1:" + std::to_string(port);
+    listener.public_scheme = "http";
+    listener.public_authority = "public.example";
+    listener.routing.mode = "path";
+    options.listener_override = std::move(listener);
+    options.initial_stream_window = 64U * 1024U;
+    options.strict_sandbox = false;
+    options.replace_exited_workers = false;
+    options.ready_fd = ready_fd;
     return options;
 }
 
@@ -220,7 +227,7 @@ void test_activation_barrier(const char* real_worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create activation READY pipe");
     const std::uint16_t port = reserve_test_port();
-    capsid::host::StaticPoolServer pool(make_options(wrapper, ready[1], port));
+    capsid::host::LocalDevHost pool(make_options(wrapper, ready[1], port));
     bool started = false;
     std::string error;
     std::thread starter([&] { started = pool.start(fixture_bundle(), &error); });
@@ -292,7 +299,7 @@ void test_worker_exit_isolation(const char* worker_path_bytes) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create isolation READY pipe");
     const std::uint16_t port = reserve_test_port();
-    capsid::host::StaticPoolServer pool(make_options(worker_path, ready[1], port));
+    capsid::host::LocalDevHost pool(make_options(worker_path, ready[1], port));
     std::string error;
     require(pool.start(fixture_bundle(), &error), "cannot start fault-isolation pool: " + error);
     std::set<pid_t> children;

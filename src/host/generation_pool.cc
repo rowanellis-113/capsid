@@ -266,19 +266,30 @@ std::shared_ptr<GenerationPool> GenerationPool::create_adopted(GenerationPoolOpt
     return pool;
 }
 
-void GenerationPool::request_drain() {
+void GenerationPool::request_drain(std::optional<std::chrono::milliseconds> deadline_override) {
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (state_ == State::kDead || (state_ == State::kDraining && !quarantine_waiting_)) {
             return; // idempotent
         }
         quarantine_waiting_ = false;
+        count_forced_drain_ = true;
+        before_forced_shutdown_ran_ = false;
         state_ = State::kDraining;
         active_flag_.store(false, std::memory_order_relaxed);
         stable_since_ms_ = 0;
-        drain_until_ = SteadyClock::now() + options_.drain_deadline;
+        const std::chrono::milliseconds effective_deadline =
+            deadline_override.value_or(options_.drain_deadline);
+        drain_until_ = SteadyClock::now() + effective_deadline;
         for (Slot& slot : slots_) {
-            if (slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0) {
+            const bool idle =
+                slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+            if (idle || (effective_deadline.count() == 0 && !options_.before_forced_shutdown)) {
+                if (!slot.shutdown_issued && !idle) {
+                    const std::uint64_t active = slot.executor->inflight();
+                    forced_drain_cancellations_.fetch_add(std::max<std::uint64_t>(1, active),
+                                                          std::memory_order_acq_rel);
+                }
                 slot.shutdown_issued = true;
                 slot.executor->request_shutdown();
             }
@@ -286,6 +297,26 @@ void GenerationPool::request_drain() {
     }
     // The pump re-runs its drain sweep; startup-permit waiters re-check
     // the pool's active flag (the abort predicate) and abandon.
+    cv_.notify_all();
+}
+
+void GenerationPool::request_stop() {
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (state_ == State::kDead || (state_ == State::kDraining && !quarantine_waiting_)) {
+            return; // idempotent
+        }
+        quarantine_waiting_ = false;
+        count_forced_drain_ = false;
+        state_ = State::kDraining;
+        active_flag_.store(false, std::memory_order_relaxed);
+        stable_since_ms_ = 0;
+        drain_until_ = SteadyClock::now();
+        for (Slot& slot : slots_) {
+            slot.shutdown_issued = true;
+            slot.executor->request_shutdown();
+        }
+    }
     cv_.notify_all();
 }
 
@@ -338,9 +369,16 @@ WorkerExecutor* GenerationPool::pick_worker() {
     if (state_ != State::kActive) {
         return nullptr; // draining/dead: the caller answers 503
     }
+    const std::size_t count = slots_.size();
+    if (count == 0) {
+        return nullptr;
+    }
+    const std::size_t start = options_.round_robin_tie_break ? (next_pick_index_ % count) : 0;
     WorkerExecutor* best = nullptr;
+    std::size_t best_index = start;
     std::uint64_t best_load = std::numeric_limits<std::uint64_t>::max();
-    for (std::size_t index = 0; index < slots_.size(); ++index) {
+    for (std::size_t step = 0; step < count; ++step) {
+        const std::size_t index = (start + step) % count;
         const Slot& slot = slots_[index];
         if (!slot.ready) {
             continue;
@@ -361,7 +399,11 @@ WorkerExecutor* GenerationPool::pick_worker() {
         if (load < best_load) {
             best_load = load;
             best = candidate;
+            best_index = index;
         }
+    }
+    if (best != nullptr && options_.round_robin_tie_break) {
+        next_pick_index_ = (best_index + 1) % count;
     }
     return best;
 }
@@ -580,10 +622,35 @@ void GenerationPool::pump_loop() {
         // request_drain() (a replacement READY while draining must also be
         // shut down), and complete the drain when the fleet is empty.
         if (state_ == State::kDraining && !quarantine_waiting_) {
+            const bool expired = drain_until_ && SteadyClock::now() >= *drain_until_;
+            bool needs_before_forced_hook = false;
             for (Slot& slot : slots_) {
-                if (!slot.executor->exited() &&
-                    ((slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0) ||
-                     (drain_until_ && SteadyClock::now() >= *drain_until_))) {
+                const bool idle =
+                    slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+                if (!slot.executor->exited() && (idle || expired)) {
+                    if (count_forced_drain_ && expired && !idle && !slot.shutdown_issued) {
+                        const std::uint64_t active = slot.executor->inflight();
+                        forced_drain_cancellations_.fetch_add(std::max<std::uint64_t>(1, active),
+                                                              std::memory_order_acq_rel);
+                    }
+                    if (expired && !idle && !slot.shutdown_issued &&
+                        options_.before_forced_shutdown && !before_forced_shutdown_ran_) {
+                        needs_before_forced_hook = true;
+                    }
+                }
+            }
+            if (needs_before_forced_hook) {
+                before_forced_shutdown_ran_ = true;
+                lock.unlock();
+                options_.before_forced_shutdown();
+                lock.lock();
+            }
+            const bool expired_after = drain_until_ && SteadyClock::now() >= *drain_until_;
+            for (Slot& slot : slots_) {
+                const bool idle =
+                    slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+                if (!slot.executor->exited() && (idle || expired_after)) {
+                    slot.shutdown_issued = true;
                     slot.executor->request_shutdown();
                 }
             }
@@ -802,6 +869,9 @@ void GenerationPool::handle_executor_exit(std::size_t slot) {
     if (s.shutdown_issued) {
         return;
     }
+    if (!options_.replace_exited_workers) {
+        return;
+    }
     const std::uint64_t now = steady_ms();
     std::uint32_t ready_after = 0;
     for (const Slot& other : slots_) {
@@ -998,12 +1068,26 @@ void GenerationPool::install_replacement(std::size_t slot,
     }
 }
 
+std::vector<capsid::WorkerExitStatus> GenerationPool::worker_exit_statuses() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ == State::kDead) {
+        return final_exit_statuses_;
+    }
+    std::vector<capsid::WorkerExitStatus> statuses;
+    statuses.reserve(slots_.size());
+    for (const Slot& slot : slots_) {
+        statuses.push_back(slot.executor->exit_status());
+    }
+    return statuses;
+}
+
 void GenerationPool::finalize_drain() {
     // Under the pool mutex (pump thread).
     std::vector<std::shared_ptr<WorkerExecutor>> reaped;
+    std::size_t slot_count = 0;
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        state_ = State::kDead;
+        slot_count = slots_.size();
         for (Slot& slot : slots_) {
             reaped.push_back(std::move(slot.executor));
         }
@@ -1012,7 +1096,6 @@ void GenerationPool::finalize_drain() {
             reaped.push_back(std::move(retired.executor));
         }
         retired_.clear();
-        cv_.notify_all();
     }
     // External snapshots can keep an executor alive after its slot is
     // cleared. Its destructor is therefore no longer a join barrier. The
@@ -1021,6 +1104,16 @@ void GenerationPool::finalize_drain() {
     // The pool mutex is released: a final notifier may need that mutex.
     for (const auto& executor : reaped) {
         executor->stop_and_join();
+    }
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        final_exit_statuses_.clear();
+        final_exit_statuses_.reserve(slot_count);
+        for (std::size_t index = 0; index < slot_count; ++index) {
+            final_exit_statuses_.push_back(reaped[index]->exit_status());
+        }
+        state_ = State::kDead;
+        cv_.notify_all();
     }
     // §9.4: the reaper finished — the drained generation's capacity count
     // releases now. Outside the pool mutex (the callback must be able to

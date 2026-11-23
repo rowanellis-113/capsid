@@ -20,6 +20,16 @@ struct FetchTarget;
 // Failure leaves the destination unchanged.
 bool parse_fetch_target_text(std::string_view text, FetchTarget* out);
 
+// Config v2 unified outbound target grammar: <host>[:<p1>[,<p2>...]] where
+// <host> is "*", a DNS hostname, a leading-*. wildcard DNS hostname, an IPv4
+// address or IPv4/CIDR, or a bracketed IPv6 literal with optional /prefix.
+bool parse_outbound_target_text(std::string_view text, FetchTarget* out);
+
+// Config v2 listener publicOrigin parser: "http://<authority>" or
+// "https://<authority>" where authority is validated by is_valid_public_authority.
+bool parse_public_origin(std::string_view text, std::string* scheme_out,
+                         std::string* authority_out);
+
 // Raw host.json / capsid.json resource limits. The byte limit is inclusive
 // and applies before parsing. JSON nesting counts the root value as depth 1.
 inline constexpr std::size_t kMaxConfigBytes = 1024U * 1024U;

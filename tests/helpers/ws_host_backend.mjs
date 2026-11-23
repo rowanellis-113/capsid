@@ -189,63 +189,101 @@ async function managedListenerPort(child, start, deadline, stderr) {
 }
 export async function startCapsid(host, worker, bundle, dir, mode = 'single-worker', options = {}) {
   let socketPath, port;
-  let args = [
-    '--mode',
-    mode,
-    '--worker',
-    worker,
-    '--source-bundle',
-    bundle,
-    '--source-name',
-    pathToFileURL(bundle).href,
-    '--application',
-    'orders',
-    '--listen',
-    '127.0.0.1:0',
-    '--routing',
-    'path',
-    '--public-scheme',
-    'http',
-    '--public-authority',
-    'public.example',
-    '--request-timeout-ms',
-    String(options.requestTimeoutMs ?? 10000),
-    '--strict-sandbox',
-    'off',
-    '--ready-fd',
-    '3',
-  ];
   const workers = options.workers ?? 1;
-  if (mode === 'static-pool') args.push('--workers', String(workers));
   const capacity = options.channelCapacity ?? {};
-  if (mode !== 'managed') {
-    for (const [key, flag] of [
-      ['channelsTotal', 'channels-total'],
-      ['pendingDialsTotal', 'pending-dials-total'],
-      ['channelQueueBytesTotal', 'channel-queue-bytes-total'],
-    ])
-      if (capacity[key] !== undefined) args.push('--' + flag, String(capacity[key]));
-    if (options.listenerChannels !== undefined)
-      args.push('--listener-channels', String(options.listenerChannels));
-    if (options.listenerChannelQueueBytes !== undefined)
-      args.push('--listener-channel-queue-bytes', String(options.listenerChannelQueueBytes));
-  }
   const permissions = options.permissions ?? { modules: [] };
-  if (mode !== 'managed' && options.permissions) {
-    const config = path.join(dir, 'capsid.json');
+  const formatSize = (value) => (typeof value === 'number' ? `${value}B` : value);
+  let args;
+  if (mode !== 'managed') {
+    const localDir = fs.mkdtempSync(path.join(dir, 'local-'));
+    fs.copyFileSync(bundle, path.join(localDir, 'bundle.mjs'));
     fs.writeFileSync(
-      config,
+      path.join(localDir, 'capsid.json'),
       JSON.stringify({
         apiVersion: 'capsid/app-v1',
-        entry: path.basename(bundle),
+        entry: 'bundle.mjs',
         permissions,
         pool: { minReady: workers, maxWorkers: workers },
         ...(options.worker ? { worker: options.worker } : {}),
+        ...(options.requestTimeoutMs
+          ? { request: { timeout: `${options.requestTimeoutMs}ms` } }
+          : {}),
       }),
     );
-    args.push('--capsid-json', config);
-  }
-  if (mode === 'managed') {
+    const normalizedCapacity = {
+      workersTotal: workers,
+      startupsConcurrent: Math.max(1, workers),
+      ...options.hostCapacity,
+      ...capacity,
+    };
+    if (normalizedCapacity.channelQueueBytesTotal !== undefined) {
+      normalizedCapacity.channelQueueBytesTotal = formatSize(
+        normalizedCapacity.channelQueueBytesTotal,
+      );
+    }
+    const fetchTargets = Array.from(
+      new Set([...(options.fetchTargets ?? []), ...(permissions.fetch?.allow ?? [])]),
+    );
+    const hostConfig = path.join(localDir, 'host.json');
+    fs.writeFileSync(
+      hostConfig,
+      JSON.stringify({
+        apiVersion: 'capsid/host-v1',
+        applicationsRoot: '/var/lib/capsid/apps',
+        stateRoot: '/var/lib/capsid/state',
+        secretRootTemplate: '/run/capsid/secrets/{application}',
+        admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+        permissions: {
+          modules: [...(permissions.modules ?? [])],
+          environmentNames: Object.keys(permissions.env ?? {}),
+          fsReadRoots: [...(permissions.fs?.read?.allow ?? [])],
+          fetchTargets,
+          storageNamespaces: [...(permissions.storage?.namespaces ?? [])],
+          stdioStreams: [...(permissions.stdio ?? [])],
+        },
+        isolation: { mode: 'strict', required: [] },
+        capacity: normalizedCapacity,
+        ...(options.channels ? { channels: options.channels } : {}),
+        ...(options.recovery ? { recovery: options.recovery } : {}),
+        listeners: [
+          {
+            name: 'public',
+            tcp: '127.0.0.1:0',
+            publicScheme: 'http',
+            publicAuthority: 'public.example',
+            trusted: false,
+            routing: { mode: 'path' },
+            limits: {
+              ...(options.listenerChannels === undefined
+                ? {}
+                : { channels: options.listenerChannels }),
+              ...(options.listenerChannelQueueBytes === undefined
+                ? {}
+                : { channelQueueBytes: formatSize(options.listenerChannelQueueBytes) }),
+            },
+          },
+        ],
+      }),
+    );
+    args = [
+      '--app-dir',
+      localDir,
+      '--app',
+      'orders',
+      '--host-config',
+      hostConfig,
+      '--listen',
+      '127.0.0.1:0',
+      '--worker',
+      worker,
+      '--workers',
+      String(workers),
+      '--strict-sandbox',
+      'off',
+      '--ready-fd',
+      '3',
+    ];
+  } else {
     // Let the actual Host own the kernel-selected endpoint for its entire
     // lifetime. bind(0)/close in this driver leaves a real TOCTOU window.
     port = 0;

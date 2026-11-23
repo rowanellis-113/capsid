@@ -15,19 +15,7 @@
 // worker dead / exited before the response head → 503 (not 502); the pool
 // forwards its admission options into every shard.
 
-#if __has_include("host/single_worker_server.h")
-#include "host/single_worker_server.h"
-#define CAPSID_HAS_SINGLE_WORKER_SERVER 1
-#else
-#define CAPSID_HAS_SINGLE_WORKER_SERVER 0
-#endif
-
-#if __has_include("host/static_pool_server.h")
-#include "host/static_pool_server.h"
-#define CAPSID_HAS_STATIC_POOL_SERVER 1
-#else
-#define CAPSID_HAS_STATIC_POOL_SERVER 0
-#endif
+#include "host/local_dev_host.h"
 
 #include "win32_compat.h"
 #include "worker_exit_assertions.h"
@@ -91,8 +79,6 @@ void require(bool condition, const std::string& message) {
         fail(message);
     }
 }
-
-#if CAPSID_HAS_SINGLE_WORKER_SERVER
 
 std::string read_one_ready_line(int fd) {
     std::string line;
@@ -420,59 +406,61 @@ pid_t kill_worker_child(const char* worker_path) {
 #endif
 }
 
-// After the worker exits, the shard closes its acceptor: a refused new
-// connection is the deterministic "worker-exit processed" signal.
-void require_acceptor_closed(std::uint16_t port) {
+// After the worker exits with replacement disabled, LocalDevHost keeps the
+// listener accepting (returning 503 worker unavailable), while active_workers()
+// drops to 0.
+void require_zero_active_workers(const capsid::host::LocalDevHost& host) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    for (;;) {
-        require(std::chrono::steady_clock::now() < deadline,
-                "acceptor never closed after the worker was killed");
-        const int fd = capsid::win32::create_tcp_socket_fd();
-        struct sockaddr_in address = {};
-        address.sin_family = AF_INET;
-        address.sin_port = htons(port);
-        require(inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1,
-                "cannot encode admission loopback address");
-        const int connected = capsid::win32::connect_fd(
-            fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address));
-        close(fd);
-        if (connected != 0) {
-            return; // refused: the shard stopped accepting
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    while (host.active_workers() > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    require(host.active_workers() == 0, "worker exit was not observed");
 }
 
-capsid::host::SingleWorkerServerOptions make_worker_options(const char* worker_path, int ready_fd) {
-    capsid::host::SingleWorkerServerOptions options;
+capsid::host::LocalDevHostOptions
+make_worker_options(const char* worker_path, int ready_fd, std::uint32_t workers = 1,
+                    std::uint64_t max_inflight = 1, std::uint64_t max_streaming = 1,
+                    std::uint64_t queue_requests = 0, std::uint64_t queue_timeout_ms = 3000,
+                    std::uint64_t request_timeout_ms = 5000) {
+    capsid::host::LocalDevHostOptions options;
     options.worker_path = worker_path;
-    options.source_bundle_path = "admission-inline";
     options.source_name = "file://admission/v1/bundle.mjs";
     options.application = "orders";
-    options.listen_address = "127.0.0.1";
-    options.listen_port = 0;
-    options.public_scheme = "http";
-    options.public_authority = "public.example";
-    options.request_timeout_ms = 5000;
+    options.workers_override = workers;
+    options.capsid_json_text =
+        std::string(R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":)json") +
+        std::to_string(workers) + R"json(,"maxWorkers":)json" + std::to_string(workers) +
+        R"json(,"queueRequests":)json" + std::to_string(queue_requests) +
+        R"json(,"queueTimeout":")json" + std::to_string(queue_timeout_ms) +
+        R"json(ms"},"request":{"timeout":")json" + std::to_string(request_timeout_ms) +
+        R"json(ms","maxInflightPerWorker":)json" + std::to_string(max_inflight) +
+        R"json(,"maxStreamingInflightPerWorker":)json" + std::to_string(max_streaming) +
+        R"json(}})json";
+    capsid::host::ListenerConfig listener;
+    listener.name = "public";
+    listener.tcp = "127.0.0.1:0";
+    listener.public_scheme = "http";
+    listener.public_authority = "public.example";
+    listener.routing.mode = "path";
+    options.listener_override = std::move(listener);
     options.initial_stream_window = 64U * 1024U;
     options.strict_sandbox = false;
+    options.replace_exited_workers = false;
     options.ready_fd = ready_fd;
     return options;
 }
 
 // ③ gate: inflight-full with queueing disabled rejects directly with 429
 // (App quota full; §10.3). ⑤ boundary: the worker itself would reject an
-// over-commit, but the shard admission never lets one through.
+// over-commit, but admission never lets one through.
 void test_inflight_full_rejects(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create admission READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_worker_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 1;           // one in-flight slot
-    options.max_streaming_inflight_per_worker = 1; // E-2 1/1 boundary
-    options.queue_requests = 0;                    // queueing disabled
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(
+        make_worker_options(worker_path, ready[1], 1, 1, 1, 0, 3000, 5000));
     std::string error;
-    require(server.start(slow_bundle(), &error), "cannot start admission server: " + error);
+    const bool started = server.start(slow_bundle(), &error);
+    require(started, "cannot start admission server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
     // Hold the single inflight slot.
@@ -492,7 +480,8 @@ void test_inflight_full_rejects(const char* worker_path) {
     close(holder);
 
     server.request_stop();
-    require(server.wait(&error), "admission server wait failed: " + error);
+    const bool waited = server.wait(&error);
+    require(waited, "admission server wait failed: " + error);
 }
 
 // ③ gate: the bounded queue accepts up to queueRequests; the request beyond
@@ -500,14 +489,11 @@ void test_inflight_full_rejects(const char* worker_path) {
 void test_queue_full_rejects(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create admission READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_worker_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 1;
-    options.max_streaming_inflight_per_worker = 1; // E-2 1/1 boundary
-    options.queue_requests = 1;
-    options.queue_timeout_ms = 3000; // long enough to never fire
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(
+        make_worker_options(worker_path, ready[1], 1, 1, 1, 1, 3000, 5000));
     std::string error;
-    require(server.start(slow_bundle(), &error), "cannot start admission server: " + error);
+    const bool started = server.start(slow_bundle(), &error);
+    require(started, "cannot start admission server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
     const int holder = connect_to(port);
@@ -532,7 +518,8 @@ void test_queue_full_rejects(const char* worker_path) {
     close(queued);
 
     server.request_stop();
-    require(server.wait(&error), "admission server wait failed: " + error);
+    const bool waited = server.wait(&error);
+    require(waited, "admission server wait failed: " + error);
 }
 
 // Third gate: a queued request whose queue or Host deadline expires gets 504
@@ -540,14 +527,11 @@ void test_queue_full_rejects(const char* worker_path) {
 void test_queue_timeout_returns_504(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create admission READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_worker_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 1;
-    options.max_streaming_inflight_per_worker = 1; // E-2 1/1 boundary
-    options.queue_requests = 2;
-    options.queue_timeout_ms = 200; // expires while the holder parks
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(
+        make_worker_options(worker_path, ready[1], 1, 1, 1, 2, 200, 5000));
     std::string error;
-    require(server.start(slow_bundle(), &error), "cannot start admission server: " + error);
+    const bool started = server.start(slow_bundle(), &error);
+    require(started, "cannot start admission server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
     const int holder = connect_to(port);
@@ -567,7 +551,8 @@ void test_queue_timeout_returns_504(const char* worker_path) {
     close(queued);
 
     server.request_stop();
-    require(server.wait(&error), "admission server wait failed: " + error);
+    const bool waited = server.wait(&error);
+    require(waited, "admission server wait failed: " + error);
 }
 
 // ④ gate: requests already admitted before Worker exit get complete 503
@@ -577,14 +562,11 @@ void test_queue_timeout_returns_504(const char* worker_path) {
 void test_worker_death_returns_503(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create admission READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_worker_options(worker_path, ready[1]);
-    options.max_inflight_per_worker = 1;
-    options.max_streaming_inflight_per_worker = 1;
-    options.queue_requests = 1;
-    options.request_timeout_ms = 15000;
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(
+        make_worker_options(worker_path, ready[1], 1, 1, 1, 1, 3000, 15000));
     std::string error;
-    require(server.start(worker_death_bundle(), &error), "cannot start admission server: " + error);
+    const bool started = server.start(worker_death_bundle(), &error);
+    require(started, "cannot start admission server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
     const int warm = connect_to(port);
@@ -602,7 +584,7 @@ void test_worker_death_returns_503(const char* worker_path) {
         const int connection = connect_to(port);
         descriptor.fd = connection;
         descriptor.events = POLLIN;
-        send_request(connection, "/@capsid/orders/pending", true);
+        send_request(connection, "/@capsid/orders/pending", false);
     }
     // Which request wins the execution/queue slots is intentionally not
     // assumed. A third request can get 429 only after both slots are full;
@@ -619,26 +601,28 @@ void test_worker_death_returns_503(const char* worker_path) {
                 continue;
             require(rejected < 0 && (pending[index].revents & POLLIN) != 0,
                     "unexpected connection termination at admission barrier");
-            // These poll descriptors were populated exclusively from the
-            // int-valued compatibility handles returned by connect_to().
             const RawHttpResponse full = read_response(static_cast<int>(pending[index].fd));
-            require(full.status == 429 && full.body == "app queue full",
+            require(full.status == 429 && full.body == "request queue full",
                     "capacity barrier must be an actual queue-full 429");
             rejected = static_cast<int>(index);
         }
     }
     close(static_cast<int>(pending[static_cast<std::size_t>(rejected)].fd));
-    require(server.worker_available(), "Worker exited before the admission barrier");
+    require(server.active_workers() == 1, "Worker exited before the admission barrier");
     std::cout << "admission-full: inflight=1 queued=1 rejected=1" << std::endl;
     const pid_t worker_pid = kill_worker_child(worker_path);
-    require_acceptor_closed(port);
+    require_zero_active_workers(server);
+    const RawHttpResponse post_exit = http_get(port, "/@capsid/orders/post-exit");
+    require(post_exit.status == 503, "post-exit request must fail closed with 503");
     unsigned unavailable_responses = 0;
     for (std::size_t index = 0; index < pending.size(); ++index) {
         if (static_cast<int>(index) == rejected)
             continue;
         const int connection = static_cast<int>(pending[index].fd);
         const RawHttpResponse after = read_response(connection);
-        require(after.status == 503 && after.body == "worker exited" && after.connection_close,
+        require(after.status == 503 &&
+                    (after.body == "worker exited" || after.body == "worker unavailable") &&
+                    after.connection_close,
                 "admitted request must receive a complete 503 with Connection: close");
         char extra = 0;
         require(capsid::win32::recv_fd(connection, &extra, 1, 0) == 0,
@@ -649,7 +633,8 @@ void test_worker_death_returns_503(const char* worker_path) {
     require(unavailable_responses == 2, "inflight and queued requests must both receive 503");
 
     server.request_stop();
-    require(server.wait(&error), "admission server wait failed: " + error);
+    const bool waited = server.wait(&error);
+    require(waited, "admission server wait failed: " + error);
 #if !defined(_WIN32)
     require(kill(worker_pid, 0) != 0 && errno == ESRCH, "faulted Worker PID was not reaped");
 #else
@@ -658,24 +643,16 @@ void test_worker_death_returns_503(const char* worker_path) {
     std::cout << "worker-exit: complete503=2 tcpEof=2 workerReaped=true" << std::endl;
 }
 
-// Keep-alive clients may legally send the next request the instant they
-// have read the full response body. The streamed (buffer_body) path writes
-// the end block as a separate completion; the next request's data can
-// therefore arrive while the current request is still registered. It must
-// be left in the socket buffer for the next read_request, not treated as
-// forbidden pipelining (the probe closes the connection). Frozen by ab -k:
-// before the fix every run had dozens of failed requests.
 void test_keepalive_streamed_responses(const char* worker_path, const std::string& mode) {
     const bool drain = mode != "keepalive-streamed";
     const bool forced = mode == "keepalive-streamed-drain-deadline";
     const bool idle = mode == "idle-drain";
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create admission READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_worker_options(worker_path, ready[1]);
-    options.install_process_signals = mode != "keepalive-streamed-drain-no-signals";
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost server(make_worker_options(worker_path, ready[1], 1, 64, 64));
     std::string error;
-    require(server.start(streamed_bundle(), &error), "cannot start admission server: " + error);
+    const bool server_started = server.start(streamed_bundle(), &error);
+    require(server_started, "cannot start admission server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
     const int kConnections = idle ? 0 : 4;
@@ -695,11 +672,6 @@ void test_keepalive_streamed_responses(const char* worker_path, const std::strin
             require(response.body == "streamed-ok",
                     "streamed keep-alive response body was corrupted");
             if (request + 1 < kRequestsPerConnection) {
-                // Send the next request immediately, exactly like ab -k /
-                // a keep-alive agent: the previous response is complete
-                // from the client's point of view.
-                // The stop control leaves the final stream genuinely open;
-                // scheduling cannot turn its cancellation into a clean end.
                 const bool final_pending =
                     (!drain || forced) && request + 2 == kRequestsPerConnection;
                 send_request(
@@ -717,18 +689,19 @@ void test_keepalive_streamed_responses(const char* worker_path, const std::strin
     else
         server.request_stop();
     if (drain) {
-        const auto deadline = started + std::chrono::milliseconds(2500);
-        while (!server.worker_exit_status().observed &&
-               std::chrono::steady_clock::now() < deadline) {
+        const auto wait_deadline = started + std::chrono::milliseconds(2500);
+        while (server.worker_exit_statuses().empty() &&
+               std::chrono::steady_clock::now() < wait_deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        // Separate a completed Worker reap from an io_context still held
-        // alive by an unrelated outstanding operation (such as signal wait).
+        const auto before_wait = server.worker_exit_statuses();
         std::cout << "HOST_WORKER_BEFORE_WAIT ";
-        capsid_test::print_worker_exit(server.worker_exit_status());
+        capsid_test::print_worker_exit(before_wait.empty() ? capsid::WorkerExitStatus{}
+                                                           : before_wait.front());
         std::cout << std::endl;
     }
-    require(server.wait(&error), "admission server wait failed: " + error);
+    const bool waited = server.wait(&error);
+    require(waited, "admission server wait failed: " + error);
     if (drain) {
         for (const int fd : connections)
             close(fd);
@@ -743,7 +716,9 @@ void test_keepalive_streamed_responses(const char* worker_path, const std::strin
         require(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(2500),
                 "drain did not join promptly after completion/deadline");
     }
-    const auto status = server.worker_exit_status();
+    const auto statuses = server.worker_exit_statuses();
+    require(statuses.size() == 1, "expected one worker exit status");
+    const auto status = statuses.front();
     std::cout << "HOST_WORKER_EXIT ";
     capsid_test::print_worker_exit(status);
     std::cout << std::endl;
@@ -751,36 +726,15 @@ void test_keepalive_streamed_responses(const char* worker_path, const std::strin
             "streamed drain/unfinished stop has the wrong actual Worker exit");
 }
 
-#endif // CAPSID_HAS_SINGLE_WORKER_SERVER
-
-#if CAPSID_HAS_STATIC_POOL_SERVER
-
-// The pool forwards its admission options into every shard: the shard's
-// queue depth comes from StaticPoolServerOptions, not from per-shard code.
+// LocalDevHost forwards its admission options into its pool.
 void test_pool_forwards_admission(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create admission READY pipe");
-    capsid::host::StaticPoolServerOptions options;
-    options.workers = 1;
-    options.max_inflight_per_worker = 1;
-    options.max_streaming_inflight_per_worker = 1; // E-2 1/1 boundary
-    options.queue_requests = 1;
-    options.queue_timeout_ms = 3000;
-    options.worker_options.worker_path = worker_path;
-    options.worker_options.source_bundle_path = "admission-pool-inline";
-    options.worker_options.source_name = "file://admission/pool/v1/bundle.mjs";
-    options.worker_options.application = "orders";
-    options.worker_options.listen_address = "127.0.0.1";
-    options.worker_options.listen_port = 0;
-    options.worker_options.public_scheme = "http";
-    options.worker_options.public_authority = "public.example";
-    options.worker_options.request_timeout_ms = 5000;
-    options.worker_options.initial_stream_window = 64U * 1024U;
-    options.worker_options.strict_sandbox = false;
-    options.worker_options.ready_fd = ready[1];
-    capsid::host::StaticPoolServer pool(std::move(options));
+    capsid::host::LocalDevHost pool(
+        make_worker_options(worker_path, ready[1], 1, 1, 1, 1, 3000, 5000));
     std::string error;
-    require(pool.start(slow_bundle(), &error), "cannot start admission pool: " + error);
+    const bool started = pool.start(slow_bundle(), &error);
+    require(started, "cannot start admission pool: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
     const int holder = connect_to(port);
@@ -802,19 +756,14 @@ void test_pool_forwards_admission(const char* worker_path) {
     close(queued);
 
     pool.request_stop();
-    require(pool.wait(&error), "admission pool wait failed: " + error);
+    const bool waited = pool.wait(&error);
+    require(waited, "admission pool wait failed: " + error);
 }
-
-#endif // CAPSID_HAS_STATIC_POOL_SERVER
 
 } // namespace
 
 int main(int argc, char** argv) try {
     require(argc == 3, "expected mode and capsid-worker path");
-#if !CAPSID_HAS_SINGLE_WORKER_SERVER
-    (void)argv;
-    fail("SingleWorkerServer is not implemented");
-#else
     const std::string mode = argv[1];
     if (mode == "inflight-full-rejects") {
         test_inflight_full_rejects(argv[2]);
@@ -830,16 +779,13 @@ int main(int argc, char** argv) try {
         test_keepalive_streamed_responses(argv[2], mode);
     } else if (mode == "worker-death-503") {
         test_worker_death_returns_503(argv[2]);
-#if CAPSID_HAS_STATIC_POOL_SERVER
     } else if (mode == "pool-forwards-admission") {
         test_pool_forwards_admission(argv[2]);
-#endif
     } else {
         fail("unknown admission mode");
     }
     std::cout << "PASS" << std::endl;
     return 0;
-#endif
 } catch (const std::exception& error) {
     std::cerr << "FAIL: " << error.what() << std::endl;
     return 1;

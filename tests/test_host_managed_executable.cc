@@ -910,13 +910,25 @@ int main(int argc, char** argv) {
                    "    return 'find:' + input.collection;"
                    "  } };"
                    "};");
-        fixture.replace_host_text("\"apiVersion\":\"capsid/host-v1\",",
-                                  "\"apiVersion\":\"capsid/host-v2\","
-                                  "\"bindingsRoot\":\"" +
-                                      bindings_root + "\",");
+        replace_file(
+            fixture.host_config,
+            "{\"apiVersion\":\"capsid/host-v2\","
+            "\"paths\":{\"applications\":\"" +
+                fixture.applications_root + "\",\"state\":\"" + fixture.state_root +
+                "\",\"secrets\":\"" + fixture.secret_root + "/{application}\",\"bindings\":\"" +
+                bindings_root +
+                "\"},"
+                "\"admin\":{\"unix\":\"" +
+                fixture.socket_path +
+                "\"},"
+                "\"listeners\":[{\"name\":\"public\",\"tcp\":\"127.0.0.1:0\",\"routing\":{\"mode\":\"path\"}}],"
+                "\"permissions\":{\"modules\":[\"capsid:env\"],\"environmentNames\":[\"APP_*\"]},"
+                "\"isolation\":{\"mode\":\"strict\",\"required\":[]},"
+                "\"maximums\":{\"request\":{\"maxInflight\":10000}},"
+                "\"capacity\":{\"workersTotal\":1}}");
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"bindings":{"mongo":{"permissions":{"net":{"allow":["127.0.0.1:27017"]},"env":[],"stdio":[]},"config":{"database":"orders"}}},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"bindings":{"mongo":{"permissions":{"net":{"allow":["127.0.0.1:27017"]},"env":[],"stdio":[]},"config":{"database":"orders"}}},"pool":{"workers":1}})json");
         replace_file(fixture.applications_root + "/orders/v1/bundle.mjs",
                      "import mongo from 'capsid:binding/mongo';"
                      "export default {"

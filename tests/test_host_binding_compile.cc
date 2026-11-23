@@ -54,14 +54,15 @@ BindingPackageSnapshot package(const std::string& id, const std::string& manifes
 
 void test_parse_app_bindings() {
     const std::string app_json =
-        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1},"bindings":{"mongo":{"permissions":{"net":{"allow":["127.0.0.1:27017"]},"fs":{"read":["/etc/capsid/mongo/ca.pem"],"write":[]},"env":["APP_MODE"],"stdio":[]},"config":{"database":"orders","tls":true},"secrets":{"password":{"valueFrom":"mongo-password"}}}}})json";
+        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","bindings":{"mongo":{"permissions":{"net":{"allow":["127.0.0.1:27017,27018"]},"fs":{"read":["/etc/capsid/mongo/ca.pem"],"write":[]},"env":["APP_MODE"],"stdio":[]},"config":{"database":"orders","tls":true},"secrets":{"password":{"valueFrom":"mongo-password"}}}}})json";
     std::vector<AppBindingRequest> requests;
     std::string error;
     require(parse_app_bindings(std::vector<std::uint8_t>(app_json.begin(), app_json.end()),
                                &requests, &error),
             "app bindings parse failed: " + error);
     require(requests.size() == 1 && requests[0].id == "mongo", "binding request parsed wrong");
-    require(requests[0].net_rules.size() == 1 && requests[0].net_rules[0] == "127.0.0.1:27017" &&
+    require(requests[0].net_rules.size() == 1 &&
+                requests[0].net_rules[0] == "127.0.0.1:27017,27018" &&
                 requests[0].fs_read.size() == 1 &&
                 requests[0].fs_read[0] == "/etc/capsid/mongo/ca.pem" &&
                 requests[0].env.size() == 1 && requests[0].env[0] == "APP_MODE",
@@ -74,7 +75,7 @@ void test_parse_app_bindings() {
 
     // Zero bindings.
     const std::string no_bindings =
-        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1}})json";
+        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs"})json";
     std::vector<AppBindingRequest> empty;
     require(parse_app_bindings(std::vector<std::uint8_t>(no_bindings.begin(), no_bindings.end()),
                                &empty, &error),

@@ -40,16 +40,13 @@ if(CAPSID_BUILD_HOST)
         src/host/ipc_metrics.cc
         src/host/json_codec.cc
         src/host/listener_cors.cc
-        src/host/local_capsid_policy.cc
         src/host/metrics.cc
         src/host/parent_stop_monitor.cc
         src/host/policy_compiler.cc
         src/host/process_snapshot.cc
         src/host/request_normalization.cc
         src/host/secret_snapshot.cc
-        src/host/static_pool.cc
         src/host/structured_log.cc
-        src/host/static_pool_server.cc
         src/host/trusted_key_store.cc
         src/host/units.cc
         src/host/ws_codec.cc
@@ -166,7 +163,6 @@ if(CAPSID_BUILD_HOST)
         # Tests with their own transport object still resolve that object
         # first; the archive member is extracted only when it is needed.
         target_sources(capsid_host_core PRIVATE
-            src/host/single_worker_server.cc
             src/host/websocket_session.cc
             src/host/websocket_dialer.cc)
         # M1A design gate (design review §4.3): only the WorkerEventSource
@@ -258,6 +254,7 @@ if(CAPSID_BUILD_HOST)
         # plane; the data-plane tests are already registered under UNIX AND
         # Boost_FOUND.
         target_sources(capsid_host_core PRIVATE
+            src/host/local_dev_host.cc
             src/host/managed_listener.cc
             src/host/routing_snapshot.cc)
         target_link_libraries(capsid_host_core PRIVATE Boost::system)

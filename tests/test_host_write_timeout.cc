@@ -3,8 +3,7 @@
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
 #define _WIN32_WINNT 0x0A00
 #endif
-#include "host/single_worker_server.h"
-#include "host/static_pool_server.h"
+#include "host/local_dev_host.h"
 #include "win32_compat.h"
 #include "worker_exit_assertions.h"
 #include <boost/asio.hpp>
@@ -52,7 +51,7 @@ struct Report {
     std::vector<int> receive_buffers_before_action, receive_buffers_after_action;
     std::vector<std::size_t> queued_bytes_before_action, queued_bytes_after_action;
     std::vector<capsid::WorkerExitStatus> worker_exits;
-    capsid::host::SingleWorkerServer::DrainMetrics drain;
+    capsid::host::LocalDevHost::DrainMetrics drain;
     void print(bool complete, const std::string& error) const {
         std::cout << "{\"complete\":" << (complete ? "true" : "false")
                   << ",\"scenario\":" << quote(scenario) << ",\"workers\":" << workers
@@ -98,22 +97,31 @@ class Server {
   public:
     Server(const char* worker, bool pool, std::uint64_t write_ms, std::uint64_t request_ms,
            Report& report)
-        : report_(report) {
+        : report_(report), is_pool_(pool) {
         require(capsid::win32::create_socket_pair(ready_), "private READY pair");
-        capsid::host::SingleWorkerServerOptions options;
+        const std::uint32_t workers = pool ? 2U : 1U;
+        capsid::host::LocalDevHostOptions options;
         options.worker_path = worker;
-        options.source_bundle_path = "write-timeout-inline";
         options.source_name = "file://write-timeout/v1/bundle.mjs";
         options.application = "orders";
-        options.listen_address = "127.0.0.1";
-        options.public_scheme = "http";
-        options.public_authority = "public.example";
-        options.request_timeout_ms = request_ms;
-        options.write_timeout_ms = write_ms;
+        options.workers_override = workers;
+        options.capsid_json_text =
+            std::string(R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":)json") +
+            std::to_string(workers) + R"json(,"maxWorkers":)json" + std::to_string(workers) +
+            R"json(},"request":{"timeout":")json" + std::to_string(request_ms) +
+            R"json(ms","maxInflightPerWorker":1,"maxStreamingInflightPerWorker":1,"writeTimeoutMs":)json" +
+            std::to_string(write_ms) + R"json(}})json";
+        capsid::host::ListenerConfig listener;
+        listener.name = "public";
+        listener.tcp = "127.0.0.1:0";
+        listener.public_scheme = "http";
+        listener.public_authority = "public.example";
+        listener.routing.mode = "path";
+        listener.limits.write_timeout_ms = write_ms;
+        options.listener_override = std::move(listener);
         options.initial_stream_window = 64U * 1024U;
-        options.max_inflight_per_worker = 1;
-        options.max_streaming_inflight_per_worker = 1;
-        options.install_process_signals = false;
+        options.strict_sandbox = false;
+        options.replace_exited_workers = false;
         options.ready_fd = ready_[1];
         const std::string source =
             std::string("const cooperative = ") +
@@ -137,27 +145,20 @@ export default {async fetch(request) {
 }};
 )js";
         bundle_.assign(source.begin(), source.end());
-        if (pool) {
-            capsid::host::StaticPoolServerOptions all;
-            all.worker_options = std::move(options);
-            all.workers = 2;
-            pool_ = std::make_unique<capsid::host::StaticPoolServer>(std::move(all));
-        } else
-            single_ = std::make_unique<capsid::host::SingleWorkerServer>(std::move(options));
+        host_ = std::make_unique<capsid::host::LocalDevHost>(std::move(options));
     }
     ~Server() {
         if (!joined_) {
             stop();
             std::string error;
-            report_.cleanup = pool_ ? pool_->wait(&error) : single_->wait(&error);
+            report_.cleanup = host_->wait(&error);
         }
         close(ready_[0]);
         close(ready_[1]);
     }
     void start() {
         std::string error;
-        require(pool_ ? pool_->start(bundle_, &error) : single_->start(bundle_, &error),
-                "start actual server");
+        require(host_->start(bundle_, &error), "start actual server");
         std::string line;
         const auto start = Clock::now();
         while (line.find('\n') == std::string::npos) {
@@ -180,26 +181,20 @@ export default {async fetch(request) {
         const auto value = std::stoul(line.substr(begin + 7));
         require(value > 0 && value <= 65535, "actual bound port");
         port = static_cast<std::uint16_t>(value);
-        if (pool_)
-            require(pool_->active_workers() == 2, "two actual Workers READY");
+        if (is_pool_)
+            require(host_->active_workers() == 2, "two actual Workers READY");
     }
-    void stop() {
-        if (pool_)
-            pool_->request_stop();
-        else
-            single_->request_stop();
-    }
-    void begin_drain() { pool_->begin_drain(5000); }
+    void stop() { host_->request_stop(); }
+    void begin_drain() { host_->begin_drain(5000); }
     void join() {
         std::string error;
-        report_.cleanup = pool_ ? pool_->wait(&error) : single_->wait(&error);
+        report_.cleanup = host_->wait(&error);
         joined_ = true;
         require(report_.cleanup, "normal server wait");
-        if (pool_)
-            require(pool_->active_workers() == 0, "all pool Workers stopped");
-        report_.drain = pool_ ? pool_->drain_metrics() : single_->drain_metrics();
-        report_.worker_exits =
-            pool_ ? pool_->worker_exit_statuses() : std::vector{single_->worker_exit_status()};
+        if (is_pool_)
+            require(host_->active_workers() == 0, "all pool Workers stopped");
+        report_.drain = host_->drain_metrics();
+        report_.worker_exits = host_->worker_exit_statuses();
         require(report_.worker_exits.size() == report_.workers, "one actual OS exit per Worker");
         for (const auto& status : report_.worker_exits) {
             require(report_.scenario == "worker-deadline-independent"
@@ -212,10 +207,10 @@ export default {async fetch(request) {
 
   private:
     Report& report_;
+    bool is_pool_ = false;
     int ready_[2] = {-1, -1};
     std::vector<std::uint8_t> bundle_;
-    std::unique_ptr<capsid::host::SingleWorkerServer> single_;
-    std::unique_ptr<capsid::host::StaticPoolServer> pool_;
+    std::unique_ptr<capsid::host::LocalDevHost> host_;
     bool joined_ = false;
 };
 bool retry(boost::system::error_code ec) {

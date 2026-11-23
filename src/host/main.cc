@@ -1,10 +1,10 @@
 // capsid-host executable entry point.
 //
-// The frozen M1A CLI is strictly validated before anything is spawned:
-// unknown or missing arguments fail before any side effect. Startup order is
-// fixed by the design: validate arguments, read and load the source bundle,
-// spawn the worker, wait for READY and verify the compatibility ID, bind the
-// listener, and only then write one canonical JSON line to --ready-fd.
+// Two execution shapes:
+//   - Local dev mode (default, cross-platform): mounts an isomorphic app dir
+//     (--app-dir <dir>) onto LocalDevHost (GenerationPool + ManagedListener).
+//   - Managed production mode (--mode managed, Linux only): reads host.json,
+//     recovers durable state, and runs the Unix-socket Admin coordinator.
 // stdout never carries readiness or logs; diagnostics go to stderr.
 
 #include <iostream>
@@ -12,34 +12,24 @@
 #include <malloc.h>
 #endif
 
-#include "host/single_worker_server.h"
-#include "host/static_pool_server.h"
-
 #include "build_identity.h"
 #include "capsid/runtime.h"
 #if !defined(_WIN32)
 #include "host/admin_service.h"
-#endif
-#include "host/config.h"
-#include "host/binding_registry.h"
-#include "host/generation_pool.h"
-#include "host/generation_reclaimer.h"
-#include "host/local_capsid_policy.h"
-#include "host/listener_cors.h"
-#if !defined(_WIN32)
 #include "host/host_config_model.h"
 #include "host/managed_admin_backend.h"
 #include "host/managed_listener.h"
 #include "host/managed_registry.h"
 #include "host/quarantine_dispatcher.h"
+#include "host/routing_snapshot.h"
 #endif
+#include "host/config.h"
+#include "host/generation_pool.h"
+#include "host/generation_reclaimer.h"
+#include "host/local_dev_host.h"
 #include "host/metrics.h"
 #include "host/parent_stop_monitor.h"
 #include "host/process_snapshot.h"
-#include "host/request_normalization.h"
-#if !defined(_WIN32)
-#include "host/routing_snapshot.h"
-#endif
 #include "host/structured_log.h"
 #include "host/trusted_key_store.h"
 #include "host/units.h"
@@ -149,72 +139,11 @@ std::uint64_t parse_positive_integer(const std::string& value, const char* name)
     return static_cast<std::uint64_t>(parsed);
 }
 
-// Non-negative integer: allows the explicit 0 that disables a feature
-// (e.g. --queue-requests 0).
-std::uint64_t parse_nonnegative_integer(const std::string& value, const char* name) {
-    if (value.empty()) {
-        fail(std::string("--") + name + " requires a non-negative integer");
-    }
-    for (const char c : value) {
-        if (c < '0' || c > '9') {
-            fail(std::string("--") + name + " requires a non-negative integer: " + value);
-        }
-    }
-    errno = 0;
-    char* end = nullptr;
-    const unsigned long long parsed = std::strtoull(value.c_str(), &end, 10);
-    if (errno != 0 || end == nullptr || *end != '\0' ||
-        parsed > static_cast<unsigned long long>(std::numeric_limits<std::int64_t>::max())) {
-        fail(std::string("--") + name + " requires a non-negative integer: " + value);
-    }
-    return static_cast<std::uint64_t>(parsed);
-}
-
-// "250ms" / "5s" / "1m" style duration (the same grammar the effective
-// config uses for queueTimeout). Unit suffix is required.
-std::uint64_t parse_duration_ms(const std::string& value, const char* name) {
-    std::uint64_t parsed = 0;
-    if (!capsid::host::units::parse_duration_ms(value, &parsed, /*allow_hours=*/false) ||
-        parsed == 0) {
-        fail(std::string("--") + name +
-             " requires a positive duration like 250ms, 5s or 1m: " + value);
-    }
-    return parsed;
-}
-
 // host:port or [ipv6]:port; decimal ports in [0, 65535].
 void parse_listen(const std::string& value, std::string* out_address, std::uint16_t* out_port) {
     if (!capsid::parse_tcp_endpoint(value, out_address, out_port, /*allow_zero_port=*/true)) {
         fail("--listen requires host:port with decimal port in [0, 65535]: " + value);
     }
-}
-
-std::vector<std::uint8_t> read_bundle(const std::string& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        fail("cannot read --source-bundle: " + path);
-    }
-    input.seekg(0, std::ios::end);
-    const std::streamoff size = input.tellg();
-    if (size < 0) {
-        fail("cannot size --source-bundle: " + path);
-    }
-    input.seekg(0, std::ios::beg);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (size > 0) {
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
-        if (!input) {
-            fail("cannot read --source-bundle: " + path);
-        }
-    }
-    return bytes;
-}
-
-// "256MiB" style size with explicit suffix (same grammar as the managed
-// coordinator's worker.memoryMax; also used by the single-worker /
-// static-pool CLI, so it stays outside the managed-only section).
-bool parse_size_bytes_text(const std::string& text, std::uint64_t* out) {
-    return capsid::host::units::parse_size_bytes(text, out, /*allow_bare_bytes=*/false);
 }
 
 // ---- managed mode: host.json authority, real coordinator, Admin service ----
@@ -557,6 +486,8 @@ std::string read_host_config(const std::string& path) {
             effective.max_streaming_inflight_per_worker;
         pool_options.stream_idle_timeout_ms = effective.stream_idle_timeout_ms;
         pool_options.write_timeout_ms = effective.write_timeout_ms;
+        pool_options.max_request_body_bytes =
+            capsid::host::effective_max_request_body_bytes(effective.memory_bytes);
         pool_options.factory = factory;
         pool_options.channel_budget = channel_budget;
         pool_options.recovery = recovery_resolved.policy;
@@ -919,6 +850,8 @@ std::string read_host_config(const std::string& path) {
         listener_options.log = structured_log.get();
         listener_options.metrics = metrics.get();
         listener_options.channel_service_budget = channel_budget;
+        listener_options.max_request_body_bytes = capsid::host::effective_max_request_body_bytes(
+            config.policy.default_worker_memory_bytes);
         data_plane = std::make_unique<capsid::host::ManagedListener>(std::move(listener_options));
         std::string listener_error;
         if (!data_plane->start(&listener_error)) {
@@ -1029,18 +962,17 @@ std::string read_host_config(const std::string& path) {
 #endif // !defined(_WIN32) managed mode
 
 // Keep the watcher inside this call so it is joined before the caller's
-// server is destroyed, including when startup or run() throws.
-template <typename Server>
-int run_with_parent_stop(Server& server, const std::vector<std::uint8_t>& bundle,
-                         std::unique_ptr<capsid::host::ParentStopMonitor> monitor,
-                         capsid::host::StructuredLog* log) {
+// host object is destroyed, including when startup or run() throws.
+int run_local_with_parent_stop(capsid::host::LocalDevHost& host,
+                               std::unique_ptr<capsid::host::ParentStopMonitor> monitor,
+                               capsid::host::StructuredLog* log) {
     std::string error;
-    if (monitor && !monitor->start([&server] { server.request_stop(); }, &error)) {
+    if (monitor && !monitor->start([&host] { host.request_stop(); }, &error)) {
         log->log(capsid::host::LogLane::kControl,
                  {.event = capsid::host::log_events::kStartup, .result = "fail", .message = error});
         return 1;
     }
-    int result = server.run(bundle);
+    int result = host.run();
     if (monitor) {
         monitor->cancel();
         if (!monitor->error().empty()) {
@@ -1082,546 +1014,149 @@ int main(int argc, char** argv) {
         values[name] = value;
     }
 
-    const auto require = [&values](const std::string& name) -> std::string {
-        auto it = values.find(name);
-        if (it == values.end()) {
-            fail("missing --" + name);
-        }
-        return it->second;
+    const auto optional_value = [&values](const std::string& name) -> const std::string* {
+        const auto it = values.find(name);
+        return it == values.end() ? nullptr : &it->second;
     };
 
-    const std::string mode = require("mode");
+    if (const std::string* mode = optional_value("mode")) {
+        if (*mode == "managed") {
+            const auto require = [&values](const std::string& name) -> std::string {
+                auto it = values.find(name);
+                if (it == values.end()) {
+                    fail("missing --" + name);
+                }
+                return it->second;
+            };
 #if defined(__linux__)
-    if (mode == "managed") {
-        // Strict managed CLI: only --host-config and --worker are allowed.
-        for (const std::pair<const std::string, std::string>& entry : values) {
-            if (entry.first != "mode" && entry.first != "host-config" && entry.first != "worker") {
-                fail("--mode managed accepts only --host-config and "
-                     "--worker");
+            // Strict managed CLI: only --host-config and --worker are allowed.
+            for (const std::pair<const std::string, std::string>& entry : values) {
+                if (entry.first != "mode" && entry.first != "host-config" &&
+                    entry.first != "worker") {
+                    fail("--mode managed accepts only --host-config and --worker");
+                }
             }
-        }
-        return run_managed(require("host-config"), require("worker"));
-    }
+            return run_managed(require("host-config"), require("worker"));
 #else
-    if (mode == "managed") {
-        // macOS and Windows keep the same runtime behavior: fail
-        // immediately with a clear, actionable diagnostic instead of
-        // building/starting a managed Host that cannot enforce strict
-        // sandbox.
-        fail("--mode managed is unavailable on this platform: the managed "
-             "coordinator requires Linux strict sandbox (see "
-             "docs/platform-support.md)");
-    }
+            fail("--mode managed is unavailable on this platform: the managed "
+                 "coordinator requires Linux strict sandbox (see "
+                 "docs/platform-support.md)");
 #endif
-    if (mode != "single-worker" && mode != "static-pool") {
-        fail("--mode must be single-worker, static-pool or managed");
+        }
+        fail("unknown --mode \"" + *mode + "\": only --mode managed is supported on Linux");
     }
-    // Reject typos before source/config I/O, worker creation or listener bind.
-    // Managed mode above retains its own stricter three-key grammar.
-    static constexpr std::string_view known_arguments[] = {
-        "mode",
-        "worker",
-        "source-bundle",
-        "source-name",
-        "application",
-        "listen",
-        "routing",
-        "routing-suffix",
-        "routing-trusted",
-        "public-scheme",
-        "public-authority",
-        "request-timeout-ms",
-        "initial-stream-window",
-        "strict-sandbox",
-        "ready-fd",
-        "stop-fd",
-        "workers",
-        "max-inflight-per-worker",
-        "queue-requests",
-        "queue-header-bytes",
-        "queue-timeout",
-        "max-streaming-inflight",
-        "stream-idle-timeout",
-        "write-timeout",
-        "capsid-json",
-        "secrets-root",
-        "bindings-root",
-        "channels-total",
-        "pending-dials-total",
-        "channel-queue-bytes-total",
-        "listener-channels",
-        "listener-channel-queue-bytes",
-        "cors-origins",
-        "cors-methods",
-        "cors-headers",
-        "cors-max-age",
+
+    // Strict allowlist for local dev CLI (docs/config-v2-design.md §5).
+    static constexpr std::string_view known_local_arguments[] = {
+        "app-dir",     "app",          "host-config",    "listen",   "worker",  "workers",
+        "secrets-dir", "bindings-dir", "strict-sandbox", "ready-fd", "stop-fd",
     };
     for (const auto& argument : values) {
         bool known = false;
-        for (const auto name : known_arguments) {
+        for (const auto name : known_local_arguments) {
             if (argument.first == name) {
                 known = true;
                 break;
             }
         }
-        if (!known)
+        if (!known) {
             fail("unknown argument: --" + argument.first);
-    }
-    capsid::host::SingleWorkerServerOptions options;
-    const auto channel_count = [&](const char* name, uint64_t fallback) {
-        const auto found = values.find(name);
-        return found == values.end() ? fallback : parse_positive_integer(found->second, name);
-    };
-    const auto channel_bytes = [&](const char* name, uint64_t fallback) {
-        const auto found = values.find(name);
-        uint64_t parsed = 0;
-        if (found == values.end())
-            return fallback;
-        if (!capsid::host::parse_size_bytes(found->second, &parsed) || !parsed)
-            fail(std::string("invalid --") + name);
-        return parsed;
-    };
-    options.channel_service_limits.channels = channel_count("channels-total", 1024);
-    options.channel_service_limits.pending_dials = channel_count("pending-dials-total", 128);
-    options.channel_service_limits.queue_bytes =
-        channel_bytes("channel-queue-bytes-total", 16u * 1024u * 1024u);
-    options.channel_listener_limits.channels = channel_count("listener-channels", 128);
-    options.channel_listener_limits.queue_bytes =
-        channel_bytes("listener-channel-queue-bytes", 16u * 1024u * 1024u);
-    options.worker_path = require("worker");
-    // The source bundle is either the explicit --source-bundle (with its
-    // --source-name URL) or the capsid.json entry resolved after the local
-    // policy is loaded below: the document names the bundle file inside
-    // its own directory, so a production capsid.json runs unchanged.
-    const auto source_bundle_it = values.find("source-bundle");
-    const bool explicit_source_bundle = source_bundle_it != values.end();
-    if (explicit_source_bundle) {
-        options.source_bundle_path = source_bundle_it->second;
-        options.source_name = require("source-name");
-        if (options.source_name.rfind("file://", 0) != 0) {
-            fail("--source-name must be an absolute file URL");
         }
     }
-    options.application = require("application");
+
+    capsid::host::LocalDevHostOptions options;
+    if (const std::string* app_dir = optional_value("app-dir")) {
+        options.app_dir = *app_dir;
+    }
+    if (const std::string* app = optional_value("app")) {
+        options.application = *app;
+    }
     if (!valid_application_id(options.application)) {
-        fail("--application is not a valid App ID");
+        fail("--app is not a valid App ID");
     }
-    const std::string listen = require("listen");
-    parse_listen(listen, &options.listen_address, &options.listen_port);
-    // The address itself is validated before anything is spawned: an
-    // unparseable address must fail the CLI phase, not the post-spawn bind
-    // phase (a failure after spawn would otherwise have to tear down a live
-    // worker).
-    {
+    if (const std::string* host_cfg = optional_value("host-config")) {
+        options.host_config_path = *host_cfg;
+    }
+    if (const std::string* listen = optional_value("listen")) {
+        std::string addr;
+        std::uint16_t port = 0;
+        parse_listen(*listen, &addr, &port);
         boost::system::error_code address_error;
-        const boost::asio::ip::address address =
-            boost::asio::ip::make_address(options.listen_address, address_error);
+        const boost::asio::ip::address parsed = boost::asio::ip::make_address(addr, address_error);
         if (address_error) {
-            fail("--listen requires an IP address: " + options.listen_address);
+            fail("--listen requires an IP address: " + addr);
         }
-        (void)address;
+        (void)parsed;
+        options.listen = *listen;
+        options.listen_explicit = true;
     }
-    const std::string routing = require("routing");
-    if (routing == "path") {
-        options.routing_mode = capsid::host::RequestRoutingMode::kPath;
-    } else if (routing == "subdomain") {
-        options.routing_mode = capsid::host::RequestRoutingMode::kSubdomain;
-    } else if (routing == "header") {
-        options.routing_mode = capsid::host::RequestRoutingMode::kHeader;
-    } else {
-        fail("--routing must be path, subdomain or header");
+    if (const std::string* worker = optional_value("worker")) {
+        options.worker_path = *worker;
     }
-    // Subdomain suffix: required exactly for subdomain (managed contract:
-    // suffix names the leading-dot DNS suffix the app label is extracted
-    // from; its grammar is validated below and again at server start).
-    const auto suffix_it = values.find("routing-suffix");
-    if (options.routing_mode == capsid::host::RequestRoutingMode::kSubdomain) {
-        if (suffix_it == values.end()) {
-            fail("--routing subdomain requires --routing-suffix");
+    if (const std::string* workers = optional_value("workers")) {
+        const std::uint64_t parsed = parse_positive_integer(*workers, "workers");
+        constexpr std::uint64_t kMaxLocalWorkers = 256;
+        if (parsed > kMaxLocalWorkers) {
+            fail("--workers exceeds the local worker limit (" + std::to_string(kMaxLocalWorkers) +
+                 ")");
         }
-        options.routing_suffix = suffix_it->second;
-    } else if (suffix_it != values.end()) {
-        fail("--routing-suffix is only valid with --routing subdomain");
+        options.workers_override = static_cast<std::uint32_t>(parsed);
     }
-    // Header routing requires a trusted listener (the managed contract
-    // fails closed before bind; the CLI fails at argument time).
-    const auto trusted_it = values.find("routing-trusted");
-    if (options.routing_mode == capsid::host::RequestRoutingMode::kHeader) {
-        if (trusted_it == values.end() || trusted_it->second != "on") {
-            fail("--routing header requires --routing-trusted on");
+    if (const std::string* secrets_dir = optional_value("secrets-dir")) {
+        options.secrets_dir = *secrets_dir;
+    }
+    if (const std::string* bindings_dir = optional_value("bindings-dir")) {
+        options.bindings_dir = *bindings_dir;
+    }
+    if (const std::string* sandbox = optional_value("strict-sandbox")) {
+        if (*sandbox != "on" && *sandbox != "off") {
+            fail("--strict-sandbox must be on or off");
         }
-        options.routing_trusted = true;
-    } else if (trusted_it != values.end()) {
-        fail("--routing-trusted is only valid with --routing header");
+        options.strict_sandbox = (*sandbox == "on");
     }
-    options.public_scheme = require("public-scheme");
-    if (options.public_scheme != "http" && options.public_scheme != "https") {
-        fail("--public-scheme must be http or https");
-    }
-    options.public_authority = require("public-authority");
-    if (!capsid::host::is_valid_public_authority(options.public_authority)) {
-        fail("--public-authority must be host[:port]");
-    }
-    // The routing policy itself is validated before anything is spawned —
-    // the same fail-closed rule the managed listener applies before bind
-    // (subdomain suffix grammar, header-mode trust requirement).
-    {
-        capsid::host::RequestRoutingPolicy routing_policy;
-        routing_policy.mode = options.routing_mode;
-        routing_policy.public_scheme = options.public_scheme;
-        routing_policy.public_authority = options.public_authority;
-        routing_policy.subdomain_suffix = options.routing_suffix;
-        routing_policy.trusted_header_routing = options.routing_trusted;
-        capsid::host::RequestNormalizationError routing_error;
-        if (!capsid::host::is_valid_routing_policy(routing_policy, &routing_error)) {
-            fail(routing_error.message);
-        }
-    }
-    // Required below unless the local capsid.json supplies request.timeout:
-    // the policy load resolves the document value into the options when
-    // the CLI flag is absent.
-    const auto request_timeout_it = values.find("request-timeout-ms");
-    if (request_timeout_it != values.end()) {
-        options.request_timeout_ms =
-            parse_positive_integer(request_timeout_it->second, "request-timeout-ms");
-    }
-    // Default 64 KiB: the four-stack matrix (2026-08-13, 64K vs 16K) showed
-    // the response window must cover a full 64 KiB response without a
-    // mid-stream credit round trip; larger windows show no further gain
-    // (E14 scan) and only widen the per-connection buffering bound.
-    const auto window_it = values.find("initial-stream-window");
-    const std::uint64_t window = parse_positive_integer(
-        window_it == values.end() ? "65536" : window_it->second, "initial-stream-window");
-    if (window > std::numeric_limits<std::uint32_t>::max()) {
-        fail("--initial-stream-window exceeds uint32");
-    }
-    options.initial_stream_window = static_cast<std::uint32_t>(window);
-    const std::string sandbox = require("strict-sandbox");
-    if (sandbox != "on" && sandbox != "off") {
-        fail("--strict-sandbox must be on or off");
-    }
-    options.strict_sandbox = sandbox == "on";
 #if !defined(__linux__)
-    // Fail at the argument phase, not after spawn: the worker would
-    // otherwise start and asynchronously exit at the startup handshake
-    // ("strict sandbox is unavailable on this platform/build") — the
-    // same fail-fast philosophy as --mode managed on non-Linux. The
-    // worker-side refusal stays as defense in depth for programmatic
-    // spawns.
     if (options.strict_sandbox) {
-        fail("--strict-sandbox on requires Linux strict sandbox (see "
-             "docs/platform-support.md)");
+        fail("--strict-sandbox on requires Linux strict sandbox (see docs/platform-support.md)");
     }
 #endif
-    const std::uint64_t ready_fd = parse_positive_integer(require("ready-fd"), "ready-fd");
-    if (ready_fd > static_cast<std::uint64_t>(std::numeric_limits<short>::max())) {
-        fail("--ready-fd must be a positive descriptor number");
-    }
-
-    // Listener-level CORS mirrors the managed host.json grammar:
-    // --cors-origins and --cors-methods are required together,
-    // --cors-headers / --cors-max-age optional. Every token is validated
-    // at argument time with the same grammars the host.json parser
-    // applies (methods uppercased, headers lowercased, origins "*" or an
-    // exact http(s):// authority). Absent = the App owns CORS entirely.
-    const auto cors_origins_it = values.find("cors-origins");
-    const auto cors_methods_it = values.find("cors-methods");
-    const auto cors_headers_it = values.find("cors-headers");
-    const auto cors_max_age_it = values.find("cors-max-age");
-    if (cors_origins_it != values.end() || cors_methods_it != values.end() ||
-        cors_headers_it != values.end() || cors_max_age_it != values.end()) {
-        if (cors_origins_it == values.end()) {
-            fail("--cors-origins is required when any --cors-* flag "
-                 "is given");
+    std::optional<std::uint64_t> ready_fd;
+    if (const std::string* ready_text = optional_value("ready-fd")) {
+        const std::uint64_t parsed = parse_positive_integer(*ready_text, "ready-fd");
+        if (parsed > static_cast<std::uint64_t>(std::numeric_limits<short>::max())) {
+            fail("--ready-fd must be a positive descriptor number");
         }
-        if (cors_methods_it == values.end()) {
-            fail("--cors-methods is required with --cors-origins");
-        }
-        const auto split_list = [](const std::string& text, const char* flag) {
-            std::vector<std::string> items;
-            std::size_t start = 0;
-            while (start <= text.size()) {
-                const std::size_t comma = text.find(',', start);
-                const std::size_t end = comma == std::string::npos ? text.size() : comma;
-                std::string item = text.substr(start, end - start);
-                item.erase(0, item.find_first_not_of(" \t") == std::string::npos
-                                  ? item.size()
-                                  : item.find_first_not_of(" \t"));
-                item.erase(item.find_last_not_of(" \t") == std::string::npos
-                               ? 0
-                               : item.find_last_not_of(" \t") + 1);
-                if (item.empty()) {
-                    fail(std::string(flag) + " contains an empty entry");
-                }
-                items.push_back(std::move(item));
-                if (comma == std::string::npos) {
-                    break;
-                }
-                start = comma + 1;
-            }
-            return items;
-        };
-        options.cors.configured = true;
-        options.cors.allowed_origins = split_list(cors_origins_it->second, "--cors-origins");
-        if (options.cors.allowed_origins.size() > 1 &&
-            std::find(options.cors.allowed_origins.begin(), options.cors.allowed_origins.end(),
-                      "*") != options.cors.allowed_origins.end()) {
-            fail("--cors-origins cannot combine * with exact origins");
-        }
-        for (const std::string& origin : options.cors.allowed_origins) {
-            if (!capsid::host::valid_cors_origin(origin)) {
-                fail("--cors-origins entry is not \"*\" or an http(s):// "
-                     "origin: " +
-                     origin);
-            }
-        }
-        options.cors.allowed_methods = split_list(cors_methods_it->second, "--cors-methods");
-        for (std::string& method : options.cors.allowed_methods) {
-            if (!capsid::host::valid_cors_method_token(method)) {
-                fail("--cors-methods entry is not an HTTP method token: " + method);
-            }
-            for (char& c : method) {
-                if (c >= 'a' && c <= 'z') {
-                    c = static_cast<char>(c - 'a' + 'A');
-                }
-            }
-        }
-        if (cors_headers_it != values.end()) {
-            options.cors.allowed_headers = split_list(cors_headers_it->second, "--cors-headers");
-            for (std::string& header : options.cors.allowed_headers) {
-                if (!capsid::host::valid_cors_header_token(header)) {
-                    fail("--cors-headers entry is not an HTTP field name: " + header);
-                }
-                for (char& c : header) {
-                    if (c >= 'A' && c <= 'Z') {
-                        c = static_cast<char>(c - 'A' + 'a');
-                    }
-                }
-            }
-        }
-        if (cors_max_age_it != values.end()) {
-            const std::uint64_t seconds =
-                parse_positive_integer(cors_max_age_it->second, "cors-max-age");
-            if (seconds > std::numeric_limits<std::uint64_t>::max() / 1000) {
-                fail("--cors-max-age exceeds the millisecond range");
-            }
-            options.cors.max_age_ms = seconds * 1000;
-        }
-    }
-    options.ready_fd = static_cast<int>(ready_fd);
-
-    // Static pool: a positive worker count within the fixed practical limit,
-    // each worker owning one shard (its own process and event loop) sharing
-    // one pool-owned listener. The pool keeps the pool-level READY contract
-    // and SIGTERM-bounded shutdown; single-worker mode is unchanged.
-    std::uint32_t workers = 1;
-    if (mode == "static-pool") {
-        const std::string workers_text = require("workers");
-        const std::uint64_t parsed_workers = parse_positive_integer(workers_text, "workers");
-        if (parsed_workers > capsid::host::kMaxStaticPoolWorkers) {
-            fail("--workers exceeds the static-pool worker limit (" +
-                 std::to_string(capsid::host::kMaxStaticPoolWorkers) + ")");
-        }
-        workers = static_cast<std::uint32_t>(parsed_workers);
-    }
-
-    // M2 E-1 admission (§10.3): the benchmark CLI mirrors the effective
-    // config's request/pool fields (the production path compiles the same
-    // values through config → effective tier; see policy_compiler.cc).
-    // Every field is optional; a missing value keeps the data plane
-    // default. There is no main.cc hardcoding — the values flow into
-    // StaticPoolServerOptions / SingleWorkerServerOptions below.
-    const auto optional_value = [&values](const std::string& name) -> const std::string* {
-        const auto it = values.find(name);
-        return it == values.end() ? nullptr : &it->second;
-    };
-    const std::string* inflight_text = optional_value("max-inflight-per-worker");
-    if (inflight_text != nullptr) {
-        options.max_inflight_per_worker =
-            parse_positive_integer(*inflight_text, "max-inflight-per-worker");
-    }
-    const std::string* queue_text = optional_value("queue-requests");
-    if (queue_text != nullptr) {
-        options.queue_requests = parse_nonnegative_integer(*queue_text, "queue-requests");
-    }
-    const std::string* queue_bytes_text = optional_value("queue-header-bytes");
-    if (queue_bytes_text != nullptr) {
-        if (!parse_size_bytes_text(*queue_bytes_text, &options.queue_header_bytes)) {
-            fail("--queue-header-bytes must be a byte size (e.g. 2MiB)");
-        }
-    }
-    const std::string* queue_timeout_text = optional_value("queue-timeout");
-    if (queue_timeout_text != nullptr) {
-        options.queue_timeout_ms = parse_duration_ms(*queue_timeout_text, "queue-timeout");
-    }
-    // M2 E-2 SSE permit (§9.3): the benchmark CLI mirrors the effective
-    // config's request fields. Unlike the JSON route (where 0 = field not
-    // set), a direct 0 here means unlimited — the same data-plane semantics
-    // as --max-inflight-per-worker 0.
-    const std::string* streaming_text = optional_value("max-streaming-inflight");
-    if (streaming_text != nullptr) {
-        options.max_streaming_inflight_per_worker =
-            parse_nonnegative_integer(*streaming_text, "max-streaming-inflight");
-    }
-    const std::string* idle_text = optional_value("stream-idle-timeout");
-    if (idle_text != nullptr) {
-        options.stream_idle_timeout_ms =
-            parse_nonnegative_integer(*idle_text, "stream-idle-timeout");
-    }
-    // M2 E-3 slow-client write deadline (§9.2): CLI 0 = unlimited, the same
-    // data-plane semantics as the other CLI fields above.
-    const std::string* write_timeout_text = optional_value("write-timeout");
-    if (write_timeout_text != nullptr) {
-        options.write_timeout_ms = parse_nonnegative_integer(*write_timeout_text, "write-timeout");
-    }
-    // v0.1.3 local capsid.json permissions. The default ./capsid.json is
-    // tried whenever it exists; an explicit --capsid-json must exist. The
-    // policy is loaded here — before spawn — so a malformed document fails
-    // the CLI phase, not the post-spawn startup.
-    const std::string* capsid_json_text = optional_value("capsid-json");
-    if (capsid_json_text != nullptr) {
-        options.capsid_json_path = *capsid_json_text;
-        options.capsid_json_required = true;
-    }
-    // Explicit local secret store (env valueFrom): empty keeps the
-    // fail-closed rejection of valueFrom in the document.
-    const std::string* secrets_root_text = optional_value("secrets-root");
-    if (secrets_root_text != nullptr) {
-        options.secrets_root = *secrets_root_text;
-    }
-    // Binding development for local data-plane modes is explicit: the Host
-    // scans one immutable Registry snapshot up front and capsid.json may
-    // only request packages from it. Without Binding declarations this is
-    // never required and the worker remains on its baseline Runtime path.
-    const std::string* bindings_root_text = optional_value("bindings-root");
-    if (bindings_root_text != nullptr) {
-        auto registry = std::make_shared<capsid::host::BindingRegistrySnapshot>();
-        std::string scan_error;
+        ready_fd = parsed;
+        options.ready_fd = static_cast<int>(parsed);
 #if defined(_WIN32)
-        const std::vector<capsid::host::BindingOwnerId> allowed_owners = {0};
+        if (!ready_fd_is_open(options.ready_fd)) {
+            fail("--ready-fd is not an open descriptor");
+        }
 #else
-        const std::vector<capsid::host::BindingOwnerId> allowed_owners = {0, geteuid()};
+        if (fcntl(options.ready_fd, F_GETFD) == -1) {
+            fail("--ready-fd is not an open descriptor");
+        }
 #endif
-        if (!capsid::host::scan_bindings_root(*bindings_root_text, allowed_owners, registry.get(),
-                                              &scan_error)) {
-            fail("--bindings-root rejected: " + scan_error);
-        }
-        options.binding_registry = std::move(registry);
     }
-    {
-        auto local_policy = std::make_shared<capsid::host::LocalCapsidPolicy>();
-        std::string policy_error;
-        if (!capsid::host::load_local_capsid_policy(
-                options.capsid_json_path, options.capsid_json_required,
-                options.binding_registry.get(), options.secrets_root, local_policy.get(),
-                &policy_error)) {
-            fail(policy_error);
-        }
-        const capsid::host::LocalCapsidPolicy::RuntimeSettings& settings = local_policy->settings;
-        if (!explicit_source_bundle) {
-            if (!local_policy->present || !settings.has_entry) {
-                fail("--source-bundle is required unless capsid.json "
-                     "provides an entry");
-            }
-            // The capsid.json directory is the app version directory; the
-            // entry names the bundle file inside it (the managed layout).
-            std::string directory = options.capsid_json_path;
-            const std::string::size_type slash = directory.find_last_of("/\\");
-            directory = slash == std::string::npos ? std::string() : directory.substr(0, slash);
-            std::string bundle_path =
-                directory.empty() ? settings.entry : directory + "/" + settings.entry;
-            char cwd_buffer[4096];
-            if (getcwd(cwd_buffer, sizeof(cwd_buffer)) == nullptr) {
-                fail("cannot resolve the working directory");
-            }
-            const std::string cwd(cwd_buffer);
-            const std::string absolute = std::filesystem::path(bundle_path).is_absolute()
-                                             ? bundle_path
-                                             : cwd + "/" + bundle_path;
-            options.source_bundle_path = absolute;
-            // file:// URL identity: forward slashes, RFC 8089 local form.
-            std::string url_path = absolute;
-            for (char& ch : url_path) {
-                if (ch == '\\') {
-                    ch = '/';
-                }
-            }
-            options.source_name =
-                std::string("file://") + (url_path.rfind('/', 0) == 0 ? "" : "/") + url_path;
-        }
-        // The document fills the knobs the CLI left unset; an explicit CLI
-        // flag always wins over the document (the CLI is the override).
-        if (!values.count("request-timeout-ms") && settings.has_request_timeout_ms) {
-            options.request_timeout_ms = settings.request_timeout_ms;
-        }
-        if (options.request_timeout_ms == 0) {
-            fail("--request-timeout-ms is required unless capsid.json "
-                 "provides request.timeout");
-        }
-        if (!values.count("max-inflight-per-worker") && settings.has_max_inflight) {
-            options.max_inflight_per_worker = settings.max_inflight_per_worker;
-        }
-        if (!values.count("max-streaming-inflight") && settings.has_max_streaming_inflight) {
-            options.max_streaming_inflight_per_worker = settings.max_streaming_inflight_per_worker;
-        }
-        if (!values.count("stream-idle-timeout") && settings.has_stream_idle_timeout_ms) {
-            options.stream_idle_timeout_ms = settings.stream_idle_timeout_ms;
-        }
-        if (!values.count("write-timeout") && settings.has_write_timeout_ms) {
-            options.write_timeout_ms = settings.write_timeout_ms;
-        }
-        if (!values.count("queue-requests") && settings.has_queue_requests) {
-            options.queue_requests = settings.queue_requests;
-        }
-        if (!values.count("queue-header-bytes") && settings.has_queue_header_bytes) {
-            options.queue_header_bytes = settings.queue_header_bytes;
-        }
-        if (!values.count("queue-timeout") && settings.has_queue_timeout_ms) {
-            options.queue_timeout_ms = settings.queue_timeout_ms;
-        }
-        options.health_check = settings.health_check;
-        options.prepared_local_policy = std::move(local_policy);
-    }
-
-    // The READY record must be deliverable; verify the descriptor is open
-    // before the source bundle is read or the worker is spawned. It runs
-    // after capsid.json validation so policy failures (for example a
-    // traversal `entry`) report their own diagnostic first, matching the
-    // local-data-plane CLI phase.
-#if defined(_WIN32)
-    if (!ready_fd_is_open(options.ready_fd)) {
-        fail("--ready-fd is not an open descriptor");
-    }
-#else
-    if (fcntl(options.ready_fd, F_GETFD) == -1) {
-        fail("--ready-fd is not an open descriptor");
-    }
-#endif
 
     std::unique_ptr<capsid::host::ParentStopMonitor> parent_stop;
-    if (const auto it = values.find("stop-fd"); it != values.end()) {
-        const std::uint64_t stop_fd = parse_positive_integer(it->second, "stop-fd");
+    if (const std::string* stop_text = optional_value("stop-fd")) {
+        const std::uint64_t stop_fd = parse_positive_integer(*stop_text, "stop-fd");
         if (stop_fd < 3 ||
             stop_fd > static_cast<std::uint64_t>(std::numeric_limits<short>::max()) ||
-            stop_fd == ready_fd) {
+            (ready_fd.has_value() && stop_fd == *ready_fd)) {
             fail("--stop-fd must be a descriptor above 2, distinct from --ready-fd");
         }
-        std::string error;
-        parent_stop = capsid::host::ParentStopMonitor::create(static_cast<int>(stop_fd), &error);
-        if (!parent_stop)
-            fail("--stop-fd: " + error);
+        std::string stop_error;
+        parent_stop =
+            capsid::host::ParentStopMonitor::create(static_cast<int>(stop_fd), &stop_error);
+        if (!parent_stop) {
+            fail("--stop-fd: " + stop_error);
+        }
     }
 
-    const std::vector<std::uint8_t> bundle = read_bundle(options.source_bundle_path);
-
-    // M2 item 7 (design §12): the process-wide structured log and metrics
-    // registry for the data-plane modes. The render-time snapshot follows
-    // the single active worker, which these modes publish at spawn.
     auto structured_log =
         std::make_unique<capsid::host::StructuredLog>([](const std::string& line) {
 #if defined(_WIN32)
-            // MSVC write() takes an unsigned int count; structured log
-            // lines are single small JSON objects.
             const ssize_t written =
                 ::write(STDERR_FILENO, line.data(), static_cast<unsigned int>(line.size()));
 #else
@@ -1630,35 +1165,12 @@ int main(int argc, char** argv) {
             (void)written;
         });
     auto metrics = std::make_unique<capsid::host::MetricsRegistry>();
-    std::atomic<pid_t> worker_pid{0};
-    metrics->set_process_snapshot_provider(
-        capsid::host::default_process_snapshot_provider(&worker_pid));
     options.log = structured_log.get();
     options.metrics = metrics.get();
 
-    if (mode == "static-pool") {
-        capsid::host::StaticPoolServerOptions pool_options;
-        pool_options.workers = workers;
-        // The pool-level control log must ride the same process-wide
-        // StructuredLog as the shards; worker_options owns the template
-        // copy after the move below.
-        pool_options.log = options.log;
-        // The admission values ride in the shard template (options above);
-        // the pool-level StaticPoolServerOptions admission fields exist for
-        // the production config route (effective tier → pool options, M2
-        // managed-pool batch) and override the template when set.
-        pool_options.worker_options = std::move(options);
-        capsid::host::StaticPoolServer pool(std::move(pool_options));
-        const int exit_code =
-            run_with_parent_stop(pool, bundle, std::move(parent_stop), structured_log.get());
-        structured_log->log(capsid::host::LogLane::kControl,
-                            {.event = capsid::host::log_events::kShutdown});
-        structured_log->flush();
-        return exit_code;
-    }
-    capsid::host::SingleWorkerServer server(std::move(options));
+    capsid::host::LocalDevHost host(std::move(options));
     const int exit_code =
-        run_with_parent_stop(server, bundle, std::move(parent_stop), structured_log.get());
+        run_local_with_parent_stop(host, std::move(parent_stop), structured_log.get());
     structured_log->log(capsid::host::LogLane::kControl,
                         {.event = capsid::host::log_events::kShutdown});
     structured_log->flush();

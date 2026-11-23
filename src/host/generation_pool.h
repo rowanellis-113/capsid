@@ -52,6 +52,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -97,6 +98,11 @@ struct GenerationPoolOptions {
     std::uint64_t max_streaming_inflight_per_worker = 0;
     std::uint64_t stream_idle_timeout_ms = 0;
     std::uint64_t write_timeout_ms = 0;
+    // Per-App HTTP request body limit enforced by ManagedListener after routing.
+    std::uint64_t max_request_body_bytes = 16U * 1024U * 1024U;
+    // When false (fault-isolation / exit-capacity observation fixtures), unexpected
+    // worker exits remove the slot from READY without respawning a replacement.
+    bool replace_exited_workers = true;
     // §8.2 drain deadline for wait()/stop_and_join(): the whole-fleet
     // bound. Per-request cancellation is the executor's shutdown grace.
     std::chrono::milliseconds drain_deadline = std::chrono::seconds(10);
@@ -163,6 +169,14 @@ struct GenerationPoolOptions {
     // it wakes the pump and without the pool mutex. It must not call back
     // into the pool. Also permits controlled teardown interleavings.
     std::function<void()> on_executor_notify;
+    // Tie-break between equal-load READY slots using a rotating start index
+    // instead of always preferring slot 0. Enabled by LocalDevHost for shard-like
+    // round-robin parity; Managed/elastic pools keep lowest-slot consolidation.
+    bool round_robin_tie_break = false;
+    // Optional hook run outside the pool mutex right before forced shutdown on an
+    // expired drain deadline with non-idle slots (lets listeners flush kCancel
+    // before kShutdown).
+    std::function<void()> before_forced_shutdown;
 };
 
 // See the file comment for the full contract.
@@ -200,7 +214,10 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // §8.2 drain: no new requests; every slot gets its shutdown command.
     // The pump reaps the fleet (executor threads exit; retired executors
     // are reaped too) and completes the drain when nothing is left.
-    void request_drain();
+    void request_drain(std::optional<std::chrono::milliseconds> deadline_override = std::nullopt);
+    // Immediate shutdown without recording forced drain cancellations (used for
+    // parent stop / destructor teardown rather than begin_drain).
+    void request_stop();
     // Blocks until the pool is kDead (drain completed, every executor
     // thread joined, every replacement finished or abandoned). Idempotent.
     bool wait(std::string* error);
@@ -280,6 +297,11 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     }
     std::uint64_t stream_idle_timeout_ms() const { return options_.stream_idle_timeout_ms; }
     std::uint64_t write_timeout_ms() const { return options_.write_timeout_ms; }
+    std::uint64_t max_request_body_bytes() const { return options_.max_request_body_bytes; }
+    std::vector<capsid::WorkerExitStatus> worker_exit_statuses() const;
+    std::uint64_t forced_drain_cancellations() const {
+        return forced_drain_cancellations_.load(std::memory_order_acquire);
+    }
     // The configured fleet size (the count the ledger reserved for this
     // pool; distinct from ready_workers(), which can drop below it while
     // the generation is reaping). PR-10 §9.4.
@@ -346,6 +368,8 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
         std::string replacement_reason;
     };
     std::vector<Slot> slots_;
+    // Rotating tie-breaker when multiple ready workers share the same minimum load.
+    std::size_t next_pick_index_ = 0;
     // Replaced (dead) executors with pinned requests: kept alive until
     // the pool dies so a pinned request never touches freed memory.
     struct RetiredExecutor {
@@ -381,6 +405,10 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     };
     std::thread pump_thread_;
     std::vector<ReplacementWorker> replacement_threads_;
+    std::vector<capsid::WorkerExitStatus> final_exit_statuses_;
+    bool count_forced_drain_ = true;
+    bool before_forced_shutdown_ran_ = false;
+    std::atomic<std::uint64_t> forced_drain_cancellations_{0};
     std::once_flag wait_once_;
 };
 

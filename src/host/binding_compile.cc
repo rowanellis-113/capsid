@@ -76,8 +76,55 @@ bool read_string_array(json_t* parent, const char* key, std::vector<std::string>
     return true;
 }
 
+// Normalizes "[<ipv6>/<prefix>]" to "[<ipv6>]/<prefix>" for net_target.cc,
+// and supports comma-separated port lists "<host>:<p1>[,<p2>...]" on app rules.
+std::string normalize_v2_net_target_for_match(const std::string& target) {
+    if (!target.empty() && target.front() == '[') {
+        const std::size_t close = target.find(']');
+        const std::size_t slash = target.find('/');
+        if (close != std::string::npos && slash != std::string::npos && slash < close) {
+            return target.substr(0, slash) + "]" + target.substr(slash, close - slash) +
+                   target.substr(close + 1);
+        }
+    }
+    return target;
+}
+
 inline bool net_target_contained(const std::string& app, const std::string& manifest) {
-    return capsid::net_target_contained(app, manifest);
+    const std::string norm_manifest = normalize_v2_net_target_for_match(manifest);
+    const std::string norm_app = normalize_v2_net_target_for_match(app);
+    // Split comma-separated ports only if there is a single ':' after the host
+    // block (outside IPv6 brackets).
+    std::size_t host_end = 0;
+    if (!norm_app.empty() && norm_app.front() == '[') {
+        const std::size_t close = norm_app.find(']');
+        if (close != std::string::npos) {
+            host_end = close + 1;
+        }
+    }
+    const std::size_t colon = norm_app.find(':', host_end);
+    if (colon != std::string::npos && norm_app.find(':', colon + 1) == std::string::npos) {
+        const std::string ports = norm_app.substr(colon + 1);
+        if (ports.find(',') != std::string::npos) {
+            const std::string host = norm_app.substr(0, colon);
+            std::size_t begin = 0;
+            while (begin <= ports.size()) {
+                const std::size_t comma = ports.find(',', begin);
+                const std::string part = ports.substr(
+                    begin, comma == std::string::npos ? std::string::npos : comma - begin);
+                if (part.empty() ||
+                    !capsid::net_target_contained(host + ":" + part, norm_manifest)) {
+                    return false;
+                }
+                if (comma == std::string::npos) {
+                    break;
+                }
+                begin = comma + 1;
+            }
+            return true;
+        }
+    }
+    return capsid::net_target_contained(norm_app, norm_manifest);
 }
 
 inline bool fs_path_contained(const std::string& app, const std::string& manifest) {
@@ -574,7 +621,6 @@ json_t* snapshot_json_list(const std::vector<std::string>& values) {
 // recovery instead of trusting the committed JSON wrapper.
 bool validate_snapshot_request(const AppBindingRequest& request, json_t* config) {
     json_t* app = json_object();
-    json_t* pool = json_object();
     json_t* bindings = json_object();
     json_t* binding = json_object();
     json_t* permissions = json_object();
@@ -583,7 +629,6 @@ bool validate_snapshot_request(const AppBindingRequest& request, json_t* config)
     json_t* secrets = json_object();
     const auto cleanup = [&]() {
         json_decref(app);
-        json_decref(pool);
         json_decref(bindings);
         json_decref(binding);
         json_decref(permissions);
@@ -591,8 +636,8 @@ bool validate_snapshot_request(const AppBindingRequest& request, json_t* config)
         json_decref(fs);
         json_decref(secrets);
     };
-    if (app == nullptr || pool == nullptr || bindings == nullptr || binding == nullptr ||
-        permissions == nullptr || net == nullptr || fs == nullptr || secrets == nullptr) {
+    if (app == nullptr || bindings == nullptr || binding == nullptr || permissions == nullptr ||
+        net == nullptr || fs == nullptr || secrets == nullptr) {
         cleanup();
         return false;
     }
@@ -608,8 +653,6 @@ bool validate_snapshot_request(const AppBindingRequest& request, json_t* config)
         return json_object_set_new(object, key, owned) == 0;
     };
     if (!put_new(app, "apiVersion", json_string("capsid/app-v2")) ||
-        !put_new(pool, "minReady", json_integer(1)) ||
-        !put_new(pool, "maxWorkers", json_integer(1)) || !transfer(app, "pool", &pool) ||
         !put_new(net, "allow", snapshot_json_list(request.net_rules)) ||
         !put_new(fs, "read", snapshot_json_list(request.fs_read)) ||
         !put_new(fs, "write", snapshot_json_list(request.fs_write)) ||

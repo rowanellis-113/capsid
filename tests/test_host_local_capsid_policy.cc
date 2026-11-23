@@ -1,14 +1,9 @@
-// v0.1.3 local capsid.json permissions (--capsid-json) on the single-worker
-// data plane: the document is its own authority, so an env grant must reach
-// the worker, an absent default file must keep the deny-all defaults, and
-// every section this path cannot honor (worker.* / request.* / healthCheck,
-// env valueFrom, an explicitly requested but missing file) must fail
-// startup closed. The fetch egress grant is exercised end-to-end against a
-// loopback listener so the egress descriptor path is covered, not just the
-// env table.
+// Local capsid.json permissions on LocalDevHost: env grants reach the worker,
+// absent default keeps deny-all defaults, worker.memoryMax sets request body
+// limits cleanly, valueFrom resolves against --secrets-dir, and bindings
+// require an explicit binding registry or --bindings-dir.
 
-#include "host/single_worker_server.h"
-
+#include "host/local_dev_host.h"
 #include "host/binding_registry.h"
 #include "host/generation_identity.h"
 
@@ -144,17 +139,18 @@ void write_json_file(const std::string& path, const std::string& text) {
     require(static_cast<bool>(output), "cannot flush capsid.json fixture");
 }
 
-capsid::host::SingleWorkerServerOptions make_options(const char* worker_path, int ready_fd) {
-    capsid::host::SingleWorkerServerOptions options;
+capsid::host::LocalDevHostOptions make_options(const char* worker_path, int ready_fd) {
+    capsid::host::LocalDevHostOptions options;
     options.worker_path = worker_path;
-    options.source_bundle_path = "local-policy-inline";
     options.source_name = "file://orders/v1/bundle.mjs";
     options.application = "orders";
-    options.listen_address = "127.0.0.1";
-    options.listen_port = 0;
-    options.public_scheme = "http";
-    options.public_authority = "public.example";
-    options.request_timeout_ms = 5000;
+    capsid::host::ListenerConfig listener;
+    listener.name = "public";
+    listener.tcp = "127.0.0.1:0";
+    listener.public_scheme = "http";
+    listener.public_authority = "public.example";
+    listener.routing.mode = "path";
+    options.listener_override = std::move(listener);
     options.initial_stream_window = 64U * 1024U;
     options.strict_sandbox = false;
     options.ready_fd = ready_fd;
@@ -290,10 +286,11 @@ void run_success_scenario(
 
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create READY pipe");
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
+    capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
     options.capsid_json_path = json_path;
+    options.capsid_json_required = !capsid_json.empty();
     options.binding_registry = std::move(binding_registry);
-    capsid::host::SingleWorkerServer server(options);
+    capsid::host::LocalDevHost server(std::move(options));
     std::string error;
     const bool started = server.start(bundle, &error);
     require(started, name + ": start failed: " + error);
@@ -327,11 +324,11 @@ void run_failure_scenario(
     const std::string source = "export default { fetch: () => new Response('unused') };";
     const std::vector<std::uint8_t> bundle(source.begin(), source.end());
 
-    capsid::host::SingleWorkerServerOptions options = make_options(worker_path, ready[1]);
+    capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
     options.capsid_json_path = json_path;
     options.capsid_json_required = required;
     options.binding_registry = std::move(binding_registry);
-    capsid::host::SingleWorkerServer server(options);
+    capsid::host::LocalDevHost server(std::move(options));
     std::string error;
     require(!server.start(bundle, &error), name + ": startup did not fail closed");
     require(error.find(expected_error) != std::string::npos,
@@ -392,17 +389,15 @@ int main(int argc, char** argv) {
         fixture.thread.join();
     }
 
-    // 5. worker.* is CLI-owned on this path and must fail loudly instead of
-    //    silently skipping the capacity the operator asked for.
-    run_failure_scenario(argv[1], "worker-section-rejected",
-                         "{\"apiVersion\":\"capsid/app-v1\","
-                         "\"permissions\":{},"
-                         "\"worker\":{\"memoryMax\":\"64MiB\"}," +
-                             pool + "}",
-                         false, "not applicable in local mode");
+    // 5. worker.memoryMax is accepted locally and configures
+    //    effective_max_request_body_bytes without setting RLIMIT_AS.
+    run_success_scenario(
+        argv[1], "worker-memory-max-accepted",
+        R"json({"apiVersion":"capsid/app-v2","permissions":{},"worker":{"memoryMax":"64MiB"},"pool":{"workers":1}})json",
+        kPlainWorkerSource, 0, "/@capsid/orders/env", "plain-ok");
 
-    // 6. env valueFrom has no secret store on this path: reject, never
-    //    degrade to an empty value.
+    // 6. env valueFrom without --secrets-dir fails closed instead of
+    //    degrading to an empty value.
     run_failure_scenario(argv[1], "value-from-rejected",
                          "{\"apiVersion\":\"capsid/app-v1\","
                          "\"permissions\":{\"modules\":[\"capsid:env\"],"
@@ -420,20 +415,14 @@ int main(int argc, char** argv) {
                              pool + "}",
                          false, "rejected at");
 
-    // 9. `entry` is honored locally (v0.2.x) when no explicit source is
-    //    given; with an explicit bundle the CLI wins over the document
-    //    (entry-derivation itself is covered by the host_single_worker
-    //    integration fixture, which runs without --source-bundle).
+    // 9. `entry` is honored locally when the bundle is supplied inline.
     run_success_scenario(argv[1], "entry-overridden-by-explicit-bundle",
                          "{\"apiVersion\":\"capsid/app-v1\",\"entry\":\"bundle.mjs\","
                          "\"permissions\":{}," +
                              pool + "}",
                          kPlainWorkerSource, 0, "/@capsid/orders/env", "plain-ok");
 
-    // 10. pool.queue* arms the bounded admission queue locally (v0.2.x);
-    //     document presence decides, 0 means queueing disabled.  The
-    //     admission behavior itself is covered by the host_single_worker
-    //     integration fixture.
+    // 10. pool.queue* arms the bounded admission queue locally.
     run_success_scenario(argv[1], "pool-queue-armed",
                          "{\"apiVersion\":\"capsid/app-v1\",\"permissions\":{},"
                          "\"pool\":{\"minReady\":1,\"maxWorkers\":1,"
@@ -441,31 +430,28 @@ int main(int argc, char** argv) {
                          kPlainWorkerSource, 0, "/@capsid/orders/env", "plain-ok");
 
     // 11. Binding development uses the same app-v2 declaration and
-    //     capsid:binding/<id> facade as managed mode. The explicit Host
-    //     Registry supplies implementation bytes; the App only sees the
-    //     declared API and receives an async result.
+    //     capsid:binding/<id> facade as managed mode.
     const auto echo_registry = make_echo_binding_registry();
     run_success_scenario(
         argv[1], "binding-call",
-        R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"binding:"}}},"pool":{"minReady":1,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"binding:"}}}})json",
         "import echo from 'capsid:binding/echo';"
         "export default { async fetch() {"
         "  return new Response(await echo.echo('ok'));"
         "} };",
         0, "/@capsid/orders/binding", "binding:ok", echo_registry);
 
-    // 12. A Binding declaration without a Host Registry cannot fall back
-    //     to user-controlled code or a global search path.
+    // 12. A Binding declaration without a Host Registry / --bindings-dir fails
+    //     closed instead of using a global search path.
     run_failure_scenario(
         argv[1], "binding-registry-required",
-        R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"binding:"}}},"pool":{"minReady":1,"maxWorkers":1}})json",
-        false, "bindings require an explicit Host Registry");
+        R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"binding:"}}}})json",
+        false, "bindings require --bindings-dir", {});
 
-    // 13. Local modes intentionally have no secret provider. A Binding
-    //     secret reference is rejected instead of becoming empty/plaintext.
+    // 13. Binding secret references without --secrets-dir fail closed.
     run_failure_scenario(
         argv[1], "binding-secret-rejected",
-        R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"secrets":{"password":{"valueFrom":"echo-password"}}}},"pool":{"minReady":1,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"secrets":{"password":{"valueFrom":"echo-password"}}}}})json",
         false, "binding secrets are unavailable in local mode", echo_registry);
 
     std::cout << "PASS" << std::endl;
