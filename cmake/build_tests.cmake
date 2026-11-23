@@ -7005,6 +7005,56 @@ if(BUILD_TESTING)
                     PROPERTIES TIMEOUT 90 LABELS "host;managed;lifecycle")
             endif()
         endif()
+
+        add_executable(
+            test-host-eviction-coordinator
+            tests/test_host_eviction_coordinator.cc)
+        target_include_directories(
+            test-host-eviction-coordinator PRIVATE
+            include src "${CAPSID_GENERATED_DIR}")
+        target_link_libraries(test-host-eviction-coordinator PRIVATE
+            capsid_runtime
+            capsid_host_core
+            Boost::system
+            capsid_jansson
+            OpenSSL::Crypto
+            capsid_sanitizers)
+        if(WIN32)
+            target_link_libraries(test-host-eviction-coordinator PRIVATE ws2_32)
+        endif()
+        set_target_properties(test-host-eviction-coordinator PROPERTIES
+            CXX_STANDARD 20
+            CXX_STANDARD_REQUIRED ON
+            CXX_EXTENSIONS OFF)
+        if(CAPSID_STRICT_WARNINGS)
+            if(MSVC)
+                target_compile_options(test-host-eviction-coordinator PRIVATE /W4 /WX)
+            else()
+                target_compile_options(test-host-eviction-coordinator PRIVATE -Wall -Wextra -Wpedantic -Werror)
+            endif()
+        endif()
+        add_dependencies(test-host-eviction-coordinator capsid-worker)
+        if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            foreach(CAPSID_EVICTION_CASE IN ITEMS
+                    phase1_overshare_protects_small_tenant
+                    phase2_global_lru_and_min_residency
+                    tenant_quota_swap_and_rejections)
+                add_test(
+                    NAME "host_eviction_${CAPSID_EVICTION_CASE}"
+                    COMMAND test-host-eviction-coordinator $<TARGET_FILE:capsid-worker> "${CAPSID_EVICTION_CASE}")
+                set_tests_properties(
+                    "host_eviction_${CAPSID_EVICTION_CASE}"
+                    PROPERTIES TIMEOUT 90 LABELS "host;managed;lifecycle")
+            endforeach()
+            if(NOT WIN32)
+                add_test(
+                    NAME host_eviction_admin_deploy_tenant_and_persistence
+                    COMMAND test-host-eviction-coordinator $<TARGET_FILE:capsid-worker> admin_deploy_tenant_and_persistence)
+                set_tests_properties(
+                    host_eviction_admin_deploy_tenant_and_persistence
+                    PROPERTIES TIMEOUT 90 LABELS "host;managed;lifecycle")
+            endif()
+        endif()
         endif()  # Boost_FOUND — RoutingTable & ManagedListener contract tests
 
         add_executable(

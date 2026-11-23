@@ -47,7 +47,8 @@ AsyncAdminBackend::~AsyncAdminBackend() {
 }
 
 DeployOutcome AsyncAdminBackend::submit(bool retire, const std::string& application,
-                                        const std::string& version, OperationStatus* status) {
+                                        const std::string& version, const std::string& tenant,
+                                        OperationStatus* status) {
     DeployOutcome outcome;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -75,6 +76,7 @@ DeployOutcome AsyncAdminBackend::submit(bool retire, const std::string& applicat
         pending.retire = retire;
         pending.application = application;
         pending.version = version;
+        pending.tenant = tenant;
         pending.operation_id = admin_operation_id();
         // The public ID is captured BEFORE the move into the queue: the
         // moved-from object must never be read.
@@ -141,7 +143,8 @@ void AsyncAdminBackend::worker_loop() {
                 outcome = inner_->retire(pending.application, &recorded);
                 succeeded = outcome.ok;
             } else {
-                outcome = inner_->deploy(pending.application, pending.version, &recorded);
+                outcome =
+                    inner_->deploy(pending.application, pending.version, pending.tenant, &recorded);
                 succeeded = outcome.ok;
                 if (succeeded && !outcome.workers.empty()) {
                     // A successful deploy whose outcome still carries
@@ -191,11 +194,16 @@ void AsyncAdminBackend::worker_loop() {
 
 DeployOutcome AsyncAdminBackend::deploy(const std::string& application, const std::string& version,
                                         OperationStatus* status) {
-    return submit(false, application, version, status);
+    return submit(false, application, version, application, status);
+}
+
+DeployOutcome AsyncAdminBackend::deploy(const std::string& application, const std::string& version,
+                                        const std::string& tenant, OperationStatus* status) {
+    return submit(false, application, version, tenant.empty() ? application : tenant, status);
 }
 
 DeployOutcome AsyncAdminBackend::retire(const std::string& application, OperationStatus* status) {
-    return submit(true, application, std::string(), status);
+    return submit(true, application, std::string(), std::string(), status);
 }
 
 OperationStatus AsyncAdminBackend::operation_status(const std::string& operation_id) {
@@ -233,6 +241,12 @@ ManagedHostOptions* ManagedAdminBackend::find_application(const std::string& app
 
 DeployOutcome ManagedAdminBackend::deploy(const std::string& application,
                                           const std::string& version, OperationStatus* status) {
+    return deploy(application, version, application, status);
+}
+
+DeployOutcome ManagedAdminBackend::deploy(const std::string& application,
+                                          const std::string& version, const std::string& tenant,
+                                          OperationStatus* status) {
     ManagedHostOptions* options = find_application(application);
     if (options == nullptr) {
         DeployOutcome outcome;
@@ -276,7 +290,7 @@ DeployOutcome ManagedAdminBackend::deploy(const std::string& application,
             metrics->count_recovery_startup_permit_grant(application);
         }
     }
-    DeployOutcome outcome = managed_deploy(options, version, status);
+    DeployOutcome outcome = managed_deploy(options, version, tenant, status);
     if (grant_held) {
         startup_permits->release_grant();
     }

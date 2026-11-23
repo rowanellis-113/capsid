@@ -65,6 +65,7 @@ class StructuredLog;
 class MetricsRegistry;
 class ServiceChannelBudget;
 class WorkerPoolCapacityLease;
+class GenerationPool;
 
 struct GenerationPoolOptions {
     // Identity (the generation key; application_id must satisfy the
@@ -179,8 +180,13 @@ struct GenerationPoolOptions {
     bool has_min_ready = false;
     std::uint32_t min_ready = 0;
     std::uint64_t idle_timeout_ms = 0;
+    std::string tenant_id;
     // Two-tier elastic capacity callbacks (invoked outside the pool mutex).
+    // When acquire_worker_slot is set, it overrides acquire_elastic_slot and
+    // can populate *rejection_reason (e.g. "tenant_max_workers").
     std::function<bool()> acquire_elastic_slot;
+    std::function<bool(const GenerationPool* requester, std::string* rejection_reason)>
+        acquire_worker_slot;
     std::function<void()> release_elastic_slot;
     std::function<void(const std::string& reason)> on_eviction;
     // Optional hook run outside the pool mutex right before forced shutdown on an
@@ -269,7 +275,7 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // re-syncs without counting).
     bool recycle_worker(WorkerExecutor* target);
 
-    // ---- elastic scale-out & eviction (Stage 2) -------------------------
+    // ---- elastic scale-out & eviction (Stage 2/3) -----------------------
 
     enum class ScaleOutResult {
         kSpawnInFlight,
@@ -278,15 +284,32 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
         kNotActive,
     };
 
+    struct WorkerSlotSnapshot {
+        std::size_t slot_index = 0;
+        std::int64_t pid = 0;
+        std::string cgroup_path;
+        std::uint64_t started_at_ms = 0;
+        std::uint64_t last_active_at_ms = 0;
+        bool idle = false;
+        bool elastic_held = false;
+    };
+
     std::uint32_t min_ready() const noexcept { return min_ready_; }
     std::uint32_t max_workers() const noexcept { return options_.workers; }
     std::uint64_t idle_timeout_ms() const noexcept { return options_.idle_timeout_ms; }
+    std::string_view tenant_id() const noexcept {
+        return options_.tenant_id.empty() ? std::string_view(options_.application_id)
+                                          : std::string_view(options_.tenant_id);
+    }
     bool is_elastic() const noexcept { return min_ready_ < options_.workers; }
-    ScaleOutResult request_scale_out();
+    ScaleOutResult request_scale_out(std::string* rejection_reason = nullptr);
     bool scale_out_in_flight() const;
+    std::size_t active_or_spawning_workers() const;
+    std::vector<WorkerSlotSnapshot> snapshot_workers() const;
     void set_scale_callbacks(std::function<void()> on_worker_ready,
                              std::function<void(const std::string& reason)> on_scale_out_failed);
-    bool evict_idle_worker(std::uint64_t min_residency_ms, const std::string& reason);
+    bool evict_idle_worker(std::uint64_t min_residency_ms, const std::string& reason,
+                           bool require_elastic_held = false);
 
     // ---- §9.2 event bridge ----------------------------------------------
 

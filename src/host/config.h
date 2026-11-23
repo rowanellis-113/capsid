@@ -88,6 +88,9 @@ ConfigValidationResult validate_binding_manifest(std::string_view json);
 // bindingsRoot scanner (package directory names).
 bool valid_binding_id(std::string_view value);
 
+// Tenant ID grammar: [a-z0-9][a-z0-9._-]{0,62} (matching application IDs).
+bool valid_tenant_id(std::string_view value);
+
 // Parses capsid.json (the authoritative capsid/app-v1 shape) into the
 // AppRequest. The frozen schema boundary (validate_config_json) runs first
 // in the deploy pipeline; this parse maps the schema's fields onto the

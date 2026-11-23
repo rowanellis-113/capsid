@@ -215,6 +215,22 @@ bool read_cpu_seconds(pid_t pid, std::uint64_t* cpu_seconds) {
 
 } // namespace
 
+bool read_process_footprint_bytes(std::int64_t pid, std::uint64_t* bytes_out) {
+    if (pid <= 0 || bytes_out == nullptr) {
+        return false;
+    }
+    std::uint64_t kib = 0;
+    if (read_pss_kib(static_cast<pid_t>(pid), &kib)) {
+        *bytes_out = kib * 1024ULL;
+        return true;
+    }
+    if (read_rss_kib(static_cast<pid_t>(pid), &kib)) {
+        *bytes_out = kib * 1024ULL;
+        return true;
+    }
+    return false;
+}
+
 MetricsRegistry::ProcessSnapshotProvider
 default_process_snapshot_provider(const std::atomic<pid_t>* worker_pid) {
     return process_snapshot_provider(

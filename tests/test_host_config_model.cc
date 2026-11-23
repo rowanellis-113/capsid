@@ -450,11 +450,21 @@ std::string host_v2_signature(const ParsedHostConfig& c) {
         << "|C:" << c.capacity.workers_total << ',' << c.capacity.activation_surge_workers << ','
         << c.capacity.channels.channels << ',' << c.capacity.channels.pending_dials << ','
         << c.capacity.channels.queue_bytes << ',' << c.capacity.max_channel_message_size << ','
-        << c.capacity.channel_idle_timeout_ms << ',' << c.channels.configured << ','
+        << c.capacity.channel_idle_timeout_ms << ',' << c.capacity.memory.configured << ','
+        << c.capacity.memory.limit_bytes << ',' << c.capacity.memory.high_watermark_percent << ','
+        << c.capacity.memory.low_watermark_percent << ',' << c.capacity.memory.min_residency_ms
+        << ',' << c.capacity.memory.check_interval_ms << ',' << c.channels.configured << ','
         << c.channels.max_channels << ',' << c.channels.max_message_bytes << ','
         << c.channels.reassembly_budget_bytes << ',' << c.channels.send_budget_bytes << ','
         << c.channels.idle_timeout_ms << ',' << c.channels.per_channel_queue_bytes
-        << "|R:" << c.recovery.crash_budget.max_events << ',' << c.recovery.crash_budget.window_ms
+        << "|T:" << c.tenancy.configured << ',' << c.tenancy.default_quota.max_workers << ','
+        << c.tenancy.default_quota.min_soft_memory_bytes << ','
+        << c.tenancy.default_quota.hard_memory_bytes << ';';
+    for (const auto& [tid, quota] : c.tenancy.overrides) {
+        out << tid << ':' << quota.max_workers << ',' << quota.min_soft_memory_bytes << ','
+            << quota.hard_memory_bytes << ';';
+    }
+    out << "|R:" << c.recovery.crash_budget.max_events << ',' << c.recovery.crash_budget.window_ms
         << ',' << c.recovery.active_health_interval_ms << ',' << c.recovery.active_health_failures;
     return out.str();
 }
@@ -528,7 +538,28 @@ void test_host_v2_orthogonal_and_full_consumption() {
         "workersTotal": 64,
         "channelsTotal": 1024,
         "maxChannelMessageSize": "1MiB",
-        "channelIdleTimeout": "60s"
+        "channelIdleTimeout": "60s",
+        "memory": {
+          "limit": "2GiB",
+          "highWatermarkPercent": 85,
+          "lowWatermarkPercent": 75,
+          "minResidency": "6s",
+          "checkInterval": "7s"
+        }
+      },
+      "tenancy": {
+        "defaultQuota": {
+          "maxWorkers": 16,
+          "minSoftMemory": "64MiB",
+          "hardMemory": "512MiB"
+        },
+        "overrides": {
+          "vip-acme": {
+            "maxWorkers": 32,
+            "minSoftMemory": "128MiB",
+            "hardMemory": "1GiB"
+          }
+        }
       },
       "recovery": {
         "crashBudget": { "maxEvents": 5, "window": "60s" },
@@ -615,6 +646,18 @@ void test_host_v2_orthogonal_and_full_consumption() {
         {R"("channelsTotal": 1024)", R"("channelsTotal": 512)"},
         {R"("maxChannelMessageSize": "1MiB")", R"("maxChannelMessageSize": "2MiB")"},
         {R"("channelIdleTimeout": "60s")", R"("channelIdleTimeout": "90s")"},
+        {R"("limit": "2GiB")", R"("limit": "3GiB")"},
+        {R"("highWatermarkPercent": 85)", R"("highWatermarkPercent": 90)"},
+        {R"("lowWatermarkPercent": 75)", R"("lowWatermarkPercent": 70)"},
+        {R"("minResidency": "6s")", R"("minResidency": "8s")"},
+        {R"("checkInterval": "7s")", R"("checkInterval": "9s")"},
+        {R"("maxWorkers": 16,)", R"("maxWorkers": 20,)"},
+        {R"("minSoftMemory": "64MiB",)", R"("minSoftMemory": "96MiB",)"},
+        {R"("hardMemory": "512MiB")", R"("hardMemory": "640MiB")"},
+        {R"("vip-acme": {)", R"("vip-other": {)"},
+        {R"("maxWorkers": 32,)", R"("maxWorkers": 40,)"},
+        {R"("minSoftMemory": "128MiB",)", R"("minSoftMemory": "192MiB",)"},
+        {R"("hardMemory": "1GiB")", R"("hardMemory": "2GiB")"},
         {R"("maxEvents": 5)", R"("maxEvents": 7)"},
         {R"("window": "60s")", R"("window": "120s")"},
         {R"("interval": "30s")", R"("interval": "15s")"},
@@ -629,6 +672,20 @@ void test_host_v2_orthogonal_and_full_consumption() {
         require(host_v2_signature(mutated) != base_host_sig,
                 "silent dead host-v2 field detected for: " + mutation.first);
     }
+
+    // String shorthand capacity.memory ("2GiB") derives default watermarks and intervals.
+    ParsedHostConfig mem_shorthand_cfg;
+    require_valid_parse(
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/a","state":"/s","secrets":"/k/{application}"},"admin":{"unix":"/u.sock"},"listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],"capacity":{"workersTotal":8,"memory":"2GiB"}})json",
+        "host-v2 capacity.memory string shorthand", &mem_shorthand_cfg);
+    require(mem_shorthand_cfg.capacity.memory.configured &&
+                mem_shorthand_cfg.capacity.memory.limit_bytes ==
+                    2ULL * 1024ULL * 1024ULL * 1024ULL &&
+                mem_shorthand_cfg.capacity.memory.high_watermark_percent == 85 &&
+                mem_shorthand_cfg.capacity.memory.low_watermark_percent == 75 &&
+                mem_shorthand_cfg.capacity.memory.min_residency_ms == 5000 &&
+                mem_shorthand_cfg.capacity.memory.check_interval_ms == 5000,
+            "capacity.memory string shorthand did not populate defaults");
 
     // publicOrigin omission defaults to http://<tcp> with auto port substitution.
     ParsedHostConfig auto_origin_cfg;

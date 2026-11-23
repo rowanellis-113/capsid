@@ -71,6 +71,10 @@ class MetricsRegistry {
     void set_isolation_applied_features(const std::string& app, std::uint64_t value);
     void count_isolation_failure(const std::string& kind, const std::string& app);
     void set_log_dropped(const std::string& app, std::uint64_t value);
+    void count_pool_eviction(const std::string& app, const std::string& tenant,
+                             const std::string& reason);
+    void count_pool_rejection(const std::string& app, const std::string& tenant,
+                              const std::string& reason);
 
     // Prometheus text format, families in a fixed order, series sorted
     // within a family (deterministic output for scrapers and tests).

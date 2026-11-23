@@ -59,6 +59,9 @@ struct ManagedListenerOptions {
     std::string expected_application;
     // Beast request body limit for the buffered upload (413 beyond it).
     std::uint64_t max_request_body_bytes = 16U * 1024U * 1024U;
+    // Local dev opt-in (`CAPSID_HOST_IPC_METRICS=1`): emit `capsid-host: channel-metrics`
+    // lines onto stderr on HTTP request completion and WebSocket close.
+    bool emit_channel_metrics = false;
 };
 
 class ManagedListener {

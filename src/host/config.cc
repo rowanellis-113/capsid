@@ -82,7 +82,8 @@ struct Schema {
         kArray,
         kDynamicMap,
         kBoolean,
-        kOpaqueObject, // any JSON object, any keys; size-bounded in phase 2
+        kOpaqueObject,   // any JSON object, any keys; size-bounded in phase 2
+        kStringOrObject, // accepts either a scalar string grammar or a typed object
     };
 
     Kind kind;
@@ -122,6 +123,8 @@ struct Schema {
     bool unique_elements = false;
     // kArray only: minimum required element count (0 = empty arrays allowed).
     std::size_t min_elements = 0;
+    // kInteger only: when set, the value must be at most this bound.
+    std::optional<int64_t> max_value{};
 };
 
 // --- Leaf schemas ---
@@ -714,14 +717,56 @@ constexpr std::array kTierV2Members{
 };
 constexpr Schema kTierV2Schema{Schema::Kind::kObject, std::span<const Member>(kTierV2Members)};
 
+constexpr Schema kWatermarkPercentSchema{
+    .kind = Schema::Kind::kInteger,
+    .min_value = 1,
+    .max_value = 100,
+};
+constexpr Schema kNonNegativeDurationStringSchema{
+    .kind = Schema::Kind::kString,
+    .grammar = "non-negative-duration",
+};
+constexpr std::array kCapacityMemoryV2Members{
+    Member{"limit", &kSizeStringSchema, true},
+    Member{"highWatermarkPercent", &kWatermarkPercentSchema, false},
+    Member{"lowWatermarkPercent", &kWatermarkPercentSchema, false},
+    Member{"minResidency", &kNonNegativeDurationStringSchema, false},
+    Member{"checkInterval", &kNonNegativeDurationStringSchema, false},
+};
+constexpr Schema kCapacityMemoryV2Schema{
+    .kind = Schema::Kind::kStringOrObject,
+    .members = std::span<const Member>(kCapacityMemoryV2Members),
+    .grammar = "size",
+};
+
 constexpr std::array kCapacityV2Members{
     Member{"workersTotal", &kPositiveIntegerSchema, false},
     Member{"channelsTotal", &kPositiveIntegerSchema, false},
     Member{"maxChannelMessageSize", &kSizeStringSchema, false},
     Member{"channelIdleTimeout", &kDurationStringSchema, false},
+    Member{"memory", &kCapacityMemoryV2Schema, false},
 };
 constexpr Schema kCapacityV2Schema{Schema::Kind::kObject,
                                    std::span<const Member>(kCapacityV2Members)};
+
+constexpr std::array kTenantQuotaV2Members{
+    Member{"maxWorkers", &kPositiveIntegerSchema, false},
+    Member{"minSoftMemory", &kSizeStringSchema, false},
+    Member{"hardMemory", &kSizeStringSchema, false},
+};
+constexpr Schema kTenantQuotaV2Schema{Schema::Kind::kObject,
+                                      std::span<const Member>(kTenantQuotaV2Members)};
+constexpr Schema kTenantOverridesV2Schema{
+    .kind = Schema::Kind::kDynamicMap,
+    .dynamic_value_schema = &kTenantQuotaV2Schema,
+    .grammar = "tenant-id",
+};
+constexpr std::array kTenancyV2Members{
+    Member{"defaultQuota", &kTenantQuotaV2Schema, false},
+    Member{"overrides", &kTenantOverridesV2Schema, false},
+};
+constexpr Schema kTenancyV2Schema{Schema::Kind::kObject,
+                                  std::span<const Member>(kTenancyV2Members)};
 
 constexpr std::array kCrashBudgetV2Members{
     Member{"maxEvents", &kPositiveIntegerSchema, false},
@@ -755,6 +800,7 @@ constexpr std::array kHostV2Members{
     Member{"defaults", &kTierV2Schema, false},
     Member{"maximums", &kTierV2Schema, false},
     Member{"capacity", &kCapacityV2Schema, false},
+    Member{"tenancy", &kTenancyV2Schema, false},
     Member{"recovery", &kRecoveryV2Schema, false},
 };
 constexpr Schema kHostV2Schema{Schema::Kind::kObject, std::span<const Member>(kHostV2Members)};
@@ -1324,12 +1370,21 @@ bool matches_grammar(std::string_view grammar, std::string_view value) {
         return units::parse_duration_ms(value, &ms, /*allow_hours=*/false) && ms > 0 &&
                ms <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     }
+    if (grammar == "non-negative-duration") {
+        std::uint64_t ms = 0;
+        return units::parse_duration_ms(value, &ms, /*allow_hours=*/false) &&
+               ms <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    }
+    if (grammar == "tenant-id") {
+        return valid_tenant_id(value);
+    }
     return false;
 }
 
 // Whether phase 1 should descend into `node` as a child of `schema`.
 bool can_descend(const Schema& schema, json_t* node) {
     return (schema.kind == Schema::Kind::kObject && json_is_object(node)) ||
+           (schema.kind == Schema::Kind::kStringOrObject && json_is_object(node)) ||
            (schema.kind == Schema::Kind::kArray && json_is_array(node)) ||
            (schema.kind == Schema::Kind::kDynamicMap && json_is_object(node));
 }
@@ -1342,6 +1397,7 @@ bool check_unknown_fields(const Schema& schema, json_t* node, const std::string&
                           ConfigError& error) {
     switch (schema.kind) {
     case Schema::Kind::kObject:
+    case Schema::Kind::kStringOrObject:
         if (!json_is_object(node)) {
             return true;
         }
@@ -1415,6 +1471,55 @@ bool check_unknown_fields(const Schema& schema, json_t* node, const std::string&
     return true;
 }
 
+bool validate_string_leaf(const Schema& schema, json_t* node, const std::string& path,
+                          ConfigError& error) {
+    if (!json_is_string(node)) {
+        error.code = ConfigErrorCode::kInvalidValue;
+        error.path = path;
+        error.message = "expected a JSON string";
+        return false;
+    }
+    // Byte-aware view: json_string_length() preserves embedded NULs that
+    // a C-string comparison would silently truncate. Every string value
+    // rejects NUL bytes first with the field path; NUL object keys never
+    // reach this code because the upstream parser rejects them.
+    const std::string_view value =
+        std::string_view(json_string_value(node), json_string_length(node));
+    if (value.find('\0') != std::string_view::npos) {
+        error.code = ConfigErrorCode::kInvalidValue;
+        error.path = path;
+        error.message = "value contains a NUL byte";
+        return false;
+    }
+    if (!schema.expected_string.empty() && value != schema.expected_string) {
+        error.code = ConfigErrorCode::kInvalidValue;
+        error.path = path;
+        error.message = "unsupported value";
+        return false;
+    }
+    if (!schema.allowed_strings.empty() &&
+        std::find(schema.allowed_strings.begin(), schema.allowed_strings.end(), value) ==
+            schema.allowed_strings.end()) {
+        error.code = ConfigErrorCode::kInvalidValue;
+        error.path = path;
+        error.message = "unsupported value";
+        return false;
+    }
+    if (!schema.grammar.empty() && !matches_grammar(schema.grammar, value)) {
+        error.code = ConfigErrorCode::kInvalidValue;
+        error.path = path;
+        error.message = "unsupported value";
+        return false;
+    }
+    if (schema.max_bytes != 0 && value.size() > schema.max_bytes) {
+        error.code = ConfigErrorCode::kResourceLimit;
+        error.path = path;
+        error.message = "value exceeds the size limit";
+        return false;
+    }
+    return true;
+}
+
 // Phase 2: types, required members, exact values, integer bounds and
 // cross-member equality. The unknown-field sweep guarantees every fixed
 // object key here is declared, so member lookup cannot fail; the
@@ -1422,6 +1527,17 @@ bool check_unknown_fields(const Schema& schema, json_t* node, const std::string&
 bool validate_values(const Schema& schema, json_t* node, const std::string& path,
                      ConfigError& error) {
     switch (schema.kind) {
+    case Schema::Kind::kStringOrObject:
+        if (json_is_string(node)) {
+            return validate_string_leaf(schema, node, path, error);
+        }
+        if (!json_is_object(node)) {
+            error.code = ConfigErrorCode::kInvalidValue;
+            error.path = path;
+            error.message = "expected a JSON string or object";
+            return false;
+        }
+        [[fallthrough]];
     case Schema::Kind::kObject: {
         if (!json_is_object(node)) {
             error.code = ConfigErrorCode::kInvalidValue;
@@ -1569,53 +1685,8 @@ bool validate_values(const Schema& schema, json_t* node, const std::string& path
             }
         }
         return true;
-    case Schema::Kind::kString: {
-        if (!json_is_string(node)) {
-            error.code = ConfigErrorCode::kInvalidValue;
-            error.path = path;
-            error.message = "expected a JSON string";
-            return false;
-        }
-        // Byte-aware view: json_string_length() preserves embedded NULs that
-        // a C-string comparison would silently truncate. Every string value
-        // rejects NUL bytes first with the field path; NUL object keys never
-        // reach this code because the upstream parser rejects them.
-        const std::string_view value =
-            std::string_view(json_string_value(node), json_string_length(node));
-        if (value.find('\0') != std::string_view::npos) {
-            error.code = ConfigErrorCode::kInvalidValue;
-            error.path = path;
-            error.message = "value contains a NUL byte";
-            return false;
-        }
-        if (!schema.expected_string.empty() && value != schema.expected_string) {
-            error.code = ConfigErrorCode::kInvalidValue;
-            error.path = path;
-            error.message = "unsupported value";
-            return false;
-        }
-        if (!schema.allowed_strings.empty() &&
-            std::find(schema.allowed_strings.begin(), schema.allowed_strings.end(), value) ==
-                schema.allowed_strings.end()) {
-            error.code = ConfigErrorCode::kInvalidValue;
-            error.path = path;
-            error.message = "unsupported value";
-            return false;
-        }
-        if (!schema.grammar.empty() && !matches_grammar(schema.grammar, value)) {
-            error.code = ConfigErrorCode::kInvalidValue;
-            error.path = path;
-            error.message = "unsupported value";
-            return false;
-        }
-        if (schema.max_bytes != 0 && value.size() > schema.max_bytes) {
-            error.code = ConfigErrorCode::kResourceLimit;
-            error.path = path;
-            error.message = "value exceeds the size limit";
-            return false;
-        }
-        return true;
-    }
+    case Schema::Kind::kString:
+        return validate_string_leaf(schema, node, path, error);
     case Schema::Kind::kInteger:
         if (!json_is_integer(node)) {
             error.code = ConfigErrorCode::kInvalidValue;
@@ -1627,6 +1698,12 @@ bool validate_values(const Schema& schema, json_t* node, const std::string& path
             error.code = ConfigErrorCode::kInvalidValue;
             error.path = path;
             error.message = "value below minimum";
+            return false;
+        }
+        if (schema.max_value.has_value() && json_integer_value(node) > *schema.max_value) {
+            error.code = ConfigErrorCode::kInvalidValue;
+            error.path = path;
+            error.message = "value exceeds maximum";
             return false;
         }
         return true;
@@ -1684,6 +1761,24 @@ bool valid_binding_id(std::string_view value) {
     for (const char c : value) {
         const unsigned char ch = static_cast<unsigned char>(c);
         if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_tenant_id(std::string_view value) {
+    if (value.empty() || value.size() > 63) {
+        return false;
+    }
+    const unsigned char first = static_cast<unsigned char>(value.front());
+    if (!((first >= 'a' && first <= 'z') || (first >= '0' && first <= '9'))) {
+        return false;
+    }
+    for (const char c : value) {
+        const unsigned char ch = static_cast<unsigned char>(c);
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' ||
+              ch == '-')) {
             return false;
         }
     }
@@ -1825,6 +1920,70 @@ bool check_host_consistency(json_t* root, ConfigError& error) {
             if (!check_pool_object_consistency(json_object_get(tier_obj, "pool"),
                                                std::string("/") + tier + "/pool", true, error)) {
                 return false;
+            }
+        }
+    }
+    const json_t* capacity = json_object_get(root, "capacity");
+    const json_t* memory = json_is_object(capacity) ? json_object_get(capacity, "memory") : nullptr;
+    if (json_is_object(memory)) {
+        const json_t* high_node = json_object_get(memory, "highWatermarkPercent");
+        const json_t* low_node = json_object_get(memory, "lowWatermarkPercent");
+        const json_int_t high = json_is_integer(high_node) ? json_integer_value(high_node) : 85;
+        const json_int_t low = json_is_integer(low_node) ? json_integer_value(low_node) : 75;
+        if (low >= high) {
+            error.code = ConfigErrorCode::kInvalidValue;
+            error.path = low_node != nullptr ? "/capacity/memory/lowWatermarkPercent"
+                                             : "/capacity/memory/highWatermarkPercent";
+            error.message = "lowWatermarkPercent must be less than highWatermarkPercent";
+            return false;
+        }
+    }
+    const auto check_tenant_quota = [&](const json_t* quota, const std::string& prefix) -> bool {
+        if (!json_is_object(quota)) {
+            return true;
+        }
+        const json_t* max_workers = json_object_get(quota, "maxWorkers");
+        if (json_is_integer(max_workers) &&
+            json_integer_value(max_workers) > kMaxStaticPoolWorkers) {
+            error.code = ConfigErrorCode::kResourceLimit;
+            error.path = prefix + "/maxWorkers";
+            error.message = "static pool worker limit exceeded";
+            return false;
+        }
+        const json_t* min_soft_node = json_object_get(quota, "minSoftMemory");
+        const json_t* hard_node = json_object_get(quota, "hardMemory");
+        if (json_is_string(min_soft_node) && json_is_string(hard_node)) {
+            std::uint64_t min_soft = 0;
+            std::uint64_t hard = 0;
+            if (units::parse_size_bytes(json_string_value(min_soft_node), &min_soft,
+                                        /*allow_bare_bytes=*/false) &&
+                units::parse_size_bytes(json_string_value(hard_node), &hard,
+                                        /*allow_bare_bytes=*/false) &&
+                min_soft > hard) {
+                error.code = ConfigErrorCode::kInvalidValue;
+                error.path = prefix + "/minSoftMemory";
+                error.message = "minSoftMemory cannot exceed hardMemory";
+                return false;
+            }
+        }
+        return true;
+    };
+    const json_t* tenancy = json_object_get(root, "tenancy");
+    if (json_is_object(tenancy)) {
+        if (!check_tenant_quota(json_object_get(tenancy, "defaultQuota"),
+                                "/tenancy/defaultQuota")) {
+            return false;
+        }
+        json_t* overrides = json_object_get(tenancy, "overrides");
+        if (json_is_object(overrides)) {
+            for (void* iter = json_object_iter(overrides); iter != nullptr;
+                 iter = json_object_iter_next(overrides, iter)) {
+                const std::string_view key(json_object_iter_key(iter),
+                                           json_object_iter_key_len(iter));
+                if (!check_tenant_quota(json_object_iter_value(iter),
+                                        "/tenancy/overrides/" + escape_pointer_component(key))) {
+                    return false;
+                }
             }
         }
     }

@@ -1093,8 +1093,12 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
     // 7. Build long-lived WorkerLaunchSpec for GenerationPool creation & replacements.
     auto spec = std::make_shared<WorkerLaunchSpec>();
     spec->worker_path = worker_path;
-    spec->source_name =
-        !options_.source_name.empty() ? options_.source_name : make_file_url_from_path(bundle_path);
+    const char* source_name_env = std::getenv("CAPSID_LOCAL_SOURCE_NAME");
+    spec->source_name = !options_.source_name.empty()
+                            ? options_.source_name
+                            : ((source_name_env != nullptr && source_name_env[0] != '\0')
+                                   ? std::string(source_name_env)
+                                   : make_file_url_from_path(bundle_path));
     spec->protocol =
         (!options_.protocol_explicit && has_host_config && host_cfg.channels.configured)
             ? ProtocolLaunch::from(host_cfg.channels)
@@ -1333,6 +1337,7 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
     listener_options.channel_service_budget = channel_budget;
     listener_options.initial_stream_window = stream_window;
     listener_options.max_request_body_bytes = body_limit;
+    listener_options.emit_channel_metrics = spec->ipc_metrics_enabled;
     auto listener = std::make_unique<ManagedListener>(std::move(listener_options));
     std::string listener_error;
     if (!listener->start(&listener_error)) {

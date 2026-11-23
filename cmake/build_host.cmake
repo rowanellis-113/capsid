@@ -34,12 +34,14 @@ if(CAPSID_BUILD_HOST)
         src/host/bytecode_attestation.cc
         src/host/config.cc
         src/host/channel_ledger.cc
+        src/host/eviction_coordinator.cc
         src/host/generation_identity.cc
         src/host/generation_pool.cc
         src/host/host_config_model.cc
         src/host/ipc_metrics.cc
         src/host/json_codec.cc
         src/host/listener_cors.cc
+        src/host/memory_sampler.cc
         src/host/metrics.cc
         src/host/parent_stop_monitor.cc
         src/host/policy_compiler.cc

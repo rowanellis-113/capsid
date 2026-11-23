@@ -105,6 +105,11 @@ class AdminBackend {
     virtual ~AdminBackend() = default;
     virtual DeployOutcome deploy(const std::string& application, const std::string& version,
                                  OperationStatus* status) = 0;
+    virtual DeployOutcome deploy(const std::string& application, const std::string& version,
+                                 const std::string& tenant, OperationStatus* status) {
+        (void)tenant;
+        return deploy(application, version, status);
+    }
     virtual DeployOutcome retire(const std::string& application, OperationStatus* status) = 0;
     virtual OperationStatus operation_status(const std::string& operation_id) = 0;
     virtual std::string app_status(const std::string& application) = 0;

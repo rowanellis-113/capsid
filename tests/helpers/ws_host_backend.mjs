@@ -364,7 +364,14 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
       mode === 'managed'
         ? ['ignore', 'pipe', 'pipe', 'pipe']
         : ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...options.env },
+    env:
+      mode !== 'managed'
+        ? {
+            ...process.env,
+            CAPSID_LOCAL_SOURCE_NAME: pathToFileURL(bundle).href,
+            ...options.env,
+          }
+        : { ...process.env, ...options.env },
   });
   childClosures.set(child, new Promise((resolve) => child.once('close', resolve)));
   if (mode !== 'managed') {

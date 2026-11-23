@@ -55,9 +55,16 @@ class FakeAdminBackend final : public capsid::host::AdminBackend {
   public:
     capsid::host::DeployOutcome deploy(const std::string& application, const std::string& version,
                                        capsid::host::OperationStatus* status) override {
+        return deploy(application, version, application, status);
+    }
+
+    capsid::host::DeployOutcome deploy(const std::string& application, const std::string& version,
+                                       const std::string& tenant,
+                                       capsid::host::OperationStatus* status) override {
         ++deploy_calls;
         last_application = application;
         last_version = version;
+        last_tenant = tenant;
         capsid::host::DeployOutcome outcome;
         outcome.operation_id = deploy_operation_id;
         status->operation_id = outcome.operation_id;
@@ -128,6 +135,7 @@ class FakeAdminBackend final : public capsid::host::AdminBackend {
     std::string operation_status_version = "v1";
     std::string last_application;
     std::string last_version;
+    std::string last_tenant;
     std::string last_operation;
 };
 
@@ -407,6 +415,31 @@ int main(int argc, char** argv) {
         }
         require(backend.total_calls() == 0,
                 "invalid Admin identifier reached a coordinator callback");
+
+        // Stage 3: invalid tenant identifier on POST /v1/deploy and App status.
+        const std::string bad_tenant_bodies[] = {
+            "{\"app\":\"orders\",\"version\":\"v1\",\"tenant\":\"Bad_Tenant\"}",
+            "{\"app\":\"orders\",\"version\":\"v1\",\"tenant\":\"\"}",
+            "{\"app\":\"orders\",\"version\":\"v1\",\"tenant\":123}",
+            "{\"app\":\"orders\",\"version\":\"v1\",\"tenant\":\"a\\u0000b\"}",
+        };
+        for (const std::string& body : bad_tenant_bodies) {
+            require_json_response(dispatch(options, peer,
+                                           request("POST", "/v1/deploy", "application/json", body),
+                                           &backend),
+                                  400, "invalid Admin Tenant ID");
+        }
+        require(backend.total_calls() == 0,
+                "invalid Admin Tenant ID reached a coordinator callback");
+
+        FakeAdminBackend bad_status_tenant_backend;
+        bad_status_tenant_backend.app_status_document =
+            "{\"active\":true,\"app\":\"orders\",\"tenant\":\"Bad_Tenant\","
+            "\"version\":\"v1\",\"generation\":\"sha256:" +
+            std::string(64, 'a') + "\"}";
+        require_json_response(
+            dispatch(options, peer, request("GET", "/v1/apps/orders"), &bad_status_tenant_backend),
+            500, "invalid backend App status tenant");
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -468,6 +501,25 @@ int main(int argc, char** argv) {
         require_json_response(response, 202, "Admin deployment submission");
         require(response.body.find("\"status\":\"active\"") != std::string::npos,
                 "Admin deployment response omitted its submitted status");
+        require(backend.last_tenant == "orders",
+                "omitted tenant did not default to application ID");
+
+        const capsid::host::AdminResponse tenanted =
+            dispatch(options, peer,
+                     request("POST", "/v1/deploy", "application/json",
+                             "{\"app\":\"orders\",\"version\":\"v2\",\"tenant\":\"vip-acme\"}"),
+                     &backend);
+        require_json_response(tenanted, 202, "Admin tenanted deployment submission");
+        require(backend.last_tenant == "vip-acme", "explicit deploy tenant did not reach backend");
+
+        backend.app_status_document = "{\"active\":true,\"app\":\"orders\",\"tenant\":\"vip-acme\","
+                                      "\"version\":\"v2\",\"generation\":\"sha256:" +
+                                      std::string(64, 'b') + "\"}";
+        const capsid::host::AdminResponse app_status =
+            dispatch(options, peer, request("GET", "/v1/apps/orders"), &backend);
+        require_json_response(app_status, 200, "tenanted App status");
+        require(app_status.body.find("\"tenant\":\"vip-acme\"") != std::string::npos,
+                "tenanted App status dropped tenant field");
         std::cout << "PASS" << std::endl;
         return 0;
     }

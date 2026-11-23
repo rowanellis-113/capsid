@@ -248,6 +248,48 @@ void test_state_documents_are_strict_and_canonical() {
                 parsed_retired.document.previous_generation == kGenerationTwo,
             "retired tombstone did not round-trip");
 
+    // Stage 3: optional tenant attribution (omitted in canonical JSON when empty or equal to app).
+    ActiveStateDocument tenanted;
+    tenanted.state = ActiveServiceState::kActive;
+    tenanted.application = "orders";
+    tenanted.version = "v2";
+    tenanted.generation = std::string(kGenerationTwo);
+    tenanted.tenant = "vip-acme";
+    const ActiveStateDocumentResult encoded_tenanted = encode_active_state_json(tenanted);
+    require(encoded_tenanted.ok &&
+                encoded_tenanted.canonical_json ==
+                    "{\"schema\":\"capsid-active-v1\",\"app\":\"orders\",\"tenant\":\"vip-acme\","
+                    "\"state\":\"active\",\"version\":\"v2\",\"generation\":\"" +
+                        std::string(kGenerationTwo) + "\"}",
+            "tenanted active state was not serialized canonically");
+    const ActiveStateDocumentResult parsed_tenanted =
+        parse_active_state_json("orders", encoded_tenanted.canonical_json);
+    require(parsed_tenanted.ok && parsed_tenanted.document.tenant == "vip-acme" &&
+                parsed_tenanted.document.effective_tenant() == "vip-acme",
+            "tenanted active state did not round-trip");
+
+    ActiveStateDocument default_tenant = tenanted;
+    default_tenant.tenant = "orders";
+    const ActiveStateDocumentResult encoded_default_tenant =
+        encode_active_state_json(default_tenant);
+    require(encoded_default_tenant.ok &&
+                encoded_default_tenant.canonical_json.find("\"tenant\"") == std::string::npos,
+            "default tenant equal to app must omit tenant field from active.json");
+    const ActiveStateDocumentResult parsed_default_tenant = parse_active_state_json(
+        "orders", "{\"schema\":\"capsid-active-v1\",\"app\":\"orders\",\"tenant\":\"orders\","
+                  "\"state\":\"active\",\"version\":\"v2\",\"generation\":\"" +
+                      std::string(kGenerationTwo) + "\"}");
+    require(parsed_default_tenant.ok && parsed_default_tenant.document.tenant.empty() &&
+                parsed_default_tenant.document.effective_tenant() == "orders",
+            "tenant equal to app did not normalize to empty/effective_tenant");
+    const ActiveStateDocumentResult bad_tenant = parse_active_state_json(
+        "orders", "{\"schema\":\"capsid-active-v1\",\"app\":\"orders\",\"tenant\":\"Bad_Tenant\","
+                  "\"state\":\"active\",\"version\":\"v2\",\"generation\":\"" +
+                      std::string(kGenerationTwo) + "\"}");
+    require(!bad_tenant.ok && bad_tenant.error.code == ActiveStateErrorCode::kInvalidValue &&
+                bad_tenant.error.path == "/tenant",
+            "invalid active.json tenant was not rejected");
+
     const std::string expected_quarantined = "{\"schema\":\"capsid-active-v1\",\"app\":\"orders\","
                                              "\"state\":\"quarantined\","
                                              "\"version\":\"2026-07-31-002\","

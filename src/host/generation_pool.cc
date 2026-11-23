@@ -182,8 +182,10 @@ std::shared_ptr<GenerationPool> GenerationPool::create_adopted(GenerationPoolOpt
     if (options.workers == 0 || min_ready > options.workers || warmed.size() < min_ready ||
         warmed.size() > options.workers) {
         if (error != nullptr) {
-            *error = "adopted generation pool requires between minReady and workers "
-                     "pre-warmed workers";
+            *error = (min_ready == options.workers)
+                         ? "adopted generation pool requires exactly workers pre-warmed workers"
+                         : "adopted generation pool requires between minReady and workers "
+                           "pre-warmed workers";
         }
         // Mismatched input: destroy every worker handed in — the caller
         // transferred ownership by calling create_adopted.
@@ -505,11 +507,12 @@ bool GenerationPool::recycle_worker(WorkerExecutor* target) {
     return true;
 }
 
-GenerationPool::ScaleOutResult GenerationPool::request_scale_out() {
+GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* rejection_reason) {
     std::size_t target_slot = slots_.size();
     bool needs_elastic = false;
     bool spawning_already = false;
     std::function<bool()> acquire_cb;
+    std::function<bool(const GenerationPool*, std::string*)> acquire_slot_cb;
     std::function<void()> release_cb;
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -543,28 +546,56 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out() {
             return ScaleOutResult::kSpawnInFlight;
         }
         if (target_slot == slots_.size()) {
-            return spawning_already ? ScaleOutResult::kSpawnInFlight : ScaleOutResult::kAtAppMax;
+            if (spawning_already) {
+                return ScaleOutResult::kSpawnInFlight;
+            }
+            if (rejection_reason != nullptr) {
+                *rejection_reason = "app_max_workers";
+            }
+            if (options_.metrics != nullptr) {
+                options_.metrics->count_pool_rejection(options_.application_id,
+                                                       std::string(tenant_id()), "app_max_workers");
+            }
+            return ScaleOutResult::kAtAppMax;
         }
         needs_elastic = non_elastic_active >= min_ready_;
         slots_[target_slot].replacement_in_flight = true;
         slots_[target_slot].scale_out_spawn = true;
         ++replacements_scheduled_;
         acquire_cb = options_.acquire_elastic_slot;
+        acquire_slot_cb = options_.acquire_worker_slot;
         release_cb = options_.release_elastic_slot;
     }
 
-    if (needs_elastic && acquire_cb) {
-        if (!acquire_cb()) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            Slot& s = slots_[target_slot];
-            s.replacement_in_flight = false;
-            s.scale_out_spawn = false;
-            if (replacements_scheduled_ > 0) {
-                --replacements_scheduled_;
+    if (needs_elastic && (acquire_slot_cb || acquire_cb)) {
+        std::string reason = "host_capacity_exhausted";
+        const bool acquired = acquire_slot_cb ? acquire_slot_cb(this, &reason) : acquire_cb();
+        if (!acquired) {
+            if (reason.empty()) {
+                reason = "host_capacity_exhausted";
             }
-            const bool active_spawn = spawning_already || replacements_scheduled_ > 0;
-            return active_spawn ? ScaleOutResult::kSpawnInFlight
-                                : ScaleOutResult::kCapacityRejected;
+            bool active_spawn = false;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                Slot& s = slots_[target_slot];
+                s.replacement_in_flight = false;
+                s.scale_out_spawn = false;
+                if (replacements_scheduled_ > 0) {
+                    --replacements_scheduled_;
+                }
+                active_spawn = spawning_already || replacements_scheduled_ > 0;
+            }
+            if (active_spawn) {
+                return ScaleOutResult::kSpawnInFlight;
+            }
+            if (rejection_reason != nullptr) {
+                *rejection_reason = reason;
+            }
+            if (options_.metrics != nullptr) {
+                options_.metrics->count_pool_rejection(options_.application_id,
+                                                       std::string(tenant_id()), reason);
+            }
+            return ScaleOutResult::kCapacityRejected;
         }
     }
 
@@ -578,7 +609,7 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out() {
             if (replacements_scheduled_ > 0) {
                 --replacements_scheduled_;
             }
-            roll_back_elastic = needs_elastic && acquire_cb;
+            roll_back_elastic = needs_elastic && (acquire_slot_cb || acquire_cb);
         } else {
             s.elastic_held = needs_elastic && static_cast<bool>(release_cb);
             replacement_due_ms_[target_slot] = steady_ms();
@@ -602,6 +633,45 @@ bool GenerationPool::scale_out_in_flight() const {
     return false;
 }
 
+std::size_t GenerationPool::active_or_spawning_workers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != State::kActive) {
+        return 0;
+    }
+    std::size_t count = 0;
+    for (const Slot& slot : slots_) {
+        if ((slot.ready && !slot.shutdown_issued) || slot.replacement_in_flight) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::vector<GenerationPool::WorkerSlotSnapshot> GenerationPool::snapshot_workers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<WorkerSlotSnapshot> out;
+    if (state_ != State::kActive) {
+        return out;
+    }
+    out.reserve(slots_.size());
+    for (std::size_t index = 0; index < slots_.size(); ++index) {
+        const Slot& slot = slots_[index];
+        if (!slot.ready || slot.shutdown_issued || slot.executor == nullptr) {
+            continue;
+        }
+        WorkerSlotSnapshot snap;
+        snap.slot_index = index;
+        snap.pid = slot.executor->process_id();
+        snap.cgroup_path = slot.executor->cgroup_path();
+        snap.started_at_ms = slot.executor->started_at_ms();
+        snap.last_active_at_ms = slot.executor->last_active_at_ms();
+        snap.idle = slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+        snap.elastic_held = slot.elastic_held;
+        out.push_back(std::move(snap));
+    }
+    return out;
+}
+
 void GenerationPool::set_scale_callbacks(
     std::function<void()> on_worker_ready,
     std::function<void(const std::string& reason)> on_scale_out_failed) {
@@ -610,7 +680,8 @@ void GenerationPool::set_scale_callbacks(
     on_scale_out_failed_ = std::move(on_scale_out_failed);
 }
 
-bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std::string& reason) {
+bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std::string& reason,
+                                       bool require_elastic_held) {
     bool release_elastic = false;
     std::function<void()> release_cb;
     std::function<void(const std::string&)> eviction_cb;
@@ -626,6 +697,9 @@ bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std
             const std::size_t index = rev - 1;
             const Slot& s = slots_[index];
             if (!s.ready || s.executor == nullptr || s.replacement_in_flight) {
+                continue;
+            }
+            if (require_elastic_held && !s.elastic_held) {
                 continue;
             }
             if (s.executor->inflight() != 0 || s.executor->connection_owners() != 0) {
@@ -664,6 +738,10 @@ bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std
     }
     if (release_elastic && release_cb) {
         release_cb();
+    }
+    if (options_.metrics != nullptr) {
+        options_.metrics->count_pool_eviction(options_.application_id, std::string(tenant_id()),
+                                              reason);
     }
     if (eviction_cb) {
         eviction_cb(reason);
@@ -934,8 +1012,14 @@ void GenerationPool::pump_loop() {
                 for (std::size_t k = 0; k < idle_elastic_releases && release_cb; ++k) {
                     release_cb();
                 }
-                for (std::size_t k = 0; k < idle_evictions && eviction_cb; ++k) {
-                    eviction_cb("idle_timeout");
+                for (std::size_t k = 0; k < idle_evictions; ++k) {
+                    if (options_.metrics != nullptr) {
+                        options_.metrics->count_pool_eviction(
+                            options_.application_id, std::string(tenant_id()), "idle_timeout");
+                    }
+                    if (eviction_cb) {
+                        eviction_cb("idle_timeout");
+                    }
                 }
                 lock.lock();
             }

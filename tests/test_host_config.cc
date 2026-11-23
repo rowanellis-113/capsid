@@ -706,6 +706,62 @@ void test_v2_orthogonal_host_and_app_validation() {
                   R"json({"apiVersion":"capsid/app-v2","pool":{"workers":4097}})json",
                   ConfigErrorCode::kResourceLimit, "/pool/workers",
                   "App v2 pool.workers exceeds limit");
+    // Stage 3: host-v2 capacity.memory (string shorthand + object) & tenancy.
+    require_unknown_field(ConfigDocument::kApplication,
+                          R"json({"apiVersion":"capsid/app-v1","tenant":"acme"})json", "/tenant",
+                          "App v1 rejects tenant");
+    require_valid(ConfigDocument::kHost,
+                  R"json({
+          "apiVersion":"capsid/host-v2",
+          "paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},
+          "admin":{"unix":"/run/capsid/admin.sock"},
+          "listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],
+          "capacity":{"workersTotal":64,"memory":"2GiB"},
+          "tenancy":{
+            "defaultQuota":{"maxWorkers":16,"hardMemory":"512MiB"},
+            "overrides":{"vip-acme":{"maxWorkers":64,"minSoftMemory":"256MiB","hardMemory":"2GiB"}}
+          }
+        })json",
+                  "Host v2 capacity.memory string + tenancy");
+    require_valid(ConfigDocument::kHost,
+                  R"json({
+          "apiVersion":"capsid/host-v2",
+          "paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},
+          "admin":{"unix":"/run/capsid/admin.sock"},
+          "listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],
+          "capacity":{"workersTotal":64,"memory":{"limit":"2GiB","highWatermarkPercent":90,"lowWatermarkPercent":70,"minResidency":"0s","checkInterval":"2s"}}
+        })json",
+                  "Host v2 capacity.memory object");
+    require_error(ConfigDocument::kHost,
+                  R"json({
+          "apiVersion":"capsid/host-v2",
+          "paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},
+          "admin":{"unix":"/run/capsid/admin.sock"},
+          "listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],
+          "capacity":{"workersTotal":64,"memory":{"limit":"2GiB","highWatermarkPercent":80,"lowWatermarkPercent":80}}
+        })json",
+                  ConfigErrorCode::kInvalidValue, "/capacity/memory/lowWatermarkPercent",
+                  "Host v2 rejects lowWatermarkPercent >= highWatermarkPercent");
+    require_error(ConfigDocument::kHost,
+                  R"json({
+          "apiVersion":"capsid/host-v2",
+          "paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},
+          "admin":{"unix":"/run/capsid/admin.sock"},
+          "listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],
+          "tenancy":{"overrides":{"Bad_Tenant":{"maxWorkers":4}}}
+        })json",
+                  ConfigErrorCode::kInvalidValue, "/tenancy/overrides/Bad_Tenant",
+                  "Host v2 rejects invalid tenant ID grammar");
+    require_error(ConfigDocument::kHost,
+                  R"json({
+          "apiVersion":"capsid/host-v2",
+          "paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},
+          "admin":{"unix":"/run/capsid/admin.sock"},
+          "listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],
+          "tenancy":{"defaultQuota":{"minSoftMemory":"512MiB","hardMemory":"256MiB"}}
+        })json",
+                  ConfigErrorCode::kInvalidValue, "/tenancy/defaultQuota/minSoftMemory",
+                  "Host v2 rejects minSoftMemory > hardMemory");
 }
 
 } // namespace

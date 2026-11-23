@@ -62,6 +62,8 @@ class AsyncAdminBackend final : public AdminBackend {
 
     DeployOutcome deploy(const std::string& application, const std::string& version,
                          OperationStatus* status) override;
+    DeployOutcome deploy(const std::string& application, const std::string& version,
+                         const std::string& tenant, OperationStatus* status) override;
     DeployOutcome retire(const std::string& application, OperationStatus* status) override;
     OperationStatus operation_status(const std::string& operation_id) override;
     std::string app_status(const std::string& application) override;
@@ -71,11 +73,12 @@ class AsyncAdminBackend final : public AdminBackend {
         bool retire = false;
         std::string application;
         std::string version;
+        std::string tenant;
         std::string operation_id;
     };
     void worker_loop();
     DeployOutcome submit(bool retire, const std::string& application, const std::string& version,
-                         OperationStatus* status);
+                         const std::string& tenant, OperationStatus* status);
 
     AdminBackend* inner_;
     std::size_t max_pending_;
@@ -224,6 +227,8 @@ class ManagedAdminBackend final : public AdminBackend {
 
     DeployOutcome deploy(const std::string& application, const std::string& version,
                          OperationStatus* status) override;
+    DeployOutcome deploy(const std::string& application, const std::string& version,
+                         const std::string& tenant, OperationStatus* status) override;
     DeployOutcome retire(const std::string& application, OperationStatus* status) override;
     OperationStatus operation_status(const std::string& operation_id) override;
     std::string app_status(const std::string& application) override;

@@ -135,8 +135,8 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "ea05a91dd5b207083baeeb30e7e10bdd6b62c660fd49b5682b81618e3c8be452",
-      "review": "Comprehensive architecture and configuration evolution proposal covering Phase 1 orthogonal Config v2 + managed-isomorphic local CLI and Phase 2 v0.3.2 multi-tenant elastic worker pools with two-phase fair-share memory LRU; marked not yet implemented in v0.3.1-beta."
+      "sha256": "c5b65897e27a713fe46c98f294a7e530c853fb6148826430caaf2ca6f75d7300",
+      "review": "Config v2 orthogonal host-v2/app-v2 schema, managed-isomorphic local CLI, and v0.3.2 elastic pools + two-phase fair-share memory LRU implemented on dev/v0.3.2; v0.3.1-beta.1 release baseline stays separate in current-status.md."
     },
     {
       "path": "docs/conformance.md",

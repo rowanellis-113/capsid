@@ -620,6 +620,72 @@ bool parse_capacity_v2(json_t* root, CapacityConfig* out, ChannelsConfig* channe
             idle_ms > 86400000ULL) {
             return false;
         }
+        json_t* memory = json_object_get(capacity, "memory");
+        if (memory != nullptr) {
+            out->memory.configured = true;
+            if (json_is_string(memory)) {
+                if (!parse_size_bytes_text(json_string_value(memory), &out->memory.limit_bytes) ||
+                    out->memory.limit_bytes == 0) {
+                    return false;
+                }
+            } else if (json_is_object(memory)) {
+                json_t* limit = json_object_get(memory, "limit");
+                if (!json_is_string(limit) ||
+                    !parse_size_bytes_text(json_string_value(limit), &out->memory.limit_bytes) ||
+                    out->memory.limit_bytes == 0) {
+                    return false;
+                }
+                json_t* high_node = json_object_get(memory, "highWatermarkPercent");
+                if (high_node != nullptr) {
+                    if (!json_is_integer(high_node)) {
+                        return false;
+                    }
+                    const json_int_t v = json_integer_value(high_node);
+                    if (v < 1 || v > 100) {
+                        return false;
+                    }
+                    out->memory.high_watermark_percent = static_cast<std::uint32_t>(v);
+                }
+                json_t* low_node = json_object_get(memory, "lowWatermarkPercent");
+                if (low_node != nullptr) {
+                    if (!json_is_integer(low_node)) {
+                        return false;
+                    }
+                    const json_int_t v = json_integer_value(low_node);
+                    if (v < 1 || v > 100) {
+                        return false;
+                    }
+                    out->memory.low_watermark_percent = static_cast<std::uint32_t>(v);
+                }
+                if (out->memory.low_watermark_percent >= out->memory.high_watermark_percent) {
+                    return false;
+                }
+                json_t* residency = json_object_get(memory, "minResidency");
+                if (residency != nullptr) {
+                    std::uint64_t ms = 0;
+                    if (!json_is_string(residency) ||
+                        !units::parse_duration_ms(json_string_value(residency), &ms,
+                                                  /*allow_hours=*/false) ||
+                        ms > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+                        return false;
+                    }
+                    out->memory.min_residency_ms = ms;
+                }
+                json_t* interval = json_object_get(memory, "checkInterval");
+                if (interval != nullptr) {
+                    std::uint64_t ms = 0;
+                    if (!json_is_string(interval) ||
+                        !units::parse_duration_ms(json_string_value(interval), &ms,
+                                                  /*allow_hours=*/false) ||
+                        ms > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+                        return false;
+                    }
+                    out->memory.check_interval_ms = ms;
+                }
+            } else {
+                return false;
+            }
+        }
     }
     out->workers_total = workers_total;
     out->activation_surge_workers = std::max<std::uint64_t>(2, workers_total / 4);
@@ -655,6 +721,86 @@ bool parse_capacity_v2(json_t* root, CapacityConfig* out, ChannelsConfig* channe
     limits.idle_timeout_ms = channels_out->idle_timeout_ms;
     limits.per_channel_queue_bytes = channels_out->per_channel_queue_bytes;
     return capsid::protocol::validate_channel_limits(limits);
+}
+
+bool parse_tenant_quota(json_t* object, TenantQuotaConfig* out) {
+    if (!json_is_object(object)) {
+        return false;
+    }
+    json_t* max_workers = json_object_get(object, "maxWorkers");
+    if (max_workers != nullptr) {
+        if (!json_is_integer(max_workers)) {
+            return false;
+        }
+        const json_int_t value = json_integer_value(max_workers);
+        if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+            return false;
+        }
+        out->max_workers = static_cast<std::uint32_t>(value);
+    }
+    json_t* min_soft = json_object_get(object, "minSoftMemory");
+    if (min_soft != nullptr) {
+        if (!json_is_string(min_soft) ||
+            !parse_size_bytes_text(json_string_value(min_soft), &out->min_soft_memory_bytes) ||
+            out->min_soft_memory_bytes == 0) {
+            return false;
+        }
+    }
+    json_t* hard_memory = json_object_get(object, "hardMemory");
+    if (hard_memory != nullptr) {
+        if (!json_is_string(hard_memory) ||
+            !parse_size_bytes_text(json_string_value(hard_memory), &out->hard_memory_bytes) ||
+            out->hard_memory_bytes == 0) {
+            return false;
+        }
+    }
+    if (out->hard_memory_bytes != 0 && out->min_soft_memory_bytes > out->hard_memory_bytes) {
+        return false;
+    }
+    return true;
+}
+
+bool parse_tenancy_v2(json_t* root, TenancyConfig* out) {
+    json_t* tenancy = json_object_get(root, "tenancy");
+    if (tenancy == nullptr) {
+        return true;
+    }
+    if (!json_is_object(tenancy)) {
+        return false;
+    }
+    out->configured = true;
+    json_t* default_quota = json_object_get(tenancy, "defaultQuota");
+    if (default_quota != nullptr && !parse_tenant_quota(default_quota, &out->default_quota)) {
+        return false;
+    }
+    json_t* overrides = json_object_get(tenancy, "overrides");
+    if (overrides != nullptr) {
+        if (!json_is_object(overrides)) {
+            return false;
+        }
+        const char* key = nullptr;
+        json_t* value = nullptr;
+        json_object_foreach(overrides, key, value) {
+            if (!valid_tenant_id(key)) {
+                return false;
+            }
+            TenantQuotaConfig quota;
+            if (!parse_tenant_quota(value, &quota)) {
+                return false;
+            }
+            const std::uint64_t effective_min_soft = quota.min_soft_memory_bytes != 0
+                                                         ? quota.min_soft_memory_bytes
+                                                         : out->default_quota.min_soft_memory_bytes;
+            const std::uint64_t effective_hard = quota.hard_memory_bytes != 0
+                                                     ? quota.hard_memory_bytes
+                                                     : out->default_quota.hard_memory_bytes;
+            if (effective_hard != 0 && effective_min_soft > effective_hard) {
+                return false;
+            }
+            out->overrides[key] = quota;
+        }
+    }
+    return true;
 }
 
 bool parse_recovery(json_t* root, RecoveryConfig* out, bool is_v2) {
@@ -906,6 +1052,9 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
     if (is_v2) {
         if (!parse_capacity_v2(root, &config.capacity, &config.channels)) {
             return reject("invalid host.json capacity");
+        }
+        if (!parse_tenancy_v2(root, &config.tenancy)) {
+            return reject("invalid host.json tenancy");
         }
         config.channels.max_channels = static_cast<std::uint32_t>(
             std::min<std::uint64_t>(config.listeners[0].limits.channels, 1024ULL));

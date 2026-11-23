@@ -16,10 +16,12 @@
 #include "capsid/runtime.h"
 #if !defined(_WIN32)
 #include "host/admin_service.h"
+#include "host/eviction_coordinator.h"
 #include "host/host_config_model.h"
 #include "host/managed_admin_backend.h"
 #include "host/managed_listener.h"
 #include "host/managed_registry.h"
+#include "host/memory_sampler.h"
 #include "host/quarantine_dispatcher.h"
 #include "host/routing_snapshot.h"
 #endif
@@ -461,8 +463,12 @@ std::string read_host_config(const std::string& path) {
     capsid::host::StartupPermitCoordinator startup_permits(&g_stop, 8);
     capsid::host::GenerationReclaimer generation_reclaimer;
     capsid::host::QuarantineDispatcher quarantine_dispatcher;
+    capsid::host::MemorySampler memory_sampler;
+    capsid::host::GlobalEvictionCoordinator eviction_coordinator(
+        config.capacity.memory, config.tenancy, &ledger, &memory_sampler, metrics.get());
     const auto adopt_generation =
-        [&](const std::string& application, const std::vector<capsid_worker*>& workers,
+        [&](const std::string& application, const std::string& tenant,
+            const std::vector<capsid_worker*>& workers,
             const capsid::host::WorkerExecutor::WorkerFactory& factory, const std::string& version,
             const std::string& generation_digest, const capsid::host::EffectiveConfig& effective)
         -> std::shared_ptr<capsid::host::GenerationPool> {
@@ -475,15 +481,18 @@ std::string read_host_config(const std::string& path) {
         }
         capsid::host::GenerationPoolOptions pool_options;
         pool_options.application_id = application;
+        pool_options.tenant_id = tenant.empty() ? application : tenant;
         pool_options.version = version;
         pool_options.generation_digest = generation_digest;
         pool_options.workers = effective.workers;
         pool_options.has_min_ready = true;
         pool_options.min_ready = effective.min_ready;
         pool_options.idle_timeout_ms = effective.idle_timeout_ms;
-        pool_options.acquire_elastic_slot = [&ledger, application] {
-            return ledger.try_acquire_elastic(application);
-        };
+        pool_options.acquire_worker_slot =
+            [&eviction_coordinator](const capsid::host::GenerationPool* requester,
+                                    std::string* rejection_reason) {
+                return eviction_coordinator.acquire_worker_slot(requester, rejection_reason);
+            };
         pool_options.release_elastic_slot = [&ledger, application] {
             ledger.release_elastic(application, 1);
         };
@@ -632,9 +641,9 @@ std::string read_host_config(const std::string& path) {
         plan->version = prepared.version;
         plan->generation_digest = prepared.generation_digest;
         plan->new_workers = prepared.effective.min_ready;
-        std::shared_ptr<capsid::host::GenerationPool> pool =
-            adopt_generation(application, prepared.workers, prepared.generation_factory,
-                             prepared.version, prepared.generation_digest, prepared.effective);
+        std::shared_ptr<capsid::host::GenerationPool> pool = adopt_generation(
+            application, prepared.tenant, prepared.workers, prepared.generation_factory,
+            prepared.version, prepared.generation_digest, prepared.effective);
         if (pool == nullptr) {
             *error = "cannot activate the new generation";
             return nullptr;
@@ -672,8 +681,10 @@ std::string read_host_config(const std::string& path) {
             // Drain signal only: new requests route to the new pool,
             // in-flight requests finish on the old one, and a drained
             // generation never starts a replacement.
+            eviction_coordinator.unregister_pool(plan->old_pool.get());
             plan->old_pool->request_drain();
         }
+        eviction_coordinator.register_pool(plan->new_pool);
         const auto entry = active_pools.find(plan->application);
         if (entry != active_pools.end()) {
             entry->second = plan->new_pool;
@@ -752,6 +763,7 @@ std::string read_host_config(const std::string& path) {
         if (plan->pool != nullptr) {
             // Drain signal only; the reference is parked in
             // draining_pools.
+            eviction_coordinator.unregister_pool(plan->pool.get());
             plan->pool->request_drain();
         }
         routing->publish(plan->new_snapshot);
@@ -812,6 +824,11 @@ std::string read_host_config(const std::string& path) {
         options->prepare_retire = prepare_retire;
         options->commit_retire = commit_retire;
         options->abort_retire = abort_retire;
+        options->check_tenant_deploy = [&eviction_coordinator, application = options->application](
+                                           const std::string& tenant, std::uint32_t min_ready,
+                                           std::string* error) {
+            return eviction_coordinator.check_deploy_quota(application, tenant, min_ready, error);
+        };
     }
     // Startup recovery: a durable active App is revalidated and its
     // replacement worker reaches READY before Admin readiness is
@@ -835,9 +852,10 @@ std::string read_host_config(const std::string& path) {
             // The reserve was committed inside run_recover_operation
             // (reserve_fresh before any spawn); a fresh adoption has
             // nothing further to settle.
-            const std::shared_ptr<capsid::host::GenerationPool> pool = adopt_generation(
-                options->application, recovered.workers, recovered.generation_factory,
-                recovered.version, recovered.generation_digest, recovered.effective);
+            const std::shared_ptr<capsid::host::GenerationPool> pool =
+                adopt_generation(options->application, recovered.tenant, recovered.workers,
+                                 recovered.generation_factory, recovered.version,
+                                 recovered.generation_digest, recovered.effective);
             if (pool == nullptr) {
                 fail("cannot activate the recovered pool for application " + options->application);
             }
@@ -845,6 +863,7 @@ std::string read_host_config(const std::string& path) {
             {
                 std::lock_guard<std::mutex> lock(pools_mutex);
                 active_pools[options->application] = pool;
+                eviction_coordinator.register_pool(pool);
                 publish_snapshot();
             }
         } else if (recovered.recovery_action ==
@@ -945,6 +964,7 @@ std::string read_host_config(const std::string& path) {
     if (!service.start(&service_error)) {
         fail("cannot start admin service: " + service_error);
     }
+    eviction_coordinator.start();
     // Shutdown order: stop the Admin control plane, cancel queued/running
     // deploys, reclaim active workers, then exit. The service's wait
     // removes the socket inode it created.
@@ -953,6 +973,7 @@ std::string read_host_config(const std::string& path) {
         fail("cannot wait for SIGTERM");
     }
     g_stop.store(true);
+    eviction_coordinator.stop_and_join();
     service.request_stop();
     if (!service.wait(&service_error)) {
         fail("admin service failed: " + service_error);

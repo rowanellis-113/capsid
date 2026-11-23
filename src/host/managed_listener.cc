@@ -7,6 +7,7 @@
 // request-id spaces.
 
 #include "host/managed_listener.h"
+#include "host/channel_ledger.h"
 #include "host/client_disconnect.h"
 #include "host/credit_limits.h"
 #include "host/metrics.h"
@@ -470,6 +471,8 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
                            const NormalizedPublicRequest& normalized);
     void pump_pool_queue(const GenerationPool* pool_key);
     void fail_pool_queue_unavailable(const GenerationPool* pool_key);
+    struct PoolQueue;
+    void expire_front_queued(PoolQueue& pq);
     void arm_queue_timer(const GenerationPool* pool_key);
     void on_queue_timer(const GenerationPool* pool_key, const beast::error_code ec);
     void cancel_queued_for_session(const GenerationPool* pool_key,
@@ -488,6 +491,7 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     void write_end_block(const WorkerExecutor* executor, std::uint64_t request_id);
     void finalize_request(const WorkerExecutor* executor, std::uint64_t request_id,
                           std::shared_ptr<ListenerSession> session);
+    void write_channel_metrics_line();
     bool response_may_complete_early(const WorkerExecutor* executor,
                                      std::uint64_t request_id) const;
     void cancel_request(const WorkerExecutor* executor, std::uint64_t request_id);
@@ -1291,6 +1295,11 @@ void ManagedListenerImpl::enqueue_or_reject(const std::shared_ptr<GenerationPool
     const std::uint64_t max_q = pool->max_queued_requests();
     if (max_q == 0) {
         session->current_pool_.reset();
+        if (options_.metrics != nullptr) {
+            options_.metrics->count_pool_rejection(std::string(pool->application_id()),
+                                                   std::string(pool->tenant_id()),
+                                                   "queue_disabled");
+        }
         const bool cold = pool->ready_workers() == 0;
         session->send_simple(cold ? http::status::service_unavailable
                                   : http::status::too_many_requests,
@@ -1304,6 +1313,10 @@ void ManagedListenerImpl::enqueue_or_reject(const std::shared_ptr<GenerationPool
     if (pq.entries.size() >= max_q ||
         (max_hdr_bytes != 0 && pq.queued_bytes + req_bytes > max_hdr_bytes)) {
         session->current_pool_.reset();
+        if (options_.metrics != nullptr) {
+            options_.metrics->count_pool_rejection(std::string(pool->application_id()),
+                                                   std::string(pool->tenant_id()), "queue_full");
+        }
         if (pq.entries.empty()) {
             pool_queues_.erase(pool.get());
         }
@@ -1340,15 +1353,7 @@ void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
     while (!pq.entries.empty()) {
         QueuedRequest& front = pq.entries.front();
         if (front.deadline && now >= *front.deadline) {
-            QueuedRequest expired = std::move(front);
-            pq.entries.pop_front();
-            pq.queued_bytes -= expired.bytes;
-            if (expired.session && !expired.session->closed()) {
-                expired.session->current_pool_.reset();
-                expired.session->send_simple(http::status::gateway_timeout,
-                                             "queued request timeout", expired.request.keep_alive(),
-                                             expired.request.version());
-            }
+            expire_front_queued(pq);
             continue;
         }
         std::shared_ptr<GenerationPool> pool = front.pool;
@@ -1373,7 +1378,8 @@ void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
         }
         const std::uint64_t max_inflight = pool->max_inflight_per_worker();
         if (max_inflight != 0 && executor->inflight() >= max_inflight) {
-            if (pool->is_elastic()) {
+            if (pool->is_elastic() && !pool->scale_out_in_flight() &&
+                pool->ready_workers() < pool->max_workers()) {
                 (void)pool->request_scale_out();
             }
             break;
@@ -1478,6 +1484,22 @@ void ManagedListenerImpl::arm_queue_timer(const GenerationPool* pool_key) {
     });
 }
 
+void ManagedListenerImpl::expire_front_queued(PoolQueue& pq) {
+    QueuedRequest expired = std::move(pq.entries.front());
+    pq.entries.pop_front();
+    pq.queued_bytes -= expired.bytes;
+    if (expired.pool && options_.metrics != nullptr) {
+        options_.metrics->count_pool_rejection(std::string(expired.pool->application_id()),
+                                               std::string(expired.pool->tenant_id()),
+                                               "queue_timeout");
+    }
+    if (expired.session && !expired.session->closed()) {
+        expired.session->current_pool_.reset();
+        expired.session->send_simple(http::status::gateway_timeout, "queued request timeout",
+                                     expired.request.keep_alive(), expired.request.version());
+    }
+}
+
 void ManagedListenerImpl::on_queue_timer(const GenerationPool* pool_key,
                                          const beast::error_code ec) {
     if (ec == asio::error::operation_aborted || stop_requested_.load(std::memory_order_acquire)) {
@@ -1491,14 +1513,7 @@ void ManagedListenerImpl::on_queue_timer(const GenerationPool* pool_key,
     const auto now = std::chrono::steady_clock::now();
     while (!pq.entries.empty() && pq.entries.front().deadline &&
            now >= *pq.entries.front().deadline) {
-        QueuedRequest expired = std::move(pq.entries.front());
-        pq.entries.pop_front();
-        pq.queued_bytes -= expired.bytes;
-        if (expired.session && !expired.session->closed()) {
-            expired.session->current_pool_.reset();
-            expired.session->send_simple(http::status::gateway_timeout, "queued request timeout",
-                                         expired.request.keep_alive(), expired.request.version());
-        }
+        expire_front_queued(pq);
     }
     arm_queue_timer(pool_key);
 }
@@ -1665,6 +1680,7 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
                     if (auto alive = weak.lock()) {
                         alive->websockets_.erase({executor, id});
                         session->close();
+                        alive->write_channel_metrics_line();
                     }
                 },
                 channel_budget_);
@@ -1680,6 +1696,7 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
             const_cast<WorkerExecutor*>(executor)->retire_terminal_request(event.request_id);
             pump_pool_queue(pool.get());
             connection->start(std::move(handshake), std::move(leftovers));
+            write_channel_metrics_line();
             return;
         }
         if (pending.lease)
@@ -2267,6 +2284,7 @@ void ManagedListenerImpl::write_end_block(const WorkerExecutor* executor,
                               }
                           }
                           self->pump_pool_queue(pool.get());
+                          self->write_channel_metrics_line();
                       });
 }
 
@@ -2283,6 +2301,18 @@ bool ManagedListenerImpl::response_may_complete_early(const WorkerExecutor* exec
     if (pending.cl_known)
         return pending.cl_remaining == 0;
     return pending.end_seen && pending.response && !pending.response->body().more;
+}
+
+void ManagedListenerImpl::write_channel_metrics_line() {
+    if (!options_.emit_channel_metrics) {
+        return;
+    }
+    const std::string line =
+        "capsid-host: channel-metrics {\"service\":" +
+        channel_budget_metrics_json(service_channel_budget_->snapshot()) +
+        ",\"listener\":" + channel_budget_metrics_json(channel_budget_->snapshot()) + "}\n";
+    std::fwrite(line.data(), 1, line.size(), stderr);
+    std::fflush(stderr);
 }
 
 void ManagedListenerImpl::finalize_request(const WorkerExecutor* executor, std::uint64_t request_id,
@@ -2303,6 +2333,7 @@ void ManagedListenerImpl::finalize_request(const WorkerExecutor* executor, std::
         }
     }
     pump_pool_queue(pool.get());
+    write_channel_metrics_line();
 }
 
 void ManagedListenerImpl::cancel_request(const WorkerExecutor* executor, std::uint64_t request_id) {
@@ -2327,6 +2358,7 @@ void ManagedListenerImpl::cancel_request(const WorkerExecutor* executor, std::ui
     cancel.request_id = request_id;
     const_cast<WorkerExecutor*>(executor)->submit(std::move(cancel));
     pump_pool_queue(pool.get());
+    write_channel_metrics_line();
 }
 
 void ManagedListenerImpl::fail_request(const WorkerExecutor* executor, std::uint64_t request_id,

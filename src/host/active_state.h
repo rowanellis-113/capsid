@@ -31,6 +31,11 @@ struct ActiveStateDocument {
     std::string previous_version;
     std::string previous_generation;
     std::string reason;
+    std::string tenant;
+
+    std::string_view effective_tenant() const noexcept {
+        return tenant.empty() ? std::string_view(application) : std::string_view(tenant);
+    }
 };
 
 enum class ActiveStateErrorCode {

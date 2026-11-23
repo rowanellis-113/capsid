@@ -1,7 +1,7 @@
 # Capsid 配置 v2 正交化重构与 v0.3.2 多租户弹性池架构方案
 
-> **状态：架构与配置演进设计方案（尚未在 v0.3.1-beta 中实现）。**
-> 本文档完整沉淀并收敛了围绕 **全量配置正交性重构（Config v2）**、**本地开发与 `managed` 生产产物同构** 以及 **v0.3.2 多租户弹性 Worker 池与全局内存预算 LRU 淘汰** 的全部架构讨论与设计决策。现行已交付行为请以 [Host 配置参考](host-config.md)、[capsid.json 指南](capsid-json.md) 与 [当前状态](current-status.md) 为准。
+> **状态：`dev/v0.3.2` 已分阶段落地 Phase 1（正交 Config v2 + 本地同构 CLI）与 Phase 2（弹性池扩缩容 + 全局内存水位二阶段公平 LRU）；`v0.3.1-beta.1` 发布基线仍以 [当前状态](current-status.md) 为准。**
+> 本文档完整沉淀并收敛了围绕 **全量配置正交性重构（Config v2）**、**本地开发与 `managed` 生产产物同构** 以及 **v0.3.2 多租户弹性 Worker 池与全局内存预算 LRU 淘汰** 的全部架构讨论与设计决策。现行 `v0.3.1-beta` 已发布版本参考请见 [Host 配置参考](host-config.md)、[capsid.json 指南](capsid-json.md) 与 [当前状态](current-status.md)。
 
 ---
 
@@ -483,7 +483,7 @@
    > 依靠已打通的 `defaults.pool`（默认提供 `idleTimeout: "60s"`, `queueRequests: 64`, `queueTimeout: "5s"`），应用甚至只需写 `"minReady": 0, "maxWorkers": 8` 两个数字，Scale-to-Zero 后的并发冷启动请求就会自动进入等待队列平滑等待 ~9ms，**绝不会因为忘配队列而直接抛 `503`**。
 
 2. **`host.json#capacity`（一行开启整机内存预算 LRU）**：
-   新增 `memory` 字段（支持 `"2GiB"` 极简字符串，自动推导 `85% / 75%` 水位与 `5s` 最小驻留期）：
+   新增 `memory` 字段（支持 `"2GiB"` 极简字符串自动推导 `85% / 75%` 水位与 `5s` 最小驻留期/巡检间隔，或对象形式 `{ limit, highWatermarkPercent=85, lowWatermarkPercent=75, minResidency="5s", checkInterval="5s" }`）：
    ```json
    "capacity": {
      "workersTotal": 512,

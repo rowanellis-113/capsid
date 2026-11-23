@@ -61,6 +61,7 @@ struct DeployOutcome {
     WorkerExecutor::WorkerFactory generation_factory;
     std::string version;
     std::string generation_digest;
+    std::string tenant;
     ActiveStateRecoveryAction recovery_action = ActiveStateRecoveryAction::kNone;
     EffectiveConfig effective;
     // Binding v1 §6: the committed immutable Binding snapshot; worker
@@ -132,6 +133,10 @@ struct ManagedHostOptions {
     // (design §12). Null disables event logging/metrics on this path.
     StructuredLog* log = nullptr;
     MetricsRegistry* metrics = nullptr;
+    // Stage 3: optional tenant quota pre-deploy check (runs before ledger reserve
+    // in both deploy and recovery). Return false to reject the deploy/recover.
+    std::function<bool(const std::string& tenant, std::uint32_t min_ready, std::string* error)>
+        check_tenant_deploy;
 };
 
 enum class OperationState {
@@ -167,6 +172,8 @@ enum class DeployErrorCode {
 // publishes the data-plane routing.
 DeployOutcome managed_deploy(ManagedHostOptions* options, const std::string& version,
                              OperationStatus* status);
+DeployOutcome managed_deploy(ManagedHostOptions* options, const std::string& version,
+                             const std::string& tenant, OperationStatus* status);
 
 // Retire the active App: persist the retired tombstone (no worker
 // restart). Returns the operation id.

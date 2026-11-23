@@ -4,6 +4,7 @@
 #include "host/metrics.h"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #if defined(_WIN32)
 #include "win32_compat.h"
@@ -31,6 +32,11 @@ process_snapshot_provider(std::function<pid_t()> worker_pid);
 // render path only, so its /proc reads never block the counter methods.
 MetricsRegistry::ProcessSnapshotProvider
 default_process_snapshot_provider(const std::atomic<pid_t>* worker_pid);
+
+// Read-only process memory footprint in bytes for eviction accounting.
+// On Linux prefers PSS from /proc/<pid>/smaps_rollup and falls back to RSS;
+// on Windows and macOS reads the process working set / resident size.
+bool read_process_footprint_bytes(std::int64_t pid, std::uint64_t* bytes_out);
 
 } // namespace capsid::host
 

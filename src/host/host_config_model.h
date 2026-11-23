@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -124,6 +125,27 @@ struct TierConfig {
 
 // ---- capacity / recovery ------------------------------------------------
 
+struct MemoryBudgetConfig {
+    bool configured = false;
+    std::uint64_t limit_bytes = 0;
+    std::uint32_t high_watermark_percent = 85;
+    std::uint32_t low_watermark_percent = 75;
+    std::uint64_t min_residency_ms = 5000;
+    std::uint64_t check_interval_ms = 5000;
+};
+
+struct TenantQuotaConfig {
+    std::uint32_t max_workers = 0;           // 0 = unlimited
+    std::uint64_t min_soft_memory_bytes = 0; // 0 = dynamic fair share only
+    std::uint64_t hard_memory_bytes = 0;     // 0 = unlimited
+};
+
+struct TenancyConfig {
+    bool configured = false;
+    TenantQuotaConfig default_quota;
+    std::map<std::string, TenantQuotaConfig> overrides;
+};
+
 // §9.4: workersTotal is the steady-state budget; the remaining capacity
 // fields are carried typed for the PR-10 weighted ledger. startupsConcurrent
 // is the startup-permit limit, NOT the Admin pending-queue ceiling.
@@ -141,6 +163,7 @@ struct CapacityConfig {
     std::uint64_t worker_memory_commit_total = 0;
     std::uint64_t max_channel_message_size = 1024ULL * 1024ULL;
     std::uint64_t channel_idle_timeout_ms = 60000;
+    MemoryBudgetConfig memory;
 };
 
 // GLM T08: host-level channel limits (FetchRPC v4 A2). Zero selects
@@ -205,6 +228,7 @@ struct ParsedHostConfig {
     TierConfig defaults;
     TierConfig maximums;
     CapacityConfig capacity;
+    TenancyConfig tenancy;
     // GLM T08: channel limits compiled into the generation snapshot;
     // presence requests channel capabilities on the worker wire.
     ChannelsConfig channels;

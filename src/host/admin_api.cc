@@ -198,15 +198,17 @@ std::string operation_state_text(OperationState state) {
 }
 
 // The deploy route is the only body-carrying endpoint. Strict parse:
-// exactly {"app": "...", "version": "..."} with no duplicates, unknown
-// fields, trailing content or wrong types. String values are constructed
-// through json_string_length so an embedded  cannot be silently
-// truncated by json_string_value; the NUL then fails the identifier
+// {"app": "...", "version": "..."} with optional {"tenant": "..."} and no
+// duplicates, unknown fields, trailing content or wrong types. String values
+// are constructed through json_string_length so an embedded NUL cannot be
+// silently truncated by json_string_value; the NUL then fails the identifier
 // grammar.
-bool parse_deploy_body(const std::string& body, std::string* application, std::string* version) {
+bool parse_deploy_body(const std::string& body, std::string* application, std::string* version,
+                       std::string* tenant) {
     json_error_t parse_error;
     json_t* root = json_loadb(body.data(), body.size(), JSON_REJECT_DUPLICATES, &parse_error);
-    if (root == nullptr || !json_is_object(root) || json_object_size(root) != 2) {
+    if (root == nullptr || !json_is_object(root) ||
+        (json_object_size(root) != 2 && json_object_size(root) != 3)) {
         if (root) {
             json_decref(root);
         }
@@ -214,18 +216,28 @@ bool parse_deploy_body(const std::string& body, std::string* application, std::s
     }
     json_t* app_json = json_object_get(root, "app");
     json_t* version_json = json_object_get(root, "version");
+    json_t* tenant_json = json_object_get(root, "tenant");
     if (!json_is_string(app_json) || !json_is_string(version_json)) {
+        json_decref(root);
+        return false;
+    }
+    if (json_object_size(root) == 3 && !json_is_string(tenant_json)) {
         json_decref(root);
         return false;
     }
     application->assign(json_string_value(app_json), json_string_length(app_json));
     version->assign(json_string_value(version_json), json_string_length(version_json));
+    if (tenant_json != nullptr) {
+        tenant->assign(json_string_value(tenant_json), json_string_length(tenant_json));
+    } else {
+        *tenant = *application;
+    }
     json_decref(root);
-    return valid_app_id(*application) && valid_version_id(*version);
+    return valid_app_id(*application) && valid_version_id(*version) && valid_app_id(*tenant);
 }
 
 // Strict re-derivation of the backend's App-status document. Only the
-// safe fields active/app/version/generation are allowed; duplicates,
+// safe fields active/app/tenant/version/generation are allowed; duplicates,
 // unknown fields, wrong types and malformed generation digests are
 // rejected so a backend string is never reflected verbatim. The canonical
 // document is rebuilt from the validated fields.
@@ -240,10 +252,7 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
         return false;
     }
     static const std::set<std::string> kAllowedFields = {
-        "active",
-        "app",
-        "version",
-        "generation",
+        "active", "app", "tenant", "version", "generation",
     };
     const char* key = nullptr;
     json_t* value = nullptr;
@@ -255,6 +264,7 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
     }
     json_t* active_json = json_object_get(root, "active");
     json_t* app_json = json_object_get(root, "app");
+    json_t* tenant_json = json_object_get(root, "tenant");
     json_t* version_json = json_object_get(root, "version");
     json_t* generation_json = json_object_get(root, "generation");
     if (!json_is_boolean(active_json)) {
@@ -264,6 +274,14 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
     if (app_json != nullptr && !json_is_string(app_json)) {
         json_decref(root);
         return false;
+    }
+    if (tenant_json != nullptr) {
+        if (!json_is_string(tenant_json) ||
+            !valid_app_id(
+                std::string(json_string_value(tenant_json), json_string_length(tenant_json)))) {
+            json_decref(root);
+            return false;
+        }
     }
     if (version_json != nullptr && !json_is_string(version_json)) {
         json_decref(root);
@@ -306,6 +324,12 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
     if (app_json != nullptr) {
         out << ",\"app\":\""
             << json_escape(std::string(json_string_value(app_json), json_string_length(app_json)))
+            << '"';
+    }
+    if (tenant_json != nullptr) {
+        out << ",\"tenant\":\""
+            << json_escape(
+                   std::string(json_string_value(tenant_json), json_string_length(tenant_json)))
             << '"';
     }
     if (version_json != nullptr) {
@@ -664,7 +688,8 @@ AdminResponse handle_admin_request(const AdminApiOptions& options, const AdminPe
         }
         std::string application;
         std::string version;
-        if (!parse_deploy_body(request.body, &application, &version)) {
+        std::string tenant;
+        if (!parse_deploy_body(request.body, &application, &version, &tenant)) {
             return error_response(400, "invalid request");
         }
         if (backend == nullptr) {
@@ -673,7 +698,8 @@ AdminResponse handle_admin_request(const AdminApiOptions& options, const AdminPe
         return guarded_call(
             [&]() -> AdminResponse {
                 OperationStatus status;
-                const DeployOutcome outcome = backend->deploy(application, version, &status);
+                const DeployOutcome outcome =
+                    backend->deploy(application, version, tenant, &status);
                 if (!outcome.ok || !valid_operation_id(outcome.operation_id)) {
                     // Static redaction: coordinator internals (paths,
                     // secrets, bundle or environment content) and

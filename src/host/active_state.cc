@@ -109,18 +109,20 @@ bool valid_operation_id(std::string_view value) {
 
 // The JSON member names in canonical field order.
 constexpr std::string_view kFieldNames[] = {
-    "schema", "app", "state", "version", "generation", "previousVersion", "previousGeneration",
+    "schema",  "app",        "tenant",          "state",
+    "version", "generation", "previousVersion", "previousGeneration",
     "reason",
 };
 constexpr std::size_t kSchemaField = 0;
 constexpr std::size_t kAppField = 1;
-constexpr std::size_t kStateField = 2;
-constexpr std::size_t kVersionField = 3;
-constexpr std::size_t kGenerationField = 4;
-constexpr std::size_t kPreviousVersionField = 5;
-constexpr std::size_t kPreviousGenerationField = 6;
-constexpr std::size_t kReasonField = 7;
-constexpr std::size_t kFieldCount = 8;
+constexpr std::size_t kTenantField = 2;
+constexpr std::size_t kStateField = 3;
+constexpr std::size_t kVersionField = 4;
+constexpr std::size_t kGenerationField = 5;
+constexpr std::size_t kPreviousVersionField = 6;
+constexpr std::size_t kPreviousGenerationField = 7;
+constexpr std::size_t kReasonField = 8;
+constexpr std::size_t kFieldCount = 9;
 
 std::string_view state_name(ActiveServiceState state) {
     switch (state) {
@@ -139,6 +141,10 @@ std::string_view state_name(ActiveServiceState state) {
 bool validate_document(const ActiveStateDocument& document, ActiveStateError& error) {
     if (!valid_application_id(document.application)) {
         set_error(error, ErrorCode::kInvalidValue, "/app", "invalid App ID");
+        return false;
+    }
+    if (!document.tenant.empty() && !valid_application_id(document.tenant)) {
+        set_error(error, ErrorCode::kInvalidValue, "/tenant", "invalid Tenant ID");
         return false;
     }
     switch (document.state) {
@@ -242,6 +248,10 @@ std::string build_canonical_json(const ActiveStateDocument& document) {
     json += kActiveStateSchema;
     json += "\",\"app\":\"";
     json += document.application;
+    if (!document.tenant.empty() && document.tenant != document.application) {
+        json += "\",\"tenant\":\"";
+        json += document.tenant;
+    }
     json += "\",\"state\":\"";
     json += state_name(document.state);
     switch (document.state) {
@@ -364,6 +374,15 @@ ActiveStateDocumentResult parse_active_state_json(std::string_view expected_appl
     ActiveStateDocument document;
     document.state = state;
     document.application = values[kAppField];
+    if (present[kTenantField]) {
+        if (!valid_application_id(values[kTenantField])) {
+            set_error(result.error, ErrorCode::kInvalidValue, "/tenant", "invalid Tenant ID");
+            return result;
+        }
+        if (values[kTenantField] != document.application) {
+            document.tenant = values[kTenantField];
+        }
+    }
     document.version = values[kVersionField];
     document.generation = values[kGenerationField];
     document.previous_version = values[kPreviousVersionField];

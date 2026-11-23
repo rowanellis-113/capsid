@@ -158,6 +158,32 @@ void MetricsRegistry::set_log_dropped(const std::string& app, std::uint64_t valu
     gauges_[std::move(key)] = value;
 }
 
+void MetricsRegistry::count_pool_eviction(const std::string& app, const std::string& tenant,
+                                          const std::string& reason) {
+    std::string key = "pool_evictions_total{app=\"";
+    key += label_escape(app);
+    key += "\",tenant=\"";
+    key += label_escape(tenant.empty() ? app : tenant);
+    key += "\",reason=\"";
+    key += label_escape(reason);
+    key += "\"}";
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++counters_[std::move(key)];
+}
+
+void MetricsRegistry::count_pool_rejection(const std::string& app, const std::string& tenant,
+                                           const std::string& reason) {
+    std::string key = "pool_rejections_total{app=\"";
+    key += label_escape(app);
+    key += "\",tenant=\"";
+    key += label_escape(tenant.empty() ? app : tenant);
+    key += "\",reason=\"";
+    key += label_escape(reason);
+    key += "\"}";
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++counters_[std::move(key)];
+}
+
 std::string
 MetricsRegistry::render_counters(const std::map<std::string, std::uint64_t>& series) const {
     // series keys are "name{labels}" — the name is the text before '{'.

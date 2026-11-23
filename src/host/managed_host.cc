@@ -866,6 +866,9 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
     ActiveStateDocument document;
     document.state = ActiveServiceState::kActive;
     document.application = options->application;
+    if (!outcome->tenant.empty() && outcome->tenant != options->application) {
+        document.tenant = outcome->tenant;
+    }
     document.version = version;
     document.generation = generation_digest;
     PosixActiveStateFilesystem filesystem(app_state_fd,
@@ -2679,12 +2682,20 @@ ValidatedGeneration validate_committed_generation(int app_state_fd,
 // *status; the public wrapper records that terminal state in the
 // operation registry (success and failure alike).
 DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::string& version,
-                                   OperationStatus* status) {
+                                   const std::string& tenant, OperationStatus* status) {
     DeployOutcome outcome;
     outcome.operation_id = unique_operation_id();
     status->operation_id = outcome.operation_id;
     status->version = version;
     status->state = OperationState::kValidating;
+    if (!tenant.empty() && !valid_tenant_id(tenant)) {
+        outcome.error = "invalid tenant id";
+        status->state = OperationState::kFailed;
+        status->error = outcome.error;
+        return outcome;
+    }
+    const std::string effective_tenant = tenant.empty() ? options->application : tenant;
+    outcome.tenant = effective_tenant;
 
     // ---- 1-6. shared prepare pipeline: safe-read, artifact selection with
     // real attestation verification, authoritative schema + policy + secret
@@ -2789,6 +2800,18 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
         // single process starts. `replacement` is captured BEFORE the
         // reserve: a fresh reserve turns the App into a holder, which
         // must not flip the category of a later rollback.
+        if (options->check_tenant_deploy) {
+            std::string tenant_error;
+            if (!options->check_tenant_deploy(effective_tenant, validated.effective.min_ready,
+                                              &tenant_error)) {
+                close_managed_state_fd(app_state_fd);
+                close_managed_state_fd(state_fd);
+                status->state = OperationState::kFailed;
+                status->error = tenant_error.empty() ? "tenant quota exceeded" : tenant_error;
+                outcome.error = status->error;
+                return outcome;
+            }
+        }
         bool replacement = false;
         if (options->ledger != nullptr) {
             replacement = options->ledger->holds(options->application);
@@ -2798,6 +2821,10 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
                             : options->ledger->reserve_fresh(options->application,
                                                              validated.effective.min_ready);
             if (!reserved) {
+                if (options->metrics != nullptr) {
+                    options->metrics->count_pool_rejection(options->application, effective_tenant,
+                                                           "host_capacity_exhausted");
+                }
                 close_managed_state_fd(app_state_fd);
                 close_managed_state_fd(state_fd);
                 status->state = OperationState::kFailed;
@@ -3015,6 +3042,16 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
     // starts. `replacement` is captured BEFORE the reserve (a fresh
     // reserve turns the App into a holder — the rollback must not flip
     // its category).
+    if (options->check_tenant_deploy) {
+        std::string tenant_error;
+        if (!options->check_tenant_deploy(effective_tenant, effective.min_ready, &tenant_error)) {
+            close_managed_state_fd(app_state_fd);
+            status->state = OperationState::kFailed;
+            status->error = tenant_error.empty() ? "tenant quota exceeded" : tenant_error;
+            outcome.error = status->error;
+            return outcome;
+        }
+    }
     bool replacement = false;
     if (options->ledger != nullptr) {
         replacement = options->ledger->holds(options->application);
@@ -3023,6 +3060,10 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
                 ? options->ledger->reserve_replace(options->application, effective.min_ready)
                 : options->ledger->reserve_fresh(options->application, effective.min_ready);
         if (!reserved) {
+            if (options->metrics != nullptr) {
+                options->metrics->count_pool_rejection(options->application, effective_tenant,
+                                                       "host_capacity_exhausted");
+            }
             close_managed_state_fd(app_state_fd);
             status->state = OperationState::kFailed;
             status->error = "worker capacity exceeded";
@@ -3063,13 +3104,19 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
 
 DeployOutcome managed_deploy(ManagedHostOptions* options, const std::string& version,
                              OperationStatus* status) {
+    return managed_deploy(options, version,
+                          options != nullptr ? options->application : std::string(), status);
+}
+
+DeployOutcome managed_deploy(ManagedHostOptions* options, const std::string& version,
+                             const std::string& tenant, OperationStatus* status) {
     DeployOutcome outcome;
     if (options == nullptr || options->applications_root_fd < 0 || options->worker_path.empty() ||
         version.empty()) {
         outcome.error = "invalid managed host arguments";
         return outcome;
     }
-    outcome = run_deploy_operation(options, version, status);
+    outcome = run_deploy_operation(options, version, tenant, status);
     // Every operation records its terminal state (success or failure) in
     // the registry.
     record_operation(outcome.operation_id, *status);
@@ -3118,6 +3165,7 @@ DeployOutcome run_retire_operation(ManagedHostOptions* options, OperationStatus*
         const ActiveStateDocumentResult parsed =
             parse_active_state_json(options->application, current.bytes);
         if (parsed.ok) {
+            document.tenant = parsed.document.tenant;
             if (parsed.document.state == ActiveServiceState::kRetired) {
                 // Idempotent retire: the tombstone already carries the
                 // previous generation; re-persist exactly that so repeated
@@ -3267,6 +3315,7 @@ DeployOutcome run_quarantine_operation(ManagedHostOptions* options,
     ActiveStateDocument document;
     document.state = ActiveServiceState::kQuarantined;
     document.application = options->application;
+    document.tenant = parsed.document.tenant;
     document.version = parsed.document.version;
     document.generation = parsed.document.generation;
     document.reason = std::string(kCrashBudgetExceededReason);
@@ -3522,12 +3571,27 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
     status->state = OperationState::kWarming;
     const std::vector<std::uint8_t> bundle(validated.bundle_bin.begin(),
                                            validated.bundle_bin.end());
+    const std::string effective_tenant(recovered.document.effective_tenant());
+    if (options->check_tenant_deploy) {
+        std::string tenant_error;
+        if (!options->check_tenant_deploy(effective_tenant, validated.effective.min_ready,
+                                          &tenant_error)) {
+            status->state = OperationState::kFailed;
+            status->error = tenant_error.empty() ? "tenant quota exceeded" : tenant_error;
+            outcome.error = status->error;
+            return outcome;
+        }
+    }
     // §9.4: reserve the recovered fleet's count BEFORE any spawn. At
     // startup nothing holds, so this is always a fresh reserve; a denied
     // reserve fails the Host closed before a single process starts
     // (an active-generation count beyond capacity never overspawns).
     if (options->ledger != nullptr &&
         !options->ledger->reserve_fresh(options->application, validated.effective.min_ready)) {
+        if (options->metrics != nullptr) {
+            options->metrics->count_pool_rejection(options->application, effective_tenant,
+                                                   "host_capacity_exhausted");
+        }
         status->state = OperationState::kFailed;
         status->error = "worker capacity exceeded";
         outcome.error = status->error;
@@ -3553,6 +3617,7 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
     // the outcome so the data plane can adopt a pool in place.
     outcome.version = recovered.document.version;
     outcome.generation_digest = active_generation;
+    outcome.tenant = effective_tenant;
     outcome.effective = validated.effective;
     outcome.generation_factory = make_generation_factory(
         *options, bundle, active_generation,
@@ -3619,8 +3684,11 @@ std::string managed_app_status(const ManagedHostOptions& options) {
     std::ostringstream out;
     out << "{\"active\":"
         << (parsed.document.state == ActiveServiceState::kActive ? "true" : "false")
-        << ",\"app\":\"" << json_escape(options.application) << "\",\"version\":\""
-        << json_escape(parsed.document.version) << "\",\"generation\":\""
+        << ",\"app\":\"" << json_escape(options.application) << '"';
+    if (!parsed.document.tenant.empty() && parsed.document.tenant != options.application) {
+        out << ",\"tenant\":\"" << json_escape(parsed.document.tenant) << '"';
+    }
+    out << ",\"version\":\"" << json_escape(parsed.document.version) << "\",\"generation\":\""
         << json_escape(parsed.document.generation) << "\"}";
     return out.str();
 }
