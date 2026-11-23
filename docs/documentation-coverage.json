@@ -4,7 +4,7 @@
   "sourceBaseline": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
   "meaning": "Reviewed means current maintained claims or explicit historical disposition reviewed; not every page rewritten, every command executed, or historical result requalified.",
   "counts": {
-    "current-reference": 47,
+    "current-reference": 48,
     "historical-plan-or-journal": 13,
     "immutable-evidence": 37,
     "release-history": 8
@@ -83,6 +83,14 @@
       "review": "Dated plan/review disposition checked; prominent current-context banner added. Original body/counts/failures/pending tasks are historical, not requalified."
     },
     {
+      "path": "docs/ai-review-brief-v0.3.2.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "3d41eb2c6daa1739a2070ac908dbee63d13edddb878fe9b0d92fbb3e443ddc3d",
+      "review": "Adversarial AI review brief and audit checklist for dev/v0.3.2 commits a7fd47e..e44d6ad; keeps v0.3.1-beta.1 published baseline separate in current-status.md."
+    },
+    {
       "path": "docs/architecture.md",
       "kind": "current-reference",
       "reviewed": true,
@@ -135,7 +143,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "c5b65897e27a713fe46c98f294a7e530c853fb6148826430caaf2ca6f75d7300",
+      "sha256": "5921188ef0e546ae923aab93b908e13b84ebfa0d460adc2d968575a57b1f4990",
       "review": "Config v2 orthogonal host-v2/app-v2 schema, managed-isomorphic local CLI, and v0.3.2 elastic pools + two-phase fair-share memory LRU implemented on dev/v0.3.2; v0.3.1-beta.1 release baseline stays separate in current-status.md."
     },
     {

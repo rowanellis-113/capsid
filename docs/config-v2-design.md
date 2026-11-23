@@ -1,6 +1,6 @@
 # Capsid 配置 v2 正交化重构与 v0.3.2 多租户弹性池架构方案
 
-> **状态：`dev/v0.3.2` 已分阶段落地 Phase 1（正交 Config v2 + 本地同构 CLI）与 Phase 2（弹性池扩缩容 + 全局内存水位二阶段公平 LRU）；`v0.3.1-beta.1` 发布基线仍以 [当前状态](current-status.md) 为准。**
+> **状态：`dev/v0.3.2` 已分阶段落地 Phase 1（正交 Config v2 + 本地同构 CLI）与 Phase 2（弹性池扩缩容 + 全局内存水位二阶段公平 LRU）；`v0.3.1-beta.1` 发布基线仍以 [当前状态](current-status.md) 为准。独立对抗式 AI 审校入口见 [v0.3.2 工程审校指引](ai-review-brief-v0.3.2.md)。**
 > 本文档完整沉淀并收敛了围绕 **全量配置正交性重构（Config v2）**、**本地开发与 `managed` 生产产物同构** 以及 **v0.3.2 多租户弹性 Worker 池与全局内存预算 LRU 淘汰** 的全部架构讨论与设计决策。现行 `v0.3.1-beta` 已发布版本参考请见 [Host 配置参考](host-config.md)、[capsid.json 指南](capsid-json.md) 与 [当前状态](current-status.md)。
 
 ---
