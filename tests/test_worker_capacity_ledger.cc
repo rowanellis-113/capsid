@@ -208,5 +208,37 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (mode == "ledger_elastic_two_tier") {
+        // Committed floor (minReady=0) vs global elastic pool (workersTotal=3).
+        WorkerCapacityLedger ledger(3, 2);
+        require(ledger.reserve_fresh("cold-a", 0), "minReady=0 fresh reserve should succeed");
+        ledger.commit_fresh("cold-a");
+        require(ledger.holds("cold-a") && ledger.steady_used() == 0,
+                "minReady=0 app should hold active presence with 0 steady");
+        require(ledger.reserve_fresh("warm-b", 1), "minReady=1 app should reserve 1 steady");
+        ledger.commit_fresh("warm-b");
+        require(ledger.try_acquire_elastic("cold-a"), "first elastic slot should fit");
+        require(ledger.try_acquire_elastic("cold-a"), "second elastic slot should fit");
+        require(!ledger.try_acquire_elastic("cold-a"),
+                "steady(1) + elastic(2) == workersTotal(3) must reject 3rd elastic slot");
+        require(ledger.elastic_used() == 2 && ledger.elastic_of("cold-a") == 2,
+                "elastic counts mismatch");
+        ledger.release_elastic("cold-a", 1);
+        require(ledger.elastic_used() == 1 && ledger.elastic_of("cold-a") == 1,
+                "release_elastic did not return 1 slot");
+        require(ledger.reserve_replace("cold-a", 1), "0 -> 1 replacement should succeed");
+        ledger.commit_replace("cold-a", 1, 0);
+        require(ledger.holds("cold-a") && ledger.steady_of("cold-a") == 1,
+                "0 -> 1 commit_replace did not update steady");
+        ledger.begin_retire("cold-a", 1);
+        require(!ledger.holds("cold-a"), "begin_retire should clear active hold");
+        ledger.release_drained("cold-a", 1);
+        ledger.release_elastic("cold-a", 1);
+        require(ledger.elastic_used() == 0 && ledger.steady_used() == 1 && ledger.surge_used() == 0,
+                "ledger counts did not settle cleanly");
+        std::cout << "PASS" << std::endl;
+        return 0;
+    }
+
     fail("unknown ledger test mode: " + mode);
 }

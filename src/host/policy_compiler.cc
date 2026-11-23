@@ -170,12 +170,37 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
         result.effective.workers = app.workers;
         result.effective.min_ready = app.min_ready;
     } else {
-        if (host.max_pool_workers != 0 && host.default_workers > host.max_pool_workers) {
+        const std::uint32_t default_pool_max =
+            host.default_max_workers != 0 ? host.default_max_workers : host.default_workers;
+        if (host.max_pool_workers != 0 && default_pool_max > host.max_pool_workers) {
             result.error = "default pool workers exceeds the Host maximum";
             return result;
         }
-        std::uint32_t effective_workers = 1;
-        if (app.has_workers || app.workers != 0) {
+        if (host.has_default_min_ready && host.max_pool_workers != 0 &&
+            host.default_min_ready > host.max_pool_workers) {
+            result.error = "default pool minReady exceeds the Host maximum";
+            return result;
+        }
+        if (host.max_idle_timeout_ms != 0 &&
+            host.default_idle_timeout_ms > host.max_idle_timeout_ms) {
+            result.error = "default pool idleTimeout exceeds the Host maximum";
+            return result;
+        }
+        if (host.has_default_min_ready && default_pool_max != 0 &&
+            host.default_min_ready > default_pool_max) {
+            result.error = "default pool minReady exceeds maxWorkers";
+            return result;
+        }
+
+        const bool has_app_elastic =
+            app.has_min_ready || app.has_max_workers || app.has_idle_timeout;
+        const bool has_host_elastic = host.has_default_min_ready || host.default_max_workers != 0 ||
+                                      host.default_idle_timeout_ms != 0;
+        if (app.has_workers && has_app_elastic) {
+            result.error = "pool.workers cannot be combined with elastic pool fields";
+            return result;
+        }
+        if (app.has_workers || (!has_app_elastic && app.workers != 0)) {
             if (app.workers == 0) {
                 result.error = "pool must be positive";
                 return result;
@@ -184,18 +209,90 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
                 result.error = "pool exceeds the Host maximum";
                 return result;
             }
-            effective_workers = app.workers;
-        } else if (host.default_workers != 0) {
-            effective_workers = host.default_workers;
-        } else if (host.max_pool_workers != 0 && effective_workers > host.max_pool_workers) {
-            effective_workers = host.max_pool_workers;
+            if (host.max_workers == 0 || app.workers > host.max_workers) {
+                result.error = "pool exceeds the Host worker ceiling";
+                return result;
+            }
+            result.effective.workers = app.workers;
+            result.effective.min_ready = app.workers;
+            result.effective.idle_timeout_ms = 0;
+        } else if (has_app_elastic || has_host_elastic) {
+            if (app.has_workers && has_app_elastic) {
+                result.error = "pool.workers cannot be combined with elastic pool fields";
+                return result;
+            }
+            std::uint32_t effective_max = 1;
+            if (app.has_max_workers) {
+                effective_max = app.max_workers;
+            } else if (default_pool_max != 0) {
+                effective_max = default_pool_max;
+            } else {
+                effective_max = app.has_min_ready ? std::max<std::uint32_t>(1U, app.min_ready) : 1U;
+                if (host.max_pool_workers != 0 && effective_max > host.max_pool_workers) {
+                    effective_max = host.max_pool_workers;
+                }
+            }
+            if (effective_max == 0) {
+                result.error = "pool must be positive";
+                return result;
+            }
+            if (host.max_pool_workers != 0 && effective_max > host.max_pool_workers) {
+                result.error = "pool exceeds the Host maximum";
+                return result;
+            }
+            if (host.max_workers == 0 || effective_max > host.max_workers) {
+                result.error = "pool exceeds the Host worker ceiling";
+                return result;
+            }
+            std::uint32_t effective_min = 1;
+            if (app.has_min_ready) {
+                effective_min = app.min_ready;
+            } else if (host.has_default_min_ready) {
+                effective_min = host.default_min_ready;
+            } else {
+                const std::uint32_t fallback_min =
+                    host.default_workers != 0 ? host.default_workers : 1U;
+                effective_min = std::min<std::uint32_t>(fallback_min, effective_max);
+            }
+            if (effective_min > effective_max) {
+                result.error = "pool minReady exceeds maxWorkers";
+                return result;
+            }
+            std::uint64_t effective_idle = 0;
+            if (app.has_idle_timeout) {
+                effective_idle = app.idle_timeout_ms;
+            } else if (effective_min < effective_max) {
+                if (host.default_idle_timeout_ms != 0) {
+                    effective_idle = host.default_idle_timeout_ms;
+                } else {
+                    effective_idle =
+                        host.max_idle_timeout_ms != 0
+                            ? std::min<std::uint64_t>(60000ULL, host.max_idle_timeout_ms)
+                            : 60000ULL;
+                }
+            }
+            if (host.max_idle_timeout_ms != 0 && effective_idle > host.max_idle_timeout_ms) {
+                result.error = "pool idleTimeout exceeds the Host maximum";
+                return result;
+            }
+            result.effective.workers = effective_max;
+            result.effective.min_ready = effective_min;
+            result.effective.idle_timeout_ms = effective_idle;
+        } else {
+            std::uint32_t effective_workers = 1;
+            if (host.default_workers != 0) {
+                effective_workers = host.default_workers;
+            } else if (host.max_pool_workers != 0 && effective_workers > host.max_pool_workers) {
+                effective_workers = host.max_pool_workers;
+            }
+            if (host.max_workers == 0 || effective_workers > host.max_workers) {
+                result.error = "pool exceeds the Host worker ceiling";
+                return result;
+            }
+            result.effective.workers = effective_workers;
+            result.effective.min_ready = effective_workers;
+            result.effective.idle_timeout_ms = 0;
         }
-        if (host.max_workers == 0 || effective_workers > host.max_workers) {
-            result.error = "pool exceeds the Host worker ceiling";
-            return result;
-        }
-        result.effective.workers = effective_workers;
-        result.effective.min_ready = effective_workers;
     }
     result.effective.strict_sandbox = host.strict_sandbox;
 
@@ -497,20 +594,23 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     }
     result.effective.request_timeout_ms = request_timeout;
     // E-1 admission-queue maximums (§10.3): explicit 0 in app-v2 overrides a
-    // non-zero host default.
+    // non-zero host default. Scale-to-zero v2 pools get builtin cold-start
+    // queuing defaults (queueRequests=64, queueTimeout=5s) unless overridden.
+    const bool scale_to_zero_queue = is_v2 && result.effective.min_ready == 0;
     if (!resolve_u64_tier_ex(
             is_v2 ? app.has_queue_requests : (app.queue_requests != 0), app.queue_requests,
             is_v2 ? host.has_default_queue_requests : (host.default_queue_requests != 0),
-            host.default_queue_requests, host.max_queue_requests, 0ULL,
-            "default queue depth exceeds the Host maximum", "queue depth exceeds the Host maximum",
-            &result.effective.queue_requests) ||
+            host.default_queue_requests, host.max_queue_requests,
+            scale_to_zero_queue ? 64ULL : 0ULL, "default queue depth exceeds the Host maximum",
+            "queue depth exceeds the Host maximum", &result.effective.queue_requests) ||
         !resolve_u64_tier(
             app.queue_header_bytes, host.default_queue_header_bytes, host.max_queue_header_bytes,
             "default queue header bytes exceed the Host maximum",
             "queue header bytes exceed the Host maximum", &result.effective.queue_header_bytes) ||
-        !resolve_u64_tier(
-            app.queue_timeout_ms, host.default_queue_timeout_ms, host.max_queue_timeout_ms,
-            "default queue timeout exceeds the Host maximum",
+        !resolve_u64_tier_ex(
+            app.queue_timeout_ms != 0, app.queue_timeout_ms, host.default_queue_timeout_ms != 0,
+            host.default_queue_timeout_ms, host.max_queue_timeout_ms,
+            scale_to_zero_queue ? 5000ULL : 0ULL, "default queue timeout exceeds the Host maximum",
             "queue timeout exceeds the Host maximum", &result.effective.queue_timeout_ms)) {
         return result;
     }
@@ -806,8 +906,11 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
          << ",\"processAddressBytes\":" << result.effective.process_address_bytes
          << ",\"fileDescriptors\":" << result.effective.file_descriptors
          << ",\"workers\":" << result.effective.workers
-         << ",\"minReady\":" << result.effective.min_ready
-         << ",\"strictSandbox\":" << (result.effective.strict_sandbox ? "true" : "false");
+         << ",\"minReady\":" << result.effective.min_ready;
+    if (result.effective.idle_timeout_ms != 0) {
+        json << ",\"idleTimeoutMs\":" << result.effective.idle_timeout_ms;
+    }
+    json << ",\"strictSandbox\":" << (result.effective.strict_sandbox ? "true" : "false");
     if (result.effective.health_check.configured) {
         json << ",\"healthCheck\":{\"path\":\"" << json_escape(result.effective.health_check.path)
              << "\",\"timeoutMs\":" << result.effective.health_check.timeout_ms << '}';
@@ -852,6 +955,10 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     }
     if (app.is_v2) {
         app_stream << ";v2:1;workers:" << (app.has_workers ? app.workers : 0)
+                   << ";hasMin:" << (app.has_min_ready ? 1 : 0) << ";min:" << app.min_ready
+                   << ";hasMax:" << (app.has_max_workers ? 1 : 0) << ";max:" << app.max_workers
+                   << ";hasIdle:" << (app.has_idle_timeout ? 1 : 0)
+                   << ";idleMs:" << app.idle_timeout_ms
                    << ";hasQreq:" << (app.has_queue_requests ? 1 : 0);
     }
     app_stream << ";qreq:" << app.queue_requests << ";qbytes:" << app.queue_header_bytes

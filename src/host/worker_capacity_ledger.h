@@ -52,55 +52,56 @@ class WorkerCapacityLedger {
         : workers_total_(workers_total), surge_workers_(activation_surge_workers) {}
 
     // Fresh deploy (no serving pool): reserves `pool_size` against the
-    // steady-state budget. False = budget exhausted; nothing is held.
+    // steady-state committed budget. False = budget exhausted; nothing held.
     bool reserve_fresh(const std::string& application, std::uint64_t pool_size);
 
-    // Replacement deploy over a SERVING pool (`pool_size` new workers):
-    // the steady state after the swap must fit workers_total and the
-    // overlap peak max(new, old) must fit the surge budget. False =
-    // zero-downtime replace refused (no surge/headroom); nothing is held.
+    // Replacement deploy over a SERVING pool (`pool_size` new committed
+    // workers): the steady state after the swap must fit workers_total and
+    // the overlap peak max(new, old) must fit the surge budget.
     bool reserve_replace(const std::string& application, std::uint64_t new_pool_size);
 
-    // Settles a successful reserve. commit_fresh is a no-op on the counts
-    // (the fresh pool was already held as steady); commit_replace moves
-    // the new pool from surge to steady and the old pool into surge
-    // (draining).
+    // Settles a successful reserve. commit_fresh confirms the active
+    // holding; commit_replace moves the new pool from surge to steady and
+    // the old pool into surge (draining).
     void commit_fresh(const std::string& application);
     void commit_replace(const std::string& application, std::uint64_t new_pool_size,
                         std::uint64_t old_pool_size);
 
-    // Rolls a reserve back when the operation settles without a live
-    // pool (warm failure, persist failure, refused activation). Must
-    // mirror the reserve that held the count.
+    // Rolls a reserve back when the operation settles without a live pool.
     void abort_reserve(const std::string& application, std::uint64_t pool_size, bool replacement);
 
-    // Retire: the serving pool leaves steady for surge (draining). No
-    // budget gate — the process count only shrinks, so the absolute
-    // ceiling can never be exceeded by a retire.
+    // Retire: the serving pool leaves steady for surge (draining).
     void begin_retire(const std::string& application, std::uint64_t pool_size);
 
-    // Reaper finished: `drained` surge workers are gone. The old pool
-    // releases its count only here (spec §9.4: after the reaper
-    // completed, not when the drain started).
+    // Reaper finished: `drained` surge workers are gone.
     void release_drained(const std::string& application, std::uint64_t drained);
     void release_active(const std::string& application, std::uint64_t reaped);
 
-    // True when the App has a serving pool (steady > 0).
+    // Dynamic elastic slots (workers above minReady, up to global workersTotal).
+    bool try_acquire_elastic(const std::string& application);
+    void release_elastic(const std::string& application, std::uint64_t count = 1);
+
+    // True when the App has an active serving pool (including minReady == 0).
     bool holds(const std::string& application) const;
 
     std::uint64_t steady_used() const;
     std::uint64_t surge_used() const;
+    std::uint64_t elastic_used() const;
     std::uint64_t steady_of(const std::string& application) const;
     std::uint64_t surge_of(const std::string& application) const;
+    std::uint64_t elastic_of(const std::string& application) const;
 
   private:
     struct Entry {
-        std::uint64_t steady = 0; // serving workers
-        std::uint64_t surge = 0;  // overlap workers (warming/draining)
+        bool active = false;
+        std::uint64_t steady = 0;  // serving committed workers
+        std::uint64_t surge = 0;   // overlap workers (warming/draining)
+        std::uint64_t elastic = 0; // elastic runtime workers above minReady
     };
     std::map<std::string, Entry> entries_;
     std::uint64_t steady_used_ = 0;
     std::uint64_t surge_used_ = 0;
+    std::uint64_t elastic_used_ = 0;
     const std::uint64_t workers_total_;
     const std::uint64_t surge_workers_;
     mutable std::mutex mutex_;

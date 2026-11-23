@@ -106,9 +106,10 @@ void WorkerSupervisor::run() {
             return;
         }
         auto pool = options_.current_pool();
-        if (pool == nullptr) {
-            // No pool (never deployed, quarantined, retired): nothing to
-            // probe.
+        if (pool == nullptr || (pool->min_ready() == 0 && pool->ready_workers() == 0)) {
+            // No pool or legal scale-to-zero sleeping state (0 live workers,
+            // minReady == 0): silently skip probing without counting failures or
+            // waking an idle pool.
             clear_probe_target();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;

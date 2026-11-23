@@ -440,11 +440,13 @@ std::string host_v2_signature(const ParsedHostConfig& c) {
     out << "|D:" << p.default_worker_memory_bytes << ',' << p.default_js_heap_bytes << ','
         << p.default_file_descriptors << ',' << p.default_request_timeout_ms << ','
         << p.default_requests_per_worker << ',' << p.default_workers << ','
-        << p.has_default_queue_requests << ',' << p.default_queue_requests << ','
-        << p.default_queue_timeout_ms << "|M:" << p.max_worker_memory_bytes << ','
-        << p.max_js_heap_bytes << ',' << p.max_file_descriptors << ',' << p.max_request_timeout_ms
-        << ',' << p.max_requests_per_worker << ',' << p.max_pool_workers << ','
-        << p.max_queue_requests << ',' << p.max_queue_timeout_ms
+        << p.has_default_min_ready << ',' << p.default_min_ready << ',' << p.default_max_workers
+        << ',' << p.default_idle_timeout_ms << ',' << p.has_default_queue_requests << ','
+        << p.default_queue_requests << ',' << p.default_queue_timeout_ms
+        << "|M:" << p.max_worker_memory_bytes << ',' << p.max_js_heap_bytes << ','
+        << p.max_file_descriptors << ',' << p.max_request_timeout_ms << ','
+        << p.max_requests_per_worker << ',' << p.max_pool_workers << ',' << p.max_idle_timeout_ms
+        << ',' << p.max_queue_requests << ',' << p.max_queue_timeout_ms
         << "|C:" << c.capacity.workers_total << ',' << c.capacity.activation_surge_workers << ','
         << c.capacity.channels.channels << ',' << c.capacity.channels.pending_dials << ','
         << c.capacity.channels.queue_bytes << ',' << c.capacity.max_channel_message_size << ','
@@ -766,6 +768,39 @@ void test_host_v2_orthogonal_and_full_consumption() {
         const std::string mutated = replace_first(max_app_v2, mutation.first, mutation.second);
         require(app_signature(mutated) != base_app_sig,
                 "silent dead app-v2 field detected for: " + mutation.first);
+    }
+
+    // Also prove elastic pool fields (minReady, maxWorkers, idleTimeout) on app-v2 and
+    // host-v2 defaults/maximums alter compiled models and digests.
+    const std::string elastic_host_v2 = R"json({
+      "apiVersion": "capsid/host-v2",
+      "paths": {"applications": "/srv/apps", "state": "/var/lib/capsid", "secrets": "/secrets/{application}"},
+      "admin": {"unix": "/run/capsid/admin.sock"},
+      "listeners": [{"name": "p", "tcp": "127.0.0.1:8080", "routing": {"mode": "path"}}],
+      "defaults": {"pool": {"minReady": 0, "maxWorkers": 4, "idleTimeout": "30s"}},
+      "maximums": {"pool": {"maxWorkers": 8, "idleTimeout": "120s"}},
+      "capacity": {"workersTotal": 16}
+    })json";
+    ParsedHostConfig elastic_host;
+    require_valid_parse(elastic_host_v2, "elastic host-v2 defaults", &elastic_host);
+    require(elastic_host.policy.has_default_min_ready &&
+                elastic_host.policy.default_min_ready == 0 &&
+                elastic_host.policy.default_max_workers == 4 &&
+                elastic_host.policy.default_idle_timeout_ms == 30000 &&
+                elastic_host.policy.max_pool_workers == 8 &&
+                elastic_host.policy.max_idle_timeout_ms == 120000,
+            "elastic host-v2 defaults/maximums did not map");
+    const std::string elastic_app_v2 = R"json({
+      "apiVersion": "capsid/app-v2",
+      "pool": {"minReady": 0, "maxWorkers": 4, "idleTimeout": "45s"}
+    })json";
+    const std::string elastic_sig = app_signature(elastic_app_v2);
+    for (const auto& m : std::vector<std::pair<std::string, std::string>>{
+             {R"("minReady": 0)", R"("minReady": 1)"},
+             {R"("maxWorkers": 4)", R"("maxWorkers": 6)"},
+             {R"("idleTimeout": "45s")", R"("idleTimeout": "90s")"}}) {
+        require(app_signature(replace_first(elastic_app_v2, m.first, m.second)) != elastic_sig,
+                "silent dead elastic app-v2 field: " + m.first);
     }
 }
 

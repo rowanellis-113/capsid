@@ -338,6 +338,14 @@ class WorkerExecutor {
     // Requests the worker currently owns (relaxed read; see the class
     // comment for the accounting).
     std::uint64_t inflight() const;
+    // Monotonic timestamps (ms) captured on READY and on data-plane activity
+    // (active health probes intentionally do NOT refresh last_active_at_ms).
+    std::uint64_t started_at_ms() const noexcept {
+        return started_at_ms_.load(std::memory_order_acquire);
+    }
+    std::uint64_t last_active_at_ms() const noexcept {
+        return last_active_at_ms_.load(std::memory_order_acquire);
+    }
 
     // ---- diagnostics ----------------------------------------------------
 
@@ -450,6 +458,8 @@ class WorkerExecutor {
     // decrements (a cancel racing an already-queued RESPONSE_END).
     std::set<std::uint64_t> inflight_ids_;
     std::atomic<std::uint64_t> inflight_ = 0;
+    std::atomic<std::uint64_t> started_at_ms_{0};
+    std::atomic<std::uint64_t> last_active_at_ms_{0};
     bool ready_ = false;
     bool ready_match_ = false;
     std::string ready_error_;

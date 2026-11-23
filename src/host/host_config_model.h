@@ -105,6 +105,11 @@ struct RequestTierConfig {
 
 struct PoolTierConfig {
     std::uint32_t workers = 0;
+    bool has_min_ready = false;
+    std::uint32_t min_ready = 0;
+    bool has_max_workers = false;
+    std::uint32_t max_workers = 0;
+    std::uint64_t idle_timeout_ms = 0;
     bool has_queue_requests = false;
     std::uint64_t queue_requests = 0;
     std::uint64_t queue_header_bytes = 0;

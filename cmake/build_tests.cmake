@@ -1107,7 +1107,8 @@ if(BUILD_TESTING)
                 ledger_retire_drain_release
                 ledger_no_surge_refuses
                 ledger_retired_headroom
-                ledger_overflow_limits)
+                ledger_overflow_limits
+                ledger_elastic_two_tier)
             add_test(
                 NAME "host_worker_capacity_ledger_${CAPSID_LEDGER_TEST_ID}"
                 COMMAND test-host-worker-capacity-ledger
@@ -6953,6 +6954,56 @@ if(BUILD_TESTING)
             COMMAND test-host-managed-listener $<TARGET_FILE:capsid-worker>)
         set_tests_properties(host_managed_listener_contract PROPERTIES
             TIMEOUT 90)
+        endif()
+
+        add_executable(
+            test-host-elastic-pool
+            tests/test_host_elastic_pool.cc)
+        target_include_directories(
+            test-host-elastic-pool PRIVATE
+            include src "${CAPSID_GENERATED_DIR}")
+        target_link_libraries(test-host-elastic-pool PRIVATE
+            capsid_runtime
+            capsid_host_core
+            Boost::system
+            capsid_jansson
+            OpenSSL::Crypto
+            capsid_sanitizers)
+        if(WIN32)
+            target_link_libraries(test-host-elastic-pool PRIVATE ws2_32)
+        endif()
+        set_target_properties(test-host-elastic-pool PROPERTIES
+            CXX_STANDARD 20
+            CXX_STANDARD_REQUIRED ON
+            CXX_EXTENSIONS OFF)
+        if(CAPSID_STRICT_WARNINGS)
+            if(MSVC)
+                target_compile_options(test-host-elastic-pool PRIVATE /W4 /WX)
+            else()
+                target_compile_options(test-host-elastic-pool PRIVATE -Wall -Wextra -Wpedantic -Werror)
+            endif()
+        endif()
+        add_dependencies(test-host-elastic-pool capsid-worker)
+        if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            foreach(CAPSID_ELASTIC_CASE IN ITEMS
+                    scale_to_zero_burst_and_reclaim
+                    active_stream_and_ws_protected
+                    two_tier_reaping_slot_transfer)
+                add_test(
+                    NAME "host_elastic_pool_${CAPSID_ELASTIC_CASE}"
+                    COMMAND test-host-elastic-pool $<TARGET_FILE:capsid-worker> "${CAPSID_ELASTIC_CASE}")
+                set_tests_properties(
+                    "host_elastic_pool_${CAPSID_ELASTIC_CASE}"
+                    PROPERTIES TIMEOUT 90 LABELS "host;managed;lifecycle")
+            endforeach()
+            if(NOT WIN32)
+                add_test(
+                    NAME host_elastic_pool_disk_backed_generation_tamper_fails
+                    COMMAND test-host-elastic-pool $<TARGET_FILE:capsid-worker> disk_backed_generation_tamper_fails)
+                set_tests_properties(
+                    host_elastic_pool_disk_backed_generation_tamper_fails
+                    PROPERTIES TIMEOUT 90 LABELS "host;managed;lifecycle")
+            endif()
         endif()
         endif()  # Boost_FOUND — RoutingTable & ManagedListener contract tests
 

@@ -206,6 +206,25 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
         });
     }
 
+    void post_task(std::function<void()> task) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (closed_ || !dispatcher_ || !task) {
+            return;
+        }
+        asio::post(ioc, [weak = weak_from_this(), task = std::move(task)]() mutable {
+            if (std::shared_ptr<WorkerEventMailbox> mailbox = weak.lock()) {
+                bool closed = false;
+                {
+                    std::lock_guard<std::mutex> guard(mailbox->mutex_);
+                    closed = mailbox->closed_;
+                }
+                if (!closed) {
+                    task();
+                }
+            }
+        });
+    }
+
     // §8.2 "bytes awaiting client consumption" per executor, for the pool's
     // pick_worker loader. Written by the io thread (write submissions and
     // completions), read by the pump thread under the pool mutex; guarded
@@ -444,11 +463,13 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
                           const std::shared_ptr<ListenerSession>& session,
                           const http::request<http::string_body>& request,
                           const NormalizedPublicRequest& normalized);
+    void wire_pool(const std::shared_ptr<GenerationPool>& pool);
     void enqueue_or_reject(const std::shared_ptr<GenerationPool>& pool,
                            const std::shared_ptr<ListenerSession>& session,
                            http::request<http::string_body> request,
                            const NormalizedPublicRequest& normalized);
     void pump_pool_queue(const GenerationPool* pool_key);
+    void fail_pool_queue_unavailable(const GenerationPool* pool_key);
     void arm_queue_timer(const GenerationPool* pool_key);
     void on_queue_timer(const GenerationPool* pool_key, const beast::error_code ec);
     void cancel_queued_for_session(const GenerationPool* pool_key,
@@ -698,9 +719,23 @@ void ListenerSession::handle_request(http::request<http::string_body> request) {
     }
     WorkerExecutor* executor = pool->pick_worker();
     if (!executor) {
-        send_simple(http::status::service_unavailable, "worker unavailable", false,
-                    request.version());
-        return;
+        if (pool->state() == GenerationPool::State::kActive && pool->is_elastic()) {
+            const auto scale_result = pool->request_scale_out();
+            executor = pool->pick_worker();
+            if (!executor && (scale_result == GenerationPool::ScaleOutResult::kSpawnInFlight ||
+                              pool->scale_out_in_flight())) {
+                current_pool_ = pool;
+                impl_->enqueue_or_reject(pool, shared_from_this(), std::move(request),
+                                         normalized.request);
+                impl_->pump_pool_queue(pool.get());
+                return;
+            }
+        }
+        if (!executor) {
+            send_simple(http::status::service_unavailable, "worker unavailable", false,
+                        request.version());
+            return;
+        }
     }
     const auto q_it = impl_->pool_queues_.find(pool.get());
     const bool queue_empty = q_it == impl_->pool_queues_.end() || q_it->second.entries.empty();
@@ -708,6 +743,9 @@ void ListenerSession::handle_request(http::request<http::string_body> request) {
     // schedules least-loaded, while E-1 queueing and capacity admission live here.
     const std::uint64_t max_inflight = pool->max_inflight_per_worker();
     if (!queue_empty || (max_inflight != 0 && executor->inflight() >= max_inflight)) {
+        if (max_inflight != 0 && executor->inflight() >= max_inflight && pool->is_elastic()) {
+            (void)pool->request_scale_out();
+        }
         current_pool_ = pool;
         impl_->enqueue_or_reject(pool, shared_from_this(), std::move(request), normalized.request);
         return;
@@ -1044,10 +1082,7 @@ bool ManagedListenerImpl::start(std::string* error) {
     if (const std::shared_ptr<const RoutingSnapshot> snapshot = options_.routing->load()) {
         for (const auto& [application, pool] : snapshot->routes()) {
             (void)application;
-            pool->set_event_sink(
-                [mailbox = mailbox_](const WorkerExecutor* executor, WorkerEvent event) {
-                    mailbox->post(executor, std::move(event));
-                });
+            wire_pool(pool);
         }
     }
     mailbox_->set_dispatcher(
@@ -1256,8 +1291,11 @@ void ManagedListenerImpl::enqueue_or_reject(const std::shared_ptr<GenerationPool
     const std::uint64_t max_q = pool->max_queued_requests();
     if (max_q == 0) {
         session->current_pool_.reset();
-        session->send_simple(http::status::too_many_requests, "worker at capacity",
-                             request.keep_alive(), request.version());
+        const bool cold = pool->ready_workers() == 0;
+        session->send_simple(cold ? http::status::service_unavailable
+                                  : http::status::too_many_requests,
+                             cold ? "worker unavailable" : "worker at capacity",
+                             cold ? false : request.keep_alive(), request.version());
         return;
     }
     const std::size_t req_bytes = estimate_request_bytes(request);
@@ -1316,6 +1354,12 @@ void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
         std::shared_ptr<GenerationPool> pool = front.pool;
         WorkerExecutor* executor = pool ? pool->pick_worker() : nullptr;
         if (!executor) {
+            if (pool && pool->state() == GenerationPool::State::kActive &&
+                (pool->scale_out_in_flight() ||
+                 (pool->is_elastic() &&
+                  pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight))) {
+                break;
+            }
             QueuedRequest unavailable = std::move(front);
             pq.entries.pop_front();
             pq.queued_bytes -= unavailable.bytes;
@@ -1329,6 +1373,9 @@ void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
         }
         const std::uint64_t max_inflight = pool->max_inflight_per_worker();
         if (max_inflight != 0 && executor->inflight() >= max_inflight) {
+            if (pool->is_elastic()) {
+                (void)pool->request_scale_out();
+            }
             break;
         }
         QueuedRequest entry = std::move(front);
@@ -1340,6 +1387,63 @@ void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
         dispatch_request(entry.pool, executor, entry.session, entry.request, entry.normalized);
     }
     arm_queue_timer(pool_key);
+}
+
+void ManagedListenerImpl::fail_pool_queue_unavailable(const GenerationPool* pool_key) {
+    if (pool_key == nullptr) {
+        return;
+    }
+    const auto q_it = pool_queues_.find(pool_key);
+    if (q_it == pool_queues_.end()) {
+        return;
+    }
+    PoolQueue& pq = q_it->second;
+    while (!pq.entries.empty()) {
+        std::shared_ptr<GenerationPool> pool = pq.entries.front().pool;
+        if (pool && (pool->pick_worker() != nullptr || pool->scale_out_in_flight())) {
+            pump_pool_queue(pool_key);
+            return;
+        }
+        QueuedRequest unavailable = std::move(pq.entries.front());
+        pq.entries.pop_front();
+        pq.queued_bytes -= unavailable.bytes;
+        if (unavailable.session && !unavailable.session->closed()) {
+            unavailable.session->current_pool_.reset();
+            unavailable.session->send_simple(http::status::service_unavailable,
+                                             "worker unavailable", false,
+                                             unavailable.request.version());
+        }
+    }
+    arm_queue_timer(pool_key);
+}
+
+void ManagedListenerImpl::wire_pool(const std::shared_ptr<GenerationPool>& pool) {
+    if (!pool) {
+        return;
+    }
+    pool->set_event_sink([mailbox = mailbox_](const WorkerExecutor* executor, WorkerEvent event) {
+        mailbox->post(executor, std::move(event));
+    });
+    std::weak_ptr<GenerationPool> weak_pool = pool;
+    pool->set_scale_callbacks(
+        [weak = weak_from_this(), mailbox = mailbox_, weak_pool] {
+            mailbox->post_task([weak, weak_pool] {
+                if (const auto self = weak.lock()) {
+                    if (const auto target = weak_pool.lock()) {
+                        self->pump_pool_queue(target.get());
+                    }
+                }
+            });
+        },
+        [weak = weak_from_this(), mailbox = mailbox_, weak_pool](const std::string&) {
+            mailbox->post_task([weak, weak_pool] {
+                if (const auto self = weak.lock()) {
+                    if (const auto target = weak_pool.lock()) {
+                        self->fail_pool_queue_unavailable(target.get());
+                    }
+                }
+            });
+        });
 }
 
 void ManagedListenerImpl::arm_queue_timer(const GenerationPool* pool_key) {
@@ -1497,6 +1601,14 @@ void ManagedListenerImpl::handle_worker_event(const WorkerExecutor* executor, Wo
         if (found != websockets_.end()) {
             auto connection = found->second;
             connection->on_event(std::move(event));
+        } else if (event.channel_id != 0 && (event.type == WorkerEvent::Type::kChannelCancel ||
+                                             (event.type == WorkerEvent::Type::kChannelClose &&
+                                              (event.close_kind == 2 || event.close_kind == 3)))) {
+            Command ack;
+            ack.type = CommandType::kChannelConfirm;
+            ack.channel_id = event.channel_id;
+            ack.channel_flags = (event.type == WorkerEvent::Type::kChannelCancel) ? 1U : 2U;
+            const_cast<WorkerExecutor*>(executor)->try_submit_channel(std::move(ack));
         }
         return;
     }
@@ -2435,17 +2547,7 @@ ManagedListener::~ManagedListener() {
 bool ManagedListener::start(std::string* error) { return impl_->start(error); }
 
 void ManagedListener::wire_pool(const std::shared_ptr<GenerationPool>& pool) {
-    if (!pool) {
-        return;
-    }
-    // The mailbox is shared: the pool's sink captures it and keeps it
-    // alive as long as the pool lives, so a post can never race the io
-    // thread's teardown (the sink drops events once the mailbox is
-    // closed). Precondition (caller): the pool has no in-flight requests.
-    pool->set_event_sink(
-        [mailbox = impl_->mailbox_](const WorkerExecutor* executor, WorkerEvent event) {
-            mailbox->post(executor, std::move(event));
-        });
+    impl_->wire_pool(pool);
 }
 
 void ManagedListener::stop_accepting() { impl_->stop_accepting(); }

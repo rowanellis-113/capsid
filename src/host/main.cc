@@ -477,7 +477,16 @@ std::string read_host_config(const std::string& path) {
         pool_options.application_id = application;
         pool_options.version = version;
         pool_options.generation_digest = generation_digest;
-        pool_options.workers = static_cast<std::uint32_t>(workers.size());
+        pool_options.workers = effective.workers;
+        pool_options.has_min_ready = true;
+        pool_options.min_ready = effective.min_ready;
+        pool_options.idle_timeout_ms = effective.idle_timeout_ms;
+        pool_options.acquire_elastic_slot = [&ledger, application] {
+            return ledger.try_acquire_elastic(application);
+        };
+        pool_options.release_elastic_slot = [&ledger, application] {
+            ledger.release_elastic(application, 1);
+        };
         pool_options.max_inflight_per_worker = effective.requests_per_worker;
         pool_options.max_queued_requests = effective.queue_requests;
         pool_options.queue_header_bytes = effective.queue_header_bytes;
@@ -498,10 +507,24 @@ std::string read_host_config(const std::string& path) {
         pool_options.startup_permits = &startup_permits;
         pool_options.log = structured_log.get();
         pool_options.metrics = metrics.get();
-        const std::uint32_t pool_size = pool_options.workers;
+        const std::uint32_t pool_size = effective.min_ready;
         const auto capacity = std::make_shared<capsid::host::WorkerPoolCapacityLease>(
             &ledger, application, pool_size);
         pool_options.capacity_lease = capacity;
+        std::vector<capsid_worker*> adopted_workers;
+        adopted_workers.reserve(workers.size());
+        std::size_t acquired_elastic = 0;
+        for (std::size_t index = 0; index < workers.size(); ++index) {
+            if (index < effective.min_ready) {
+                adopted_workers.push_back(workers[index]);
+            } else if (ledger.try_acquire_elastic(application)) {
+                adopted_workers.push_back(workers[index]);
+                ++acquired_elastic;
+            } else {
+                capsid_worker_destroy(workers[index]);
+                capsid::host::release_worker_cgroup(workers[index]);
+            }
+        }
         // Links this drain hook to the pool created from the same
         // prepare call (filled right after create_adopted). WEAK by
         // design: create_adopted requires no self-held strong
@@ -574,13 +597,16 @@ std::string read_host_config(const std::string& path) {
         };
         std::string pool_error;
         std::shared_ptr<capsid::host::GenerationPool> pool =
-            capsid::host::GenerationPool::create_adopted(std::move(pool_options), workers,
-                                                         &pool_error);
+            capsid::host::GenerationPool::create_adopted(std::move(pool_options),
+                                                         std::move(adopted_workers), &pool_error);
         {
             std::lock_guard<std::mutex> lock(pools_mutex);
             *pool_box = pool;
         }
         if (pool == nullptr) {
+            if (acquired_elastic > 0) {
+                ledger.release_elastic(application, acquired_elastic);
+            }
             return nullptr;
         }
         // The sink must be installed before the pool starts serving:
@@ -605,7 +631,7 @@ std::string read_host_config(const std::string& path) {
         plan->application = application;
         plan->version = prepared.version;
         plan->generation_digest = prepared.generation_digest;
-        plan->new_workers = prepared.workers.size();
+        plan->new_workers = prepared.effective.min_ready;
         std::shared_ptr<capsid::host::GenerationPool> pool =
             adopt_generation(application, prepared.workers, prepared.generation_factory,
                              prepared.version, prepared.generation_digest, prepared.effective);
@@ -619,7 +645,7 @@ std::string read_host_config(const std::string& path) {
             const auto existing = active_pools.find(application);
             if (existing != active_pools.end()) {
                 plan->old_pool = existing->second;
-                plan->old_workers = existing->second->configured_workers();
+                plan->old_workers = existing->second->min_ready();
                 // The replaced generation stops serving only at
                 // COMMIT; the reference is parked here so commit
                 // needs no allocation.
@@ -701,7 +727,7 @@ std::string read_host_config(const std::string& path) {
             const auto existing = active_pools.find(application);
             if (existing != active_pools.end()) {
                 plan->pool = existing->second;
-                plan->workers = existing->second->configured_workers();
+                plan->workers = existing->second->min_ready();
                 // The route becomes a TOMBSTONE at prepare; commit
                 // only publishes. New requests get 404 (§9.6-6) while
                 // old in-flight requests finish on their pinned pool.
@@ -801,7 +827,8 @@ std::string read_host_config(const std::string& path) {
         if (!recovered.ok) {
             fail("cannot recover active application " + options->application);
         }
-        if (!recovered.workers.empty()) {
+        if (!recovered.workers.empty() ||
+            recovered.recovery_action == capsid::host::ActiveStateRecoveryAction::kActivate) {
             // Keep a recovered pool's publication in the same App lock
             // domain as queued quarantine identity checks.
             capsid::host::AppOperationLock recovery_activation(options->application);

@@ -26,7 +26,9 @@ bool WorkerCapacityLedger::reserve_fresh(const std::string& application, std::ui
     if (pool_size > available) {
         return false;
     }
-    entries_[application].steady += pool_size;
+    Entry& entry = entries_[application];
+    entry.active = true;
+    entry.steady += pool_size;
     steady_used_ += pool_size;
     return true;
 }
@@ -35,7 +37,7 @@ bool WorkerCapacityLedger::reserve_replace(const std::string& application,
                                            std::uint64_t new_pool_size) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = entries_.find(application);
-    if (found == entries_.end() || found->second.steady == 0) {
+    if (found == entries_.end() || (!found->second.active && found->second.steady == 0)) {
         // Not a replacement: the App has no serving pool. The caller
         // should have used reserve_fresh.
         return false;
@@ -60,10 +62,8 @@ bool WorkerCapacityLedger::reserve_replace(const std::string& application,
 }
 
 void WorkerCapacityLedger::commit_fresh(const std::string& application) {
-    // The fresh pool was already held as steady by its reserve; the
-    // settle only confirms it. (Kept as an explicit call so the caller's
-    // accounting mirrors the transaction shape: reserve → settle.)
-    (void)application;
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_[application].active = true;
 }
 
 void WorkerCapacityLedger::commit_replace(const std::string& application,
@@ -77,6 +77,7 @@ void WorkerCapacityLedger::commit_replace(const std::string& application,
     }
     // The new pool leaves surge for steady; the old pool enters surge
     // (draining). The held counts never change sum — only the category.
+    entry.active = true;
     entry.surge -= new_pool_size;
     surge_used_ -= new_pool_size;
     entry.steady = new_pool_size;
@@ -103,8 +104,10 @@ void WorkerCapacityLedger::abort_reserve(const std::string& application, std::ui
             throw std::logic_error("steady reserve already released");
         found->second.steady -= pool_size;
         steady_used_ -= pool_size;
+        found->second.active = false;
     }
-    if (found->second.steady == 0 && found->second.surge == 0) {
+    if (!found->second.active && found->second.steady == 0 && found->second.surge == 0 &&
+        found->second.elastic == 0) {
         entries_.erase(found);
     }
 }
@@ -114,6 +117,7 @@ void WorkerCapacityLedger::begin_retire(const std::string& application, std::uin
     Entry& entry = entries_[application];
     if (entry.steady < pool_size || steady_used_ < pool_size)
         throw std::logic_error("retire capacity category mismatch");
+    entry.active = false;
     entry.steady -= pool_size;
     steady_used_ -= pool_size;
     entry.surge += pool_size;
@@ -130,7 +134,8 @@ void WorkerCapacityLedger::release_drained(const std::string& application, std::
         throw std::logic_error("drained capacity category mismatch");
     found->second.surge -= drained;
     surge_used_ -= drained;
-    if (found->second.steady == 0 && found->second.surge == 0) {
+    if (!found->second.active && found->second.steady == 0 && found->second.surge == 0 &&
+        found->second.elastic == 0) {
         entries_.erase(found);
     }
 }
@@ -142,8 +147,48 @@ void WorkerCapacityLedger::release_active(const std::string& application, std::u
         throw std::logic_error("reaped active capacity category mismatch");
     found->second.steady -= reaped;
     steady_used_ -= reaped;
-    if (found->second.steady == 0 && found->second.surge == 0)
+    if (found->second.steady == 0) {
+        found->second.active = false;
+    }
+    if (!found->second.active && found->second.steady == 0 && found->second.surge == 0 &&
+        found->second.elastic == 0) {
         entries_.erase(found);
+    }
+}
+
+bool WorkerCapacityLedger::try_acquire_elastic(const std::string& application) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (steady_used_ >= workers_total_) {
+        return false;
+    }
+    std::uint64_t available = workers_total_ - steady_used_;
+    if (surge_used_ > surge_workers_) {
+        const auto excess = surge_used_ - surge_workers_;
+        if (excess >= available) {
+            return false;
+        }
+        available -= excess;
+    }
+    if (elastic_used_ >= available) {
+        return false;
+    }
+    entries_[application].elastic += 1;
+    elastic_used_ += 1;
+    return true;
+}
+
+void WorkerCapacityLedger::release_elastic(const std::string& application, std::uint64_t count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = entries_.find(application);
+    if (found == entries_.end() || found->second.elastic < count || elastic_used_ < count) {
+        throw std::logic_error("elastic capacity category mismatch");
+    }
+    found->second.elastic -= count;
+    elastic_used_ -= count;
+    if (!found->second.active && found->second.steady == 0 && found->second.surge == 0 &&
+        found->second.elastic == 0) {
+        entries_.erase(found);
+    }
 }
 
 WorkerPoolCapacityLease::WorkerPoolCapacityLease(WorkerCapacityLedger* ledger,
@@ -217,7 +262,7 @@ void WorkerPoolCapacityLease::reaped() {
 bool WorkerCapacityLedger::holds(const std::string& application) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = entries_.find(application);
-    return found != entries_.end() && found->second.steady > 0;
+    return found != entries_.end() && (found->second.active || found->second.steady > 0);
 }
 
 std::uint64_t WorkerCapacityLedger::steady_used() const {
@@ -230,6 +275,11 @@ std::uint64_t WorkerCapacityLedger::surge_used() const {
     return surge_used_;
 }
 
+std::uint64_t WorkerCapacityLedger::elastic_used() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return elastic_used_;
+}
+
 std::uint64_t WorkerCapacityLedger::steady_of(const std::string& application) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = entries_.find(application);
@@ -240,6 +290,12 @@ std::uint64_t WorkerCapacityLedger::surge_of(const std::string& application) con
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = entries_.find(application);
     return found == entries_.end() ? 0 : found->second.surge;
+}
+
+std::uint64_t WorkerCapacityLedger::elastic_of(const std::string& application) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = entries_.find(application);
+    return found == entries_.end() ? 0 : found->second.elastic;
 }
 
 } // namespace capsid::host

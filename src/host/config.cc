@@ -699,6 +699,9 @@ constexpr Schema kRequestV2Schema{Schema::Kind::kObject,
 
 constexpr std::array kPoolV2Members{
     Member{"workers", &kPositiveIntegerSchema, false},
+    Member{"minReady", &kNonNegativeIntegerSchema, false},
+    Member{"maxWorkers", &kPositiveIntegerSchema, false},
+    Member{"idleTimeout", &kDurationStringSchema, false},
     Member{"queueRequests", &kNonNegativeIntegerSchema, false},
     Member{"queueTimeout", &kDurationStringSchema, false},
 };
@@ -1761,31 +1764,69 @@ const Schema* select_manifest_root(const json_t* root) {
     return &kBindingManifestSchema;
 }
 
-bool check_app_consistency(json_t* root, ConfigError& error) {
-    const json_t* pool = json_object_get(root, "pool");
+bool check_pool_object_consistency(const json_t* pool, const std::string& prefix, bool is_v2,
+                                   ConfigError& error) {
     if (!json_is_object(pool)) {
         return true;
     }
     const json_t* min_ready = json_object_get(pool, "minReady");
     const json_t* max_workers = json_object_get(pool, "maxWorkers");
     const json_t* workers = json_object_get(pool, "workers");
+    const json_t* idle_timeout = json_object_get(pool, "idleTimeout");
     if (json_is_integer(min_ready) && json_integer_value(min_ready) > kMaxStaticPoolWorkers) {
         error.code = ConfigErrorCode::kResourceLimit;
-        error.path = "/pool/minReady";
+        error.path = prefix + "/minReady";
         error.message = "static pool worker limit exceeded";
         return false;
     }
     if (json_is_integer(max_workers) && json_integer_value(max_workers) > kMaxStaticPoolWorkers) {
         error.code = ConfigErrorCode::kResourceLimit;
-        error.path = "/pool/maxWorkers";
+        error.path = prefix + "/maxWorkers";
         error.message = "static pool worker limit exceeded";
         return false;
     }
     if (json_is_integer(workers) && json_integer_value(workers) > kMaxStaticPoolWorkers) {
         error.code = ConfigErrorCode::kResourceLimit;
-        error.path = "/pool/workers";
+        error.path = prefix + "/workers";
         error.message = "static pool worker limit exceeded";
         return false;
+    }
+    if (is_v2) {
+        if (workers != nullptr &&
+            (min_ready != nullptr || max_workers != nullptr || idle_timeout != nullptr)) {
+            error.code = ConfigErrorCode::kInvalidValue;
+            error.path = prefix;
+            error.message = "pool.workers cannot be combined with elastic pool fields";
+            return false;
+        }
+        if (json_is_integer(min_ready) && json_is_integer(max_workers) &&
+            json_integer_value(min_ready) > json_integer_value(max_workers)) {
+            error.code = ConfigErrorCode::kInvalidValue;
+            error.path = prefix + "/minReady";
+            error.message = "pool.minReady cannot exceed pool.maxWorkers";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool check_app_consistency(json_t* root, ConfigError& error) {
+    const bool is_v2 = peek_api_version(root) == "capsid/app-v2";
+    return check_pool_object_consistency(json_object_get(root, "pool"), "/pool", is_v2, error);
+}
+
+bool check_host_consistency(json_t* root, ConfigError& error) {
+    if (peek_api_version(root) != "capsid/host-v2") {
+        return true;
+    }
+    for (const char* tier : {"defaults", "maximums"}) {
+        const json_t* tier_obj = json_object_get(root, tier);
+        if (json_is_object(tier_obj)) {
+            if (!check_pool_object_consistency(json_object_get(tier_obj, "pool"),
+                                               std::string("/") + tier + "/pool", true, error)) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -1863,10 +1904,11 @@ bool check_manifest_consistency(json_t* root, ConfigError& error) {
 } // namespace
 
 ConfigValidationResult validate_config_json(ConfigDocument document, std::string_view json) {
-    return validate_document(
-        kMaxConfigBytes, json,
-        document == ConfigDocument::kHost ? &select_host_root : &select_app_root,
-        document == ConfigDocument::kApplication ? &check_app_consistency : nullptr);
+    return validate_document(kMaxConfigBytes, json,
+                             document == ConfigDocument::kHost ? &select_host_root
+                                                               : &select_app_root,
+                             document == ConfigDocument::kApplication ? &check_app_consistency
+                                                                      : &check_host_consistency);
 }
 
 ConfigValidationResult validate_binding_manifest(std::string_view json) {
@@ -2015,6 +2057,11 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
     }
     const bool is_v2 = peek_api_version(root) == "capsid/app-v2";
     app->is_v2 = is_v2;
+    app->has_min_ready = false;
+    app->has_max_workers = false;
+    app->has_idle_timeout = false;
+    app->max_workers = 0;
+    app->idle_timeout_ms = 0;
     if (is_v2) {
         app->workers = 0;
         app->min_ready = 0;
@@ -2178,6 +2225,15 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
     if (pool != nullptr && json_is_object(pool)) {
         if (is_v2) {
             json_t* workers = json_object_get(pool, "workers");
+            json_t* min_ready = json_object_get(pool, "minReady");
+            json_t* max_workers = json_object_get(pool, "maxWorkers");
+            json_t* idle_timeout = json_object_get(pool, "idleTimeout");
+            if (workers != nullptr &&
+                (min_ready != nullptr || max_workers != nullptr || idle_timeout != nullptr)) {
+                *error = "invalid capsid.json pool: cannot mix workers with elastic pool fields";
+                json_decref(root);
+                return false;
+            }
             if (json_is_integer(workers)) {
                 const json_int_t value = json_integer_value(workers);
                 if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
@@ -2186,8 +2242,44 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
                     return false;
                 }
                 app->workers = static_cast<std::uint32_t>(value);
+                app->max_workers = static_cast<std::uint32_t>(value);
                 app->min_ready = static_cast<std::uint32_t>(value);
                 app->has_workers = true;
+            }
+            if (json_is_integer(min_ready)) {
+                const json_int_t value = json_integer_value(min_ready);
+                if (value < 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+                    *error = "invalid capsid.json pool.minReady";
+                    json_decref(root);
+                    return false;
+                }
+                app->has_min_ready = true;
+                app->min_ready = static_cast<std::uint32_t>(value);
+            }
+            if (json_is_integer(max_workers)) {
+                const json_int_t value = json_integer_value(max_workers);
+                if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+                    *error = "invalid capsid.json pool.maxWorkers";
+                    json_decref(root);
+                    return false;
+                }
+                app->has_max_workers = true;
+                app->max_workers = static_cast<std::uint32_t>(value);
+                app->workers = static_cast<std::uint32_t>(value);
+            }
+            if (app->has_min_ready && app->has_max_workers && app->min_ready > app->max_workers) {
+                *error = "invalid capsid.json pool: minReady exceeds maxWorkers";
+                json_decref(root);
+                return false;
+            }
+            if (json_is_string(idle_timeout)) {
+                if (!parse_duration_ms(json_string_value(idle_timeout), &app->idle_timeout_ms) ||
+                    app->idle_timeout_ms == 0) {
+                    *error = "invalid capsid.json pool.idleTimeout";
+                    json_decref(root);
+                    return false;
+                }
+                app->has_idle_timeout = true;
             }
         } else {
             json_t* min_ready = json_object_get(pool, "minReady");

@@ -173,6 +173,16 @@ struct GenerationPoolOptions {
     // instead of always preferring slot 0. Enabled by LocalDevHost for shard-like
     // round-robin parity; Managed/elastic pools keep lowest-slot consolidation.
     bool round_robin_tie_break = false;
+    // Elastic pool configuration (Stage 2): when has_min_ready is false,
+    // min_ready defaults to workers (fixed N/N pool). idle_timeout_ms == 0
+    // disables idle reclamation.
+    bool has_min_ready = false;
+    std::uint32_t min_ready = 0;
+    std::uint64_t idle_timeout_ms = 0;
+    // Two-tier elastic capacity callbacks (invoked outside the pool mutex).
+    std::function<bool()> acquire_elastic_slot;
+    std::function<void()> release_elastic_slot;
+    std::function<void(const std::string& reason)> on_eviction;
     // Optional hook run outside the pool mutex right before forced shutdown on an
     // expired drain deadline with non-idle slots (lets listeners flush kCancel
     // before kShutdown).
@@ -259,6 +269,25 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // re-syncs without counting).
     bool recycle_worker(WorkerExecutor* target);
 
+    // ---- elastic scale-out & eviction (Stage 2) -------------------------
+
+    enum class ScaleOutResult {
+        kSpawnInFlight,
+        kAtAppMax,
+        kCapacityRejected,
+        kNotActive,
+    };
+
+    std::uint32_t min_ready() const noexcept { return min_ready_; }
+    std::uint32_t max_workers() const noexcept { return options_.workers; }
+    std::uint64_t idle_timeout_ms() const noexcept { return options_.idle_timeout_ms; }
+    bool is_elastic() const noexcept { return min_ready_ < options_.workers; }
+    ScaleOutResult request_scale_out();
+    bool scale_out_in_flight() const;
+    void set_scale_callbacks(std::function<void()> on_worker_ready,
+                             std::function<void(const std::string& reason)> on_scale_out_failed);
+    bool evict_idle_worker(std::uint64_t min_residency_ms, const std::string& reason);
+
     // ---- §9.2 event bridge ----------------------------------------------
 
     // Installs the listener's event sink on this pool: a mutex-guarded
@@ -332,8 +361,10 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // pool's members are destroyed, including aborted adopted fleets.
     void notify_executor_event();
     // kExit on `slot`: remove from the READY set, run the recovery
-    // controller, schedule a replacement when the budget allows.
-    void handle_executor_exit(std::size_t slot);
+    // controller, schedule a replacement when the budget allows. Returns
+    // true when an elastic slot was released and release_elastic_slot must be
+    // invoked outside mutex_.
+    bool handle_executor_exit(std::size_t slot);
     // Spawns the replacement worker (startup permit → factory → READY →
     // slot swap). Runs on its own thread so the pump never blocks.
     void run_replacement(std::size_t slot);
@@ -358,6 +389,9 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
         std::shared_ptr<WorkerExecutor> executor;
         bool ready = false; // READY set membership (§8.3)
         bool replacement_in_flight = false;
+        bool scale_out_spawn = false;
+        bool elastic_held = false;
+        bool needs_replacement = false;
         // True once the pool itself requested this worker's shutdown: its
         // later EXIT is an expected lifecycle event (no crash budget, no
         // replacement) instead of an unexpected failure.
@@ -367,16 +401,19 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
         // for an unexpected exit, "unhealthy" for a health recycle).
         std::string replacement_reason;
     };
+    std::uint32_t min_ready_ = 0;
     std::vector<Slot> slots_;
     // Rotating tie-breaker when multiple ready workers share the same minimum load.
     std::size_t next_pick_index_ = 0;
-    // Replaced (dead) executors with pinned requests: kept alive until
-    // the pool dies so a pinned request never touches freed memory.
+    // Replaced (dead or asynchronously reaping) executors kept alive until
+    // exit + drain complete (§8.2 pinning / §8.3 async reaping buffer).
     struct RetiredExecutor {
         std::shared_ptr<WorkerExecutor> executor;
         bool joined = false;
     };
     std::vector<RetiredExecutor> retired_;
+    std::function<void()> on_worker_ready_;
+    std::function<void(const std::string& reason)> on_scale_out_failed_;
     // Slots covered by a scheduled-or-running replacement: the per-App
     // singleflight counter the recovery controller sees.
     std::uint64_t replacements_scheduled_ = 0;

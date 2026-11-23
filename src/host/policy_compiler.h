@@ -73,6 +73,11 @@ struct HostPolicy {
     std::uint64_t default_file_descriptors = 0;
     std::uint64_t default_requests_per_worker = 0;
     std::uint32_t default_workers = 0;
+    bool has_default_min_ready = false;
+    std::uint32_t default_min_ready = 0;
+    std::uint32_t default_max_workers = 0;
+    std::uint64_t default_idle_timeout_ms = 0;
+    std::uint64_t max_idle_timeout_ms = 0;
     bool has_default_queue_requests = false;
     std::uint64_t default_queue_requests = 0;
     std::uint64_t default_queue_header_bytes = 0;
@@ -148,8 +153,13 @@ struct AppRequest {
     std::uint64_t process_address_bytes = 0; // worker.processAddressSpace
     std::uint64_t file_descriptors = 0;      // worker.fileDescriptors, 0 = unset
     bool has_workers = false;
-    std::uint32_t workers = 1; // fixed static pool, min_ready == workers
+    bool has_min_ready = false;
+    bool has_max_workers = false;
+    bool has_idle_timeout = false;
+    std::uint32_t workers = 1; // fixed static pool or maxWorkers
     std::uint32_t min_ready = 1;
+    std::uint32_t max_workers = 0;
+    std::uint64_t idle_timeout_ms = 0;
 };
 
 struct EffectiveEnvEntry {
@@ -196,6 +206,7 @@ struct EffectiveConfig {
     std::uint64_t file_descriptors = 0;      // -> Runtime resource_limits
     std::uint32_t workers = 1;
     std::uint32_t min_ready = 1;
+    std::uint64_t idle_timeout_ms = 0;
     HealthCheckConfig health_check;
     bool strict_sandbox = true;
 

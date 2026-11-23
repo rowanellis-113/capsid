@@ -713,6 +713,44 @@ int main() {
                 "effective_max_request_body_bytes formula mismatch");
     }
 
+    // Config v2 elastic pools & scale-to-zero builtin queue defaults (64 / 5s).
+    {
+        capsid::host::HostPolicy host;
+        host.is_v2 = true;
+        host.max_workers = 16;
+        host.max_pool_workers = 8;
+
+        capsid::host::AppRequest s2z;
+        s2z.is_v2 = true;
+        s2z.workers = 0;
+        s2z.min_ready = 0;
+        s2z.has_min_ready = true;
+        s2z.has_max_workers = true;
+        s2z.max_workers = 6;
+        const auto compiled_s2z = compile_policy(host, s2z, {});
+        require(compiled_s2z.ok, "scale-to-zero v2 pool rejected: " + compiled_s2z.error);
+        require(compiled_s2z.effective.min_ready == 0 && compiled_s2z.effective.workers == 6 &&
+                    compiled_s2z.effective.idle_timeout_ms == 60000 &&
+                    compiled_s2z.effective.queue_requests == 64 &&
+                    compiled_s2z.effective.queue_timeout_ms == 5000,
+                "scale-to-zero defaults (60s idle, 64 queue, 5s queueTimeout) mismatch");
+
+        // Explicit queueRequests=0 disables queuing even on scale-to-zero.
+        capsid::host::AppRequest no_queue = s2z;
+        no_queue.has_queue_requests = true;
+        no_queue.queue_requests = 0;
+        const auto compiled_nq = compile_policy(host, no_queue, {});
+        require(compiled_nq.ok && compiled_nq.effective.queue_requests == 0,
+                "explicit queueRequests=0 on scale-to-zero did not override builtin 64");
+
+        // minReady > maxWorkers rejects in compiler defense-in-depth.
+        capsid::host::AppRequest invalid_bounds = s2z;
+        invalid_bounds.min_ready = 5;
+        invalid_bounds.max_workers = 3;
+        require(!compile_policy(host, invalid_bounds, {}).ok,
+                "elastic minReady > maxWorkers accepted");
+    }
+
     std::cout << "PASS" << std::endl;
     return 0;
 }

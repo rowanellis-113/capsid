@@ -422,12 +422,41 @@ bool parse_pool_tier(json_t* tier, PoolTierConfig* out, bool is_v2) {
     }
     if (is_v2) {
         json_t* workers = json_object_get(pool, "workers");
+        json_t* min_ready = json_object_get(pool, "minReady");
+        json_t* max_workers = json_object_get(pool, "maxWorkers");
+        json_t* idle_timeout = json_object_get(pool, "idleTimeout");
+        if (workers != nullptr &&
+            (min_ready != nullptr || max_workers != nullptr || idle_timeout != nullptr)) {
+            return false;
+        }
         if (json_is_integer(workers)) {
             const json_int_t value = json_integer_value(workers);
             if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
                 return false;
             }
             out->workers = static_cast<std::uint32_t>(value);
+        }
+        if (json_is_integer(min_ready)) {
+            const json_int_t value = json_integer_value(min_ready);
+            if (value < 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+                return false;
+            }
+            out->has_min_ready = true;
+            out->min_ready = static_cast<std::uint32_t>(value);
+        }
+        if (json_is_integer(max_workers)) {
+            const json_int_t value = json_integer_value(max_workers);
+            if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+                return false;
+            }
+            out->has_max_workers = true;
+            out->max_workers = static_cast<std::uint32_t>(value);
+        }
+        if (out->has_min_ready && out->has_max_workers && out->min_ready > out->max_workers) {
+            return false;
+        }
+        if (!parse_duration_text_field(pool, "idleTimeout", &out->idle_timeout_ms)) {
+            return false;
         }
     }
     json_t* queue_requests = json_object_get(pool, "queueRequests");
@@ -793,6 +822,10 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
     config.policy.default_stream_idle_timeout_ms = config.defaults.request.stream_idle_timeout_ms;
     config.policy.default_write_timeout_ms = config.defaults.request.write_timeout_ms;
     config.policy.default_workers = config.defaults.pool.workers;
+    config.policy.has_default_min_ready = config.defaults.pool.has_min_ready;
+    config.policy.default_min_ready = config.defaults.pool.min_ready;
+    config.policy.default_max_workers = config.defaults.pool.max_workers;
+    config.policy.default_idle_timeout_ms = config.defaults.pool.idle_timeout_ms;
     config.policy.has_default_queue_requests = config.defaults.pool.has_queue_requests;
     config.policy.default_queue_requests = config.defaults.pool.queue_requests;
     config.policy.default_queue_header_bytes = config.defaults.pool.queue_header_bytes;
@@ -828,11 +861,17 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
             config.policy.max_worker_memory_bytes = bytes;
         }
         config.policy.max_file_descriptors = config.maximums.worker.file_descriptors;
-        config.policy.max_pool_workers = config.maximums.pool.workers;
+        config.policy.max_pool_workers = config.maximums.pool.has_max_workers
+                                             ? config.maximums.pool.max_workers
+                                             : config.maximums.pool.workers;
+        config.policy.max_idle_timeout_ms = config.maximums.pool.idle_timeout_ms;
         config.policy.max_queue_requests = config.maximums.pool.queue_requests;
         config.policy.max_queue_header_bytes = config.maximums.pool.queue_header_bytes;
         config.policy.max_queue_timeout_ms = config.maximums.pool.queue_timeout_ms;
     }
+    const std::uint32_t default_pool_max = config.policy.default_max_workers != 0
+                                               ? config.policy.default_max_workers
+                                               : config.policy.default_workers;
     if ((config.policy.max_request_timeout_ms != 0 &&
          config.policy.default_request_timeout_ms > config.policy.max_request_timeout_ms) ||
         (config.policy.max_worker_memory_bytes != 0 &&
@@ -844,7 +883,11 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
         (config.policy.max_requests_per_worker != 0 &&
          config.policy.default_requests_per_worker > config.policy.max_requests_per_worker) ||
         (config.policy.max_pool_workers != 0 &&
-         config.policy.default_workers > config.policy.max_pool_workers) ||
+         default_pool_max > config.policy.max_pool_workers) ||
+        (config.policy.has_default_min_ready && config.policy.max_pool_workers != 0 &&
+         config.policy.default_min_ready > config.policy.max_pool_workers) ||
+        (config.policy.max_idle_timeout_ms != 0 &&
+         config.policy.default_idle_timeout_ms > config.policy.max_idle_timeout_ms) ||
         (config.policy.max_queue_requests != 0 &&
          config.policy.default_queue_requests > config.policy.max_queue_requests) ||
         (config.policy.max_queue_header_bytes != 0 &&

@@ -976,17 +976,21 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
             }
         }
         app.has_workers = true;
+        app.has_min_ready = false;
+        app.has_max_workers = false;
+        app.has_idle_timeout = false;
         app.workers = options_.workers_override;
+        app.max_workers = options_.workers_override;
         app.min_ready = options_.workers_override;
+        app.idle_timeout_ms = 0;
     }
 
+    const std::uint32_t local_max_workers = std::max<std::uint32_t>(
+        {1U, options_.workers_override, app.workers, app.max_workers, app.min_ready});
     const HostPolicy host_policy =
         has_host_config
             ? host_cfg.policy
-            : make_permissive_local_host(app, options_.strict_sandbox,
-                                         std::max<std::uint32_t>(1U, options_.workers_override > 0
-                                                                         ? options_.workers_override
-                                                                         : app.workers));
+            : make_permissive_local_host(app, options_.strict_sandbox, local_max_workers);
 
     // 4. Resolve env valueFrom against --secrets-dir.
     std::vector<EffectiveEnvEntry> resolved_env;
@@ -1222,6 +1226,9 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
     pool_options.version = "local";
     pool_options.generation_digest = sha256_hex(spec->bundle);
     pool_options.workers = compiled.effective.workers;
+    pool_options.has_min_ready = true;
+    pool_options.min_ready = compiled.effective.min_ready;
+    pool_options.idle_timeout_ms = compiled.effective.idle_timeout_ms;
     pool_options.factory = std::move(factory);
     pool_options.channel_budget = channel_budget;
     pool_options.recovery = recovery_resolved.policy;

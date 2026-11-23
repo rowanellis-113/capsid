@@ -675,10 +675,30 @@ void test_v2_orthogonal_host_and_app_validation() {
         ConfigDocument::kApplication,
         R"json({"apiVersion":"capsid/app-v2","worker":{"processAddressSpace":"256MiB"}})json",
         "/worker/processAddressSpace", "App v2 rejects removed worker.processAddressSpace");
-    require_unknown_field(
+    require_valid(ConfigDocument::kApplication,
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1,"maxWorkers":1}})json",
+                  "App v2 elastic fixed-bounds pool");
+    require_valid(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1,"maxWorkers":1}})json",
-        "/pool/minReady", "App v2 rejects minReady");
+        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":0,"maxWorkers":8,"idleTimeout":"60s"}})json",
+        "App v2 scale-to-zero elastic pool");
+    require_error(ConfigDocument::kApplication,
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"workers":2,"minReady":1}})json",
+                  ConfigErrorCode::kInvalidValue, "/pool",
+                  "App v2 rejects mixing workers with minReady");
+    require_error(
+        ConfigDocument::kApplication,
+        R"json({"apiVersion":"capsid/app-v2","pool":{"workers":2,"idleTimeout":"30s"}})json",
+        ConfigErrorCode::kInvalidValue, "/pool", "App v2 rejects mixing workers with idleTimeout");
+    require_error(ConfigDocument::kApplication,
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":4,"maxWorkers":2}})json",
+                  ConfigErrorCode::kInvalidValue, "/pool/minReady",
+                  "App v2 rejects minReady > maxWorkers");
+    require_error(
+        ConfigDocument::kHost,
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"p","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],"defaults":{"pool":{"workers":2,"minReady":1}}})json",
+        ConfigErrorCode::kInvalidValue, "/defaults/pool",
+        "Host v2 rejects mixing defaults.pool.workers with minReady");
     require_error(
         ConfigDocument::kApplication, R"json({"apiVersion":"capsid/app-v2","healthCheck":{}})json",
         ConfigErrorCode::kInvalidValue, "/healthCheck/path", "App v2 healthCheck requires path");

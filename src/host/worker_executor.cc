@@ -39,6 +39,12 @@ void write_stderr(std::string_view message) {
     std::fputc('\n', stderr);
 }
 
+std::uint64_t steady_now_ms() noexcept {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(SteadyClock::now().time_since_epoch())
+            .count());
+}
+
 } // namespace
 
 bool decode_worker_log_event(const capsid_event& event, WorkerEvent* output, std::string* error) {
@@ -200,6 +206,9 @@ bool WorkerExecutor::adopt(capsid_worker* worker, std::string* error) {
         capsid::client_channel_limits(worker, &channel_limits_);
         ready_ = true;
         ready_match_ = true;
+        const std::uint64_t now_ms = steady_now_ms();
+        started_at_ms_.store(now_ms, std::memory_order_release);
+        last_active_at_ms_.store(now_ms, std::memory_order_release);
     }
     worker_thread_ = std::thread([this] { worker_thread_main(); });
     return true;
@@ -675,6 +684,7 @@ bool WorkerExecutor::execute_command(Command command) {
             live_channel_ids_.insert(command.channel_id);
             publish_channels(live_channel_ids_.size());
         }
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
         break;
     }
     case CommandType::kWriteRequest: {
@@ -692,6 +702,7 @@ bool WorkerExecutor::execute_command(Command command) {
         if (result != CAPSID_OK) {
             return report_runtime_failure(command.request_id, result, "write_request");
         }
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
         break;
     }
     case CommandType::kEndRequest: {
@@ -699,6 +710,7 @@ bool WorkerExecutor::execute_command(Command command) {
         if (result != CAPSID_OK) {
             return report_runtime_failure(command.request_id, result, "end_request");
         }
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
         break;
     }
     case CommandType::kCancel: {
@@ -802,6 +814,7 @@ bool WorkerExecutor::execute_command(Command command) {
         if (result != CAPSID_OK)
             return false;
         refresh_channels();
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
         break;
     }
     case CommandType::kDialAccept:
@@ -1052,6 +1065,11 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         ready_match_ = match;
         ready_error_ = match ? std::string() : ready_error;
         ready_proof_ = proof;
+        if (match) {
+            const std::uint64_t now_ms = steady_now_ms();
+            started_at_ms_.store(now_ms, std::memory_order_release);
+            last_active_at_ms_.store(now_ms, std::memory_order_release);
+        }
         cv_.notify_all();
         return true;
     }
@@ -1240,10 +1258,12 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         }
 #endif
         refresh_channels();
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
         queue_worker_event(std::move(output));
         return true;
     }
     case CAPSID_EVENT_RESPONSE_BODY: {
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
         WorkerEvent worker_event;
         worker_event.type = WorkerEvent::Type::kResponseBody;
         worker_event.request_id = event.request_id;
@@ -1252,6 +1272,7 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         return true;
     }
     case CAPSID_EVENT_RESPONSE_END: {
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
         // The Runtime erased this request when it sent RESPONSE_END, so any
         // command still queued for it (a response-credit grant most likely)
         // would be rejected by the Runtime ABI as an invalid frame and logged
