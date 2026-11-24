@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "3436df738b6059959c97a7c13f7d32a8924c97bfdef9143d0018c608b85a94c7",
+      "sha256": "c8406c8a8701d21b9caf664cad7398a7b00d5c3ca01e85d3eff929d8ae38bd6e",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
     },
     {
@@ -56,7 +56,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "4909239452ef6e28fda67a2113c957ba17b2808d5de5a25fa02ee081546e01bb",
+      "sha256": "048d5f93e7e0f8a8ba3c03b8823edd07a3553075bb7e38899d18215948ce0f30",
       "review": "Normative protocol constants/budgets retained; status/current acceptance/transport and same-version history caveat corrected."
     },
     {
@@ -64,7 +64,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "5d31ba683496bb9d09ad4c02d08482bf621571f295d2d1f6ab0d69d11ab0d39f",
+      "sha256": "6581fbacad62d4970cf303b7de4854a7481c344072f31f9dcf1b203739826e2b",
       "review": "Original complete lane/point/round/response/PSS/identity controls retained; bounded hashed compression is transport only."
     },
     {
@@ -650,7 +650,7 @@
       "reviewed": true,
       "hashMode": "canonical-lf-text",
       "sha256": "15fa183d827e94ea7eacafd3fa783454e3dabd03261d611893104125d3d083a8",
-      "review": "Design milestones A–C assessed against production paths, two reproducible policy counterexamples, Windows and Linux CTest, cgroup telemetry, and a same-artifact scale-to-zero run."
+      "review": "Design milestones A\u2013C assessed against production paths, two reproducible policy counterexamples, Windows and Linux CTest, cgroup telemetry, and a same-artifact scale-to-zero run."
     },
     {
       "path": "docs/history/v0.3.2/regression-review.md",
@@ -689,7 +689,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "4d970e2c504cc4ca2d5c2fcf4c0a6341dc494aca351cbb4c9e985af915f765c8",
+      "sha256": "59275b14bdfdcfe34f461c02f270682177da70ba9c789892f7caf1f413f8e953",
       "review": "Accepted 82eaab9 source/CPU/protocol evidence, unchanged historical records and no claim of beta.5 performance or formal paired improvement.",
       "archivedSource": "docs/history/archives/2026-11-17/performance-benchmarks.md.txt"
     },
@@ -860,7 +860,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "fbc6ae6f2e69ba63524c8ec891892c0cede99dc32bc97f0b6344604fcf87db14",
+      "sha256": "d0766c40384178cab7e403b027dcee8514f43330577d5bcb9463f4f6e5f89567",
       "review": "Generated files, verified archive replay, current prerelease versus measured source boundaries and deployment requirements."
     },
     {

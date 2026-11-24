@@ -189,9 +189,9 @@ Formal mode requires clean measured-build/session metadata, all eight stacks
 `bun-jitless`, `node`, `bun`) and three sizes, complete sealed
 raw/correctness/identity evidence and self-validation against the collector.
 Restricted `--observation` output has no publication envelope. `perf-site/data.js`
-retains four verified local-rebuild records (the archived `2026-11-16` `v1`
-session at `485b29b` plus `v3` local rebuilds at `82eaab9`, `c7a80b9`, and
-`6d4cc61`), none of which measures distributed release packages directly.
+retains five verified local-rebuild records (the archived `2026-11-16` `v1`
+session at `485b29b` plus `v3` local rebuilds at `82eaab9`, `c7a80b9`, `6d4cc61`,
+and `56ed405`), none of which measures distributed release packages directly.
 Controller tests and restricted smoke still do not qualify a performance point.
 
 ### 2.3 Density lane — `bench/density-lane.sh`
@@ -309,7 +309,7 @@ at least one cold or 100 warm requests each; a shared total is insufficient.
 
 The density producer has small-pool managed/strict/reference smoke and
 synthetic complete-archive controls, separate from the accepted real
-fill-to-budget/three-lane records (`485b29b`, `82eaab9`, `c7a80b9`, and `6d4cc61`).
+fill-to-budget/three-lane records (`485b29b`, `82eaab9`, `c7a80b9`, `6d4cc61`, and `56ed405`).
 Each record belongs strictly to its measured local rebuild.
 Do not promote the smoke or synthetic fixtures into performance conclusions.
 

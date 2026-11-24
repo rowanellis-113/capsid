@@ -1,10 +1,10 @@
 # Performance History Site
 
 The [performance site](https://rowanellis-113.github.io/capsid/) defaults to the
-latest verified point: a local WSL2 Release/LTO rebuild of the pre-publication
-`v0.3.1-beta.1` snapshot (`6d4cc61`, 2026-11-22, `quickjs-turbo`; the published
-`v0.3.1-beta.1` Git tag points to `845ae5d`). Its results do
-**not** measure the distributed packages. The earlier `v0.3.0-beta.5` (`c7a80b9`),
+latest verified point: a local WSL2 Release/LTO rebuild of the untagged
+`dev/v0.3.2` snapshot (`56ed405`, 2026-11-24, `quickjs-turbo v0.15.1-turbo.8`).
+Its results do **not** measure any distributed release package. The earlier
+`v0.3.1-beta.1` local rebuild (`6d4cc61`), `v0.3.0-beta.5` (`c7a80b9`),
 untagged beta.4 `v3` point (`82eaab9`), archived `v1` cross-language point and
 unverified `v0.2.2` observation remain selectable.
 See [current status](../docs/reference/release-status.md) and
@@ -16,7 +16,7 @@ See [current status](../docs/reference/release-status.md) and
 | --- | --- |
 | `index.html` | Product landing page and verifiable benchmark hub: Dark/Light themes, Quick Start timeline, self-contained SVG charts, three-tier reference UX, scenario guide and explicit source/verification labels |
 | `logo.png` | Repository brand artwork staged for OpenGraph / social sharing previews |
-| `data.js` | Collector-generated points: three verified `v3` points, archived verified `v1`, and one unverified historical observation |
+| `data.js` | Collector-generated points: four verified `v3` points, archived verified `v1`, and one unverified historical observation |
 | `status.js` | Generated release/source/measurement context from `tools/refresh-documentation-data.py` |
 | `archive-index.json` / generated `archive-index.js` | Hashed compressed transport/part index and its UI projection for complete sealed evidence |
 | `archives/` | Full original lane bytes in deterministic gzip/TAR transports, split `<= 40 MiB` |
@@ -24,8 +24,8 @@ See [current status](../docs/reference/release-status.md) and
 `v0.3.0-beta.5` (`c7a80b9`) matches its Git source tag, while `6d4cc61` carries
 `sourceTag: "v0.3.1-beta.1"` from its pre-publication measurement snapshot
 (`matchesPublishedBetaSource: false` against published `v0.3.1-beta.1` at
-`845ae5d`); beta.4 development snapshot `82eaab9` has archive label
-`v0.3.0-beta.4` and an empty `sourceTag`. None represents a measurement of the
+`845ae5d`); development snapshots `56ed405` (`v0.3.2-dev`) and `82eaab9`
+(`v0.3.0-beta.4`) carry empty `sourceTag`. None represents a measurement of the
 distributed binaries. Do not draw a paired trend from separate sessions with
 different reference versions, contracts or unverified historical records.
 
@@ -43,9 +43,9 @@ To also validate the generated `v0.3.1-beta.1` release/status data, run
 `dev/v0.3.1` checkout at `a7fd47e` (on `dev/v0.3.2`, `CMakeLists.txt` is `0.3.2`
 while the captured `v0.3.1-beta.1` release record pins `0.3.1`).
 
-The output must be new and outside `perf-site`. Allow at least 14 GiB of scratch:
-replaying `18671` evidence files plus 12 checksum manifests (`18683` files total)
-takes about `10.25 GiB` of raw bytes, transported in about `629 MiB` across 12 bundles.
+The output must be new and outside `perf-site`. Allow at least 16 GiB of scratch:
+replaying `23201` evidence files plus 15 checksum manifests (`23216` files total)
+takes about `12.80 GiB` of raw bytes, transported in about `789 MiB` across 15 bundles.
 Compression does not reduce the number of samples.
 The stager restores the original portable namespace and invokes the ordinary
 complete lane/point validators for every verified point. It checks
@@ -70,15 +70,17 @@ This is **replay**, not a new measurement:
 ```sh
 python3 bench/perf_archive.py --repo . --output /path/to/new-archive-root
 ARCHIVES=/path/to/new-archive-root
-SESSION=local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61
+SESSION=local-wsl-v032-dev-v3-20261124T075629Z-56ed405
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 bench/collect-perf-point.py --repo "$ARCHIVES" \
   --cold-start "$ARCHIVES/bench/results/${SESSION}-cold" \
   --qps "$ARCHIVES/bench/results/${SESSION}-qps" \
   --density "$ARCHIVES/bench/results/${SESSION}-density" \
-  --version 0.3.1-beta.1 --release v0.3.1-beta.1 --generated-at "$GENERATED_AT" --check
+  --version 0.3.2-dev --release v0.3.2-dev --generated-at "$GENERATED_AT" --check
 ```
 
+For `v0.3.1-beta.1`, use `SESSION=local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61`,
+`--version 0.3.1-beta.1` and `--release v0.3.1-beta.1`.
 For `v0.3.0-beta.5`, use `SESSION=local-wsl-beta5-v3-20261121T064717Z-c7a80b9`,
 `--version 0.3.0-beta.5` and `--release v0.3.0-beta.5`.
 For the earlier `v3` point, use `SESSION=local-wsl-v030-beta4-v3-20261120T052109Z-82eaab99`,
