@@ -308,8 +308,9 @@ try {
   const selector = elements.get('record-select');
   assert.equal(selector.children.length, current.points.length);
   assert.equal(selector.value, String(acceptedIndex));
-  assert.equal(acceptedPoint.git.tag, 'v0.3.1-beta.1');
-  assert.match(elements.get('nav-meta').textContent, /v0\.3\.1-beta\.1 · tagged source build/);
+  assert.equal(acceptedPoint.version, '0.3.2-dev');
+  assert.equal(acceptedPoint.git.tag, '');
+  assert.match(elements.get('nav-meta').textContent, /0\.3\.2-dev dev snapshot · d0adc21f/);
   assert.match(
     elements.get('release-context').innerHTML,
     /does not measure distributed release binaries/,
@@ -331,6 +332,13 @@ try {
   }
   assert.match(packedLinks(), /href="evidence-index.json"/);
   assert.doesNotMatch(packedLinks(), /href="evidence\/bench\/results\//);
+  const beta1Index = current.points.findIndex((point) => point.version === '0.3.1-beta.1');
+  assert.ok(beta1Index >= 0);
+  selector.value = String(beta1Index);
+  selector.onchange();
+  assert.match(elements.get('nav-meta').textContent, /v0\.3\.1-beta\.1 · tagged source build/);
+  assert.match(packedLinks(), /local-wsl-v031-beta1-v3-/);
+  assert.doesNotMatch(packedLinks(), /local-wsl-v032-dev-v3-/);
   const beta5Index = current.points.findIndex((point) => point.version === '0.3.0-beta.5');
   assert.ok(beta5Index >= 0);
   selector.value = String(beta5Index);

@@ -18,45 +18,45 @@
   "lanes": {
     "cold-start": {
       "cells": 24,
-      "checksumSHA256": "9448afdb8d4b12dee59b7edc0c60fe599881942d96d937cc347a99c7dec36556",
+      "checksumSHA256": "8d3b061c5aacbc05ec2185bd6af18763c64e28c89d3c9b0277a854742e9b4815",
       "evidenceFiles": 1213,
       "passed": true
     },
     "density": {
       "cells": 12,
-      "checksumSHA256": "7fdc5d19a98f1ea838caf80c5af12cbf64a4ca09ebb0615b5d452d7377b436c2",
+      "checksumSHA256": "4acea65574af74bb2b84013636cd6f15bb768c72b59eaf48c1a95886a9ead2bc",
       "evidenceFiles": 2742,
       "passed": true
     },
     "qps": {
       "cells": 28,
-      "checksumSHA256": "ec329dc01b6e4b5455a1f7d8a873eb882ecc6db3484516bcc2f0163cab2bf3c7",
+      "checksumSHA256": "ad50ed8081f90cf56a252b25777ba98c387d360865a7f302b9b7d80ce28fa5d1",
       "evidenceFiles": 575,
       "passed": true
     }
   },
-  "measuredSourceFilesVerified": 5508,
+  "measuredSourceFilesVerified": 5516,
   "measuredSourceManifest": "docs/data/performance-source-manifest-v032.json",
   "measurementBuild": "local-rebuild",
   "physicalWindowsHostExclusivityNotClaimed": true,
   "pointRelease": "v0.3.2-dev",
   "pointVersion": "0.3.2-dev",
-  "productCheckout": "56ed405fae71157b3767940e3d3b2ca3ca469f86",
-  "productTree": "c120d56d214017a8fa87b5c961f9f4d1113f4583",
+  "productCheckout": "d0adc21fcfb5bf75770977c8f1b0ba3c3c0b07b6",
+  "productTree": "180f6ad1d08f6bc55ab1b8e54d2915472f36c672",
   "publishedReleaseAssetsMeasured": false,
   "quietWindows": [
     {
-      "aggregateIdle": 0.995004995004995,
-      "attempt": 1,
+      "aggregateIdle": 1.0,
+      "attempt": 2,
       "cpuDelta": {
         "cpu0": [
           0,
           0,
-          1,
-          497,
+          0,
+          500,
           0,
           0,
-          5,
+          0,
           0
         ],
         "cpu1": [
@@ -73,14 +73,14 @@
           0,
           0,
           0,
-          496,
+          500,
           0,
           0,
-          3,
+          0,
           0
         ],
         "cpu3": [
-          1,
+          0,
           0,
           0,
           499,
@@ -90,74 +90,17 @@
           0
         ]
       },
-      "endedAt": "2026-11-24T07:58:16.610062+00:00",
+      "endedAt": "2026-11-24T14:20:24.453544+00:00",
       "idle": {
-        "cpu0": 0.9880715705765407,
-        "cpu1": 1.0,
-        "cpu2": 0.9939879759519038,
-        "cpu3": 0.998
-      },
-      "phase": "before-cold",
-      "physicalHostExclusivityClaimed": false,
-      "quiet": true,
-      "startedAt": "2026-11-24T07:58:11.609506+00:00"
-    },
-    {
-      "aggregateIdle": 0.9995002498750625,
-      "attempt": 1,
-      "cpuDelta": {
-        "cpu0": [
-          0,
-          0,
-          0,
-          500,
-          0,
-          0,
-          1,
-          0
-        ],
-        "cpu1": [
-          0,
-          0,
-          0,
-          500,
-          0,
-          0,
-          0,
-          0
-        ],
-        "cpu2": [
-          0,
-          0,
-          0,
-          500,
-          0,
-          0,
-          0,
-          0
-        ],
-        "cpu3": [
-          0,
-          0,
-          0,
-          500,
-          0,
-          0,
-          0,
-          0
-        ]
-      },
-      "endedAt": "2026-11-24T08:04:05.789324+00:00",
-      "idle": {
-        "cpu0": 0.998003992015968,
+        "cpu0": 1.0,
         "cpu1": 1.0,
         "cpu2": 1.0,
         "cpu3": 1.0
       },
-      "phase": "before-qps",
+      "phase": "before-cold",
       "physicalHostExclusivityClaimed": false,
       "quiet": true,
-      "startedAt": "2026-11-24T08:04:00.788891+00:00"
+      "startedAt": "2026-11-24T14:20:19.452959+00:00"
     },
     {
       "aggregateIdle": 1.0,
@@ -177,7 +120,7 @@
           0,
           0,
           0,
-          499,
+          500,
           0,
           0,
           0,
@@ -204,7 +147,64 @@
           0
         ]
       },
-      "endedAt": "2026-11-24T08:54:41.546679+00:00",
+      "endedAt": "2026-11-24T14:26:40.407652+00:00",
+      "idle": {
+        "cpu0": 1.0,
+        "cpu1": 1.0,
+        "cpu2": 1.0,
+        "cpu3": 1.0
+      },
+      "phase": "before-qps",
+      "physicalHostExclusivityClaimed": false,
+      "quiet": true,
+      "startedAt": "2026-11-24T14:26:35.407303+00:00"
+    },
+    {
+      "aggregateIdle": 1.0,
+      "attempt": 1,
+      "cpuDelta": {
+        "cpu0": [
+          0,
+          0,
+          0,
+          500,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cpu1": [
+          0,
+          0,
+          0,
+          500,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cpu2": [
+          0,
+          0,
+          0,
+          500,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          0,
+          0,
+          0,
+          500,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "endedAt": "2026-11-24T15:19:13.304595+00:00",
       "idle": {
         "cpu0": 1.0,
         "cpu1": 1.0,
@@ -214,7 +214,7 @@
       "phase": "before-density",
       "physicalHostExclusivityClaimed": false,
       "quiet": true,
-      "startedAt": "2026-11-24T08:54:35.963990+00:00"
+      "startedAt": "2026-11-24T15:19:08.304230+00:00"
     },
     {
       "aggregateIdle": 1.0,
@@ -261,7 +261,7 @@
           0
         ]
       },
-      "endedAt": "2026-11-24T09:50:20.870089+00:00",
+      "endedAt": "2026-11-24T16:13:40.889304+00:00",
       "idle": {
         "cpu0": 1.0,
         "cpu1": 1.0,
@@ -271,7 +271,7 @@
       "phase": "after-density",
       "physicalHostExclusivityClaimed": false,
       "quiet": true,
-      "startedAt": "2026-11-24T09:50:15.869581+00:00"
+      "startedAt": "2026-11-24T16:13:35.888835+00:00"
     }
   ],
   "referenceArchivesSHA256": {
@@ -280,9 +280,9 @@
     "node-v26.13.1-linux-x64.tar.xz": "5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864",
     "workerd-linux-64.gz": "4e4bf157baff80337937b09474013f7761efcb791dd923acf50c3b995a3126d0"
   },
-  "reviewedUTC": "2026-11-24T09:54:07.739538+00:00",
-  "session": "local-wsl-v032-dev-v3-20261124T075629Z-56ed405",
+  "reviewedUTC": "2026-11-24T16:13:40Z",
+  "session": "local-wsl-v032-dev-v3-20261124T141726Z-d0adc21",
   "sourceTag": "",
-  "standalonePointSHA256": "f4776ed6e03e5757c9e385c52279fb6510365015e0f4d5ba7c4e77a971e16b1c",
+  "standalonePointSHA256": "db5e9ad1474129363e09db6762852f33bce405dfee0b19e1ce7790aaa5b86f70",
   "wholeLocalSessionAccepted": true
 }

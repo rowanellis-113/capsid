@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "c8406c8a8701d21b9caf664cad7398a7b00d5c3ca01e85d3eff929d8ae38bd6e",
+      "sha256": "d62f00fa4fc3adfa96b59247696cc745c58283ba91690dff67b9639e34520e9d",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
     },
     {
@@ -56,7 +56,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "048d5f93e7e0f8a8ba3c03b8823edd07a3553075bb7e38899d18215948ce0f30",
+      "sha256": "035dc5dd53805f3c7af1c26dd4538a6d9cfc98ae97d8d2dec48588d7c01d1518",
       "review": "Normative protocol constants/budgets retained; status/current acceptance/transport and same-version history caveat corrected."
     },
     {
@@ -64,7 +64,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "6581fbacad62d4970cf303b7de4854a7481c344072f31f9dcf1b203739826e2b",
+      "sha256": "2af2e0bbdc6525f64c77b289167dbafe1a5119a84ed59a0d833ecc2a7166b874",
       "review": "Original complete lane/point/round/response/PSS/identity controls retained; bounded hashed compression is transport only."
     },
     {
@@ -689,7 +689,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "59275b14bdfdcfe34f461c02f270682177da70ba9c789892f7caf1f413f8e953",
+      "sha256": "1cfeba935cf51cbcfba93a316c0473e015f6d553f0dd6152c9c25b5adb181fe1",
       "review": "Accepted 82eaab9 source/CPU/protocol evidence, unchanged historical records and no claim of beta.5 performance or formal paired improvement.",
       "archivedSource": "docs/history/archives/2026-11-17/performance-benchmarks.md.txt"
     },
@@ -860,7 +860,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "d0766c40384178cab7e403b027dcee8514f43330577d5bcb9463f4f6e5f89567",
+      "sha256": "f2fff815ca47b455e48dd3170e82f7950ae6b243efe1cbbb273066fa4a9017ee",
       "review": "Generated files, verified archive replay, current prerelease versus measured source boundaries and deployment requirements."
     },
     {

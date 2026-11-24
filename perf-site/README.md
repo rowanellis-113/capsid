@@ -2,7 +2,7 @@
 
 The [performance site](https://rowanellis-113.github.io/capsid/) defaults to the
 latest verified point: a local WSL2 Release/LTO rebuild of the untagged
-`dev/v0.3.2` snapshot (`56ed405`, 2026-11-24, `quickjs-turbo v0.15.1-turbo.8`).
+`dev/v0.3.2` snapshot (`d0adc21`, 2026-11-24, `quickjs-turbo v0.15.1-turbo.8`).
 Its results do **not** measure any distributed release package. The earlier
 `v0.3.1-beta.1` local rebuild (`6d4cc61`), `v0.3.0-beta.5` (`c7a80b9`),
 untagged beta.4 `v3` point (`82eaab9`), archived `v1` cross-language point and
@@ -24,7 +24,7 @@ See [current status](../docs/reference/release-status.md) and
 `v0.3.0-beta.5` (`c7a80b9`) matches its Git source tag, while `6d4cc61` carries
 `sourceTag: "v0.3.1-beta.1"` from its pre-publication measurement snapshot
 (`matchesPublishedBetaSource: false` against published `v0.3.1-beta.1` at
-`845ae5d`); development snapshots `56ed405` (`v0.3.2-dev`) and `82eaab9`
+`845ae5d`); development snapshots `d0adc21` (`v0.3.2-dev`) and `82eaab9`
 (`v0.3.0-beta.4`) carry empty `sourceTag`. None represents a measurement of the
 distributed binaries. Do not draw a paired trend from separate sessions with
 different reference versions, contracts or unverified historical records.
@@ -45,7 +45,7 @@ while the captured `v0.3.1-beta.1` release record pins `0.3.1`).
 
 The output must be new and outside `perf-site`. Allow at least 16 GiB of scratch:
 replaying `23201` evidence files plus 15 checksum manifests (`23216` files total)
-takes about `12.80 GiB` of raw bytes, transported in about `789 MiB` across 15 bundles.
+takes about `12.81 GiB` of raw bytes, transported in about `789 MiB` across 15 bundles.
 Compression does not reduce the number of samples.
 The stager restores the original portable namespace and invokes the ordinary
 complete lane/point validators for every verified point. It checks
@@ -70,7 +70,7 @@ This is **replay**, not a new measurement:
 ```sh
 python3 bench/perf_archive.py --repo . --output /path/to/new-archive-root
 ARCHIVES=/path/to/new-archive-root
-SESSION=local-wsl-v032-dev-v3-20261124T075629Z-56ed405
+SESSION=local-wsl-v032-dev-v3-20261124T141726Z-d0adc21
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 bench/collect-perf-point.py --repo "$ARCHIVES" \
   --cold-start "$ARCHIVES/bench/results/${SESSION}-cold" \
