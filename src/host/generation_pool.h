@@ -125,6 +125,7 @@ struct GenerationPoolOptions {
     // Ordering: single producer (the pump), FIFO per executor, and kExit is
     // always the last event of its executor.
     std::function<void(const WorkerExecutor*, WorkerEvent)> event_sink;
+    std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> shared_event_sink;
     // §9.4 reaper-finished notification: called exactly once, on the pump
     // thread, after the pool entered kDead and its workers were reaped
     // (finalize_drain) — the "reaper completed" instant after which the
@@ -243,6 +244,57 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
 
     // ---- scheduling (§8.2) ---------------------------------------------
 
+    // Short-lived RAII dispatch claim protecting an acquired READY executor
+    // from idle eviction or shutdown between worker selection and kBeginRequest
+    // submission.
+    class DispatchLease {
+      public:
+        DispatchLease() = default;
+        explicit DispatchLease(std::shared_ptr<WorkerExecutor> executor) noexcept
+            : executor_(std::move(executor)) {
+            if (executor_) {
+                executor_->acquire_dispatch();
+            }
+        }
+        ~DispatchLease() { release(); }
+        DispatchLease(const DispatchLease&) = delete;
+        DispatchLease& operator=(const DispatchLease&) = delete;
+        DispatchLease(DispatchLease&& other) noexcept : executor_(std::move(other.executor_)) {}
+        DispatchLease& operator=(DispatchLease&& other) noexcept {
+            if (this != &other) {
+                release();
+                executor_ = std::move(other.executor_);
+            }
+            return *this;
+        }
+        void release() noexcept {
+            if (executor_) {
+                executor_->release_dispatch();
+                executor_.reset();
+            }
+        }
+        // Atomically transfers this dispatch claim to an inflight kBeginRequest
+        // on the leased executor so occupancy never drops to zero mid-handoff.
+        bool submit_begin(Command command) {
+            if (executor_) {
+                std::shared_ptr<WorkerExecutor> target = std::move(executor_);
+                return target->submit_begin_from_dispatch(std::move(command));
+            }
+            return false;
+        }
+        const std::shared_ptr<WorkerExecutor>& executor() const noexcept { return executor_; }
+        WorkerExecutor* get() const noexcept { return executor_.get(); }
+        WorkerExecutor* operator->() const noexcept { return executor_.get(); }
+        explicit operator bool() const noexcept { return executor_ != nullptr; }
+
+      private:
+        std::shared_ptr<WorkerExecutor> executor_;
+    };
+
+    // Least-loaded READY slot (tie: lowest slot index), claiming a short-lived
+    // DispatchLease under mutex_ unless at_max_inflight is reached.
+    DispatchLease acquire_worker(bool* at_max_inflight = nullptr);
+
     // Least-loaded READY slot (tie: lowest slot index). Returns nullptr
     // when the generation is not kActive or no worker is READY — the
     // caller synthesizes 503 and must NOT route anywhere. The returned
@@ -252,9 +304,8 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // ---- direction A: active-health recycle -----------------------------
 
     // The first READY slot's executor — the active-health probe target
-    // (v1 pools are single-worker; a multi-worker pool probes its lowest
-    // READY slot). nullptr when the generation is not kActive or no
-    // worker is READY. This is a borrowed pointer: the caller must prevent
+    // (probes the pool's lowest READY slot). nullptr when the generation is not
+    // kActive or no worker is READY. This is a borrowed pointer: the caller must prevent
     // the pool from completing a drain while using it. Concurrent users
     // should take the independently owned snapshot below instead.
     WorkerExecutor* current_worker();
@@ -292,6 +343,7 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
         std::uint64_t last_active_at_ms = 0;
         bool idle = false;
         bool elastic_held = false;
+        bool evictable = true;
     };
 
     std::uint32_t min_ready() const noexcept { return min_ready_; }
@@ -306,10 +358,15 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     bool scale_out_in_flight() const;
     std::size_t active_or_spawning_workers() const;
     std::vector<WorkerSlotSnapshot> snapshot_workers() const;
+    // Monotonic count of drain-completion checks evaluated by the pump thread.
+    std::uint64_t drain_check_cycles() const noexcept {
+        return drain_check_cycles_.load(std::memory_order_acquire);
+    }
     void set_scale_callbacks(std::function<void()> on_worker_ready,
                              std::function<void(const std::string& reason)> on_scale_out_failed);
     bool evict_idle_worker(std::uint64_t min_residency_ms, const std::string& reason,
-                           bool require_elastic_held = false);
+                           bool require_elastic_held = false,
+                           std::int64_t* evicted_pid_out = nullptr);
 
     // ---- §9.2 event bridge ----------------------------------------------
 
@@ -323,6 +380,8 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // before wiring would lose its response events and hang) — wire before
     // the pool starts serving traffic.
     void set_event_sink(std::function<void(const WorkerExecutor*, WorkerEvent)> sink);
+    void
+    set_shared_event_sink(std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> sink);
 
     // ---- diagnostics / load signal -------------------------------------
 
@@ -388,6 +447,8 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // true when an elastic slot was released and release_elastic_slot must be
     // invoked outside mutex_.
     bool handle_executor_exit(std::size_t slot);
+    bool forward_executor_events_locked(const std::shared_ptr<WorkerExecutor>& executor);
+    void schedule_deferred_floor_locked();
     // Spawns the replacement worker (startup permit → factory → READY →
     // slot swap). Runs on its own thread so the pump never blocks.
     void run_replacement(std::size_t slot);
@@ -400,6 +461,15 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // Any replacement scheduled (a due present) — the pump's no-deadline
     // wait predicate, under mutex_.
     bool due_pending_locked() const;
+    std::shared_ptr<WorkerExecutor>
+    select_best_worker_locked(std::size_t* best_index_out, bool enforce_max_inflight,
+                              bool* saw_ready_worker_out = nullptr) const;
+    // Settles elastic accounting when shrinking a slot above min_ready_: if
+    // the victim itself was not marked elastic_held (floor worker evicted as
+    // oldest LRU), transfers floor ownership from a remaining elastic_held
+    // slot under mutex_ and returns true so the caller frees one slot.
+    struct Slot;
+    bool settle_evicted_slot_elastic_locked(Slot& victim);
 
     GenerationPoolOptions options_;
     WorkerRecoveryPolicy policy_; // validated copy
@@ -430,11 +500,12 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     std::size_t next_pick_index_ = 0;
     // Replaced (dead or asynchronously reaping) executors kept alive until
     // exit + drain complete (§8.2 pinning / §8.3 async reaping buffer).
-    struct RetiredExecutor {
-        std::shared_ptr<WorkerExecutor> executor;
-        bool joined = false;
-    };
-    std::vector<RetiredExecutor> retired_;
+    std::vector<std::shared_ptr<WorkerExecutor>> retired_;
+    // When an external contract observer installs options_.on_worker_started
+    // (bare const WorkerExecutor*), keep exited retired executors pinned here
+    // (after removing from retired_ and joining) until finalize_drain() finishes
+    // running on_drain_complete. Production paths leave on_worker_started unset.
+    std::vector<std::shared_ptr<WorkerExecutor>> observed_retired_;
     std::function<void()> on_worker_ready_;
     std::function<void(const std::string& reason)> on_scale_out_failed_;
     // Slots covered by a scheduled-or-running replacement: the per-App
@@ -443,6 +514,9 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // Threads actually spawning (drives drain completion; the pump never
     // finalizes while one is running).
     std::uint64_t replacements_in_flight_ = 0;
+    // Concurrent synchronous slot-admission calls running outside mutex_.
+    std::uint64_t scale_admissions_in_flight_ = 0;
+    std::atomic<std::uint64_t> drain_check_cycles_{0};
     // Slot → spawn due time (monotonic ms) for the exponential backoff.
     std::vector<std::uint64_t> replacement_due_ms_;
     bool events_pending_ = false;

@@ -14,6 +14,7 @@
 
 #include "host/active_state.h"
 
+#include "host/config.h"
 #include "json_escape.h"
 
 #include <jansson.h>
@@ -40,26 +41,11 @@ inline std::string escape_pointer_component(std::string_view component) {
 }
 
 // Hand-written ASCII range checks: never locale-dependent isalnum.
+// Application and Tenant IDs reuse host/config.h valid_tenant_id ([a-z0-9][a-z0-9._-]{0,62}).
 bool ascii_digit(char c) { return c >= '0' && c <= '9'; }
 bool ascii_lower(char c) { return c >= 'a' && c <= 'z'; }
 bool ascii_upper(char c) { return c >= 'A' && c <= 'Z'; }
 bool ascii_hex_lower(char c) { return ascii_digit(c) || (c >= 'a' && c <= 'f'); }
-
-// Application IDs: [a-z0-9][a-z0-9._-]{0,62}.
-bool valid_application_id(std::string_view value) {
-    if (value.empty() || value.size() > 63) {
-        return false;
-    }
-    if (!(ascii_lower(value[0]) || ascii_digit(value[0]))) {
-        return false;
-    }
-    for (const char c : value) {
-        if (!(ascii_lower(c) || ascii_digit(c) || c == '.' || c == '_' || c == '-')) {
-            return false;
-        }
-    }
-    return true;
-}
 
 // Version IDs: [A-Za-z0-9][A-Za-z0-9._-]{0,127}.
 bool valid_version_id(std::string_view value) {
@@ -139,11 +125,11 @@ std::string_view state_name(ActiveServiceState state) {
 // Validates the document struct and reports the first failing field. Used
 // by both the encoder and the state checks of the parser.
 bool validate_document(const ActiveStateDocument& document, ActiveStateError& error) {
-    if (!valid_application_id(document.application)) {
+    if (!valid_tenant_id(document.application)) {
         set_error(error, ErrorCode::kInvalidValue, "/app", "invalid App ID");
         return false;
     }
-    if (!document.tenant.empty() && !valid_application_id(document.tenant)) {
+    if (!document.tenant.empty() && !valid_tenant_id(document.tenant)) {
         set_error(error, ErrorCode::kInvalidValue, "/tenant", "invalid Tenant ID");
         return false;
     }
@@ -344,7 +330,7 @@ ActiveStateDocumentResult parse_active_state_json(std::string_view expected_appl
                   "unsupported active state schema");
         return result;
     }
-    if (values[kAppField] != expected_application || !valid_application_id(values[kAppField])) {
+    if (values[kAppField] != expected_application || !valid_tenant_id(values[kAppField])) {
         set_error(result.error, ErrorCode::kInvalidValue, "/app", "invalid App ID");
         return result;
     }
@@ -375,7 +361,7 @@ ActiveStateDocumentResult parse_active_state_json(std::string_view expected_appl
     document.state = state;
     document.application = values[kAppField];
     if (present[kTenantField]) {
-        if (!valid_application_id(values[kTenantField])) {
+        if (!valid_tenant_id(values[kTenantField])) {
             set_error(result.error, ErrorCode::kInvalidValue, "/tenant", "invalid Tenant ID");
             return result;
         }

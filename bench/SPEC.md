@@ -2,7 +2,7 @@
 
 This document defines the measurement protocol for the [performance charts](https://rowanellis-113.github.io/capsid/):
 the three benchmark lanes, the data pipeline into `perf-site/data.js`, the
-evidence rules and the site's rendering conventions. See the [performance reference](../docs/performance-benchmarks.md)
+evidence rules and the site's rendering conventions. See the [performance reference](../docs/reference/benchmarks.md)
 for the latest accepted source and results. A measurement belongs to its
 recorded source, not to a later published prerelease.
 
@@ -53,8 +53,8 @@ recorded source, not to a later published prerelease.
   **Tier 1 (Isolated / Sandboxed Web-Standard Runtimes)**:
   capsid: managed coordinator + strict Linux OS sandbox (Namespaces, Landlock,
   Seccomp), one-worker fixed pool, Admin-API blue-green deploy, production
-  stream-window defaults (`CAPSID_MANAGED=1 CAPSID_STRICT=1`), QuickJS-NG
-  interpreter (no JIT / no RWX);
+  stream-window defaults (`CAPSID_MANAGED=1 CAPSID_STRICT=1`), `quickjs-turbo`
+  (QuickJS-NG 0.15.1-derived zero-JIT native register-frame VM, no JIT / no RWX);
   workerd: single process (V8 Isolate sandbox), minimal capnp sharing
   `qps-worker.mjs` with capsid;
   deno: single process (`Deno.serve`, `qps-deno.mjs`) under Deno's permission
@@ -77,8 +77,8 @@ recorded source, not to a later published prerelease.
 Serving response evidence uses `exact-bytes-v2`: the two raw phase rows and
 correctness verdict identify the workload, exact expected body SHA-256 and byte
 length, dispatched requests and fully checked responses. Both counts must equal
-completed requests in each successful phase. The frozen three workloads compare
-every byte; the stream is exactly 341 b, 341 c and 342 d bytes. Errors, timeouts,
+completed requests in each successful phase. The frozen four `v3` workloads
+(three in legacy `v1`/`v2`) compare every byte; the stream is exactly 341 b, 341 c and 342 d bytes. Errors, timeouts,
 wrong status and wrong/truncated/extra bytes cannot count as success. A failed
 warm-up prevents measurement; a failed verdict exits nonzero. Formal samples
 record a 30000 ms request timeout; the explicit shorter correctness-fixture
@@ -161,7 +161,7 @@ remaining owned processes. Discarded raw/correctness records are sealed and
 validated separately; a failed discarded run aborts the cell. The summary uses
 only measured rounds. Reusing a measured root PID/start identity fails.
 
-Node, Node (`--jitless`), Bun, and workerd requests use a fresh Python-standard-library loopback HTTP
+Deno, Node, Node (`--jitless`), Bun, Bun (`--jitless`), and workerd requests use a fresh Python-standard-library loopback HTTP
 connection per request (`httpClient: python-http-exact-v1`). The old curl process
 startup floor describes historical points only. C-ABI IPC and HTTP transports
 remain different and are stated beside warm results. Both the controller/client
@@ -184,11 +184,14 @@ RENAME_NOREPLACE is unsupported; ordinary errors remain failures. This does not
 make three separate output paths atomic across a process crash or power loss;
 deployment still needs an outer staging generation directory.
 
-Formal mode requires clean measured-build/session metadata, all five stacks and
-three sizes, complete sealed raw/correctness/identity evidence and self-validation
-against the collector. Restricted `--observation` output has no publication
-envelope. The accepted 2026-11-16 local snapshot has a complete quiet session;
-there is no fresh paired v0.2.2 rebuild/requalification or 0.3.0-beta-specific point.
+Formal mode requires clean measured-build/session metadata, all eight stacks
+(`capsid-source`, `capsid-bytecode`, `workerd`, `deno`, `node-jitless`,
+`bun-jitless`, `node`, `bun`) and three sizes, complete sealed
+raw/correctness/identity evidence and self-validation against the collector.
+Restricted `--observation` output has no publication envelope. `perf-site/data.js`
+retains four verified local-rebuild records (the archived `2026-11-16` `v1`
+session at `485b29b` plus `v3` local rebuilds at `82eaab9`, `c7a80b9`, and
+`6d4cc61`), none of which measures distributed release packages directly.
 Controller tests and restricted smoke still do not qualify a performance point.
 
 ### 2.3 Density lane — `bench/density-lane.sh`
@@ -305,8 +308,9 @@ protocol are unchanged. Counters record actual per-worker request totals, with
 at least one cold or 100 warm requests each; a shared total is insufficient.
 
 The density producer has small-pool managed/strict/reference smoke and
-synthetic complete-archive controls, separate from the accepted real 2026-11-16
-fill-to-budget/three-lane record. The latter belongs only to snapshot 485b29b.
+synthetic complete-archive controls, separate from the accepted real
+fill-to-budget/three-lane records (`485b29b`, `82eaab9`, `c7a80b9`, and `6d4cc61`).
+Each record belongs strictly to its measured local rebuild.
 Do not promote the smoke or synthetic fixtures into performance conclusions.
 
 ## 3. Data pipeline
@@ -316,8 +320,9 @@ The publication contract is now specified in
 rules below: all supplied lanes need complete sealed `lane.json` records,
 raw samples, correctness and isolation records. The CLI has no legacy or
 parser-only publication bypass. All three lanes now have producers for this
-contract. The 485b29b record passed independent build/source/binary and
-complete-session review. It is not 0.3.0-beta qualification or a newly run benchmark.
+contract. Each accepted record passed independent build/source/binary and
+complete-session review for its measured local rebuild, and does not measure
+distributed release packages directly.
 Earlier missing-contract points remain unverified historical observations.
 
 - `bench/collect-perf-point.py --cold-start D1 --qps D2 [--density D3]`
@@ -371,7 +376,7 @@ Earlier missing-contract points remain unverified historical observations.
   "not measured"; the protocol copy must match the lanes as actually
   run (rounds, warm phases, sandbox posture).
 - Deployment: GitHub Actions, pinned action SHAs, artifact upload + deploy-pages;
-  the retained `dev/v0.3.1` push branch and the actual site/data/tool paths in
+  the retained `dev/v0.3.1` and `dev/v0.3.2` push branches and the actual site/data/tool paths in
   `.github/workflows/perf-pages.yml` trigger validation and publication.
 
 ## 6. Release procedure
@@ -384,7 +389,7 @@ Earlier missing-contract points remain unverified historical observations.
 3. Archive evidence, whitelist it, run the collector, audit the site at
    1280/960/820/600 px, commit, push; confirm the Pages action is
    green.
-4. Update `docs/performance-benchmarks.md` tables from the new point;
+4. Update `docs/reference/benchmarks.md` tables from the new point;
    move the superseded checkpoint to the retired section.
 
 ## 7. Current boundaries

@@ -86,8 +86,7 @@ class ChannelLedger {
     ChannelLedger() = default;
     explicit ChannelLedger(const Limits& limits, ServiceChannelBudget* service = nullptr);
 
-    // Reservation style: try_* only mutates on success, so a failed
-    // reservation can never leak capacity (plan Red: 失败预留恢复容量).
+    // The try_* methods consume capacity only when a reservation succeeds.
     bool try_reserve_http();
     void release_http();
     bool try_reserve_dial();

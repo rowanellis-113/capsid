@@ -19,9 +19,9 @@
 #     be resolved or the worktree is dirty; development configures record
 #     a dirty provenance that release packaging must reject.
 #
-# Locked inputs (docs/txiki-upgrade-baseline.json):
+# Locked inputs (docs/data/txiki-upgrade-baseline.json):
 #   vendor.commit            outer txiki.js commit (40 hex)
-#   quickjs.commit           deps/quickjs gitlink inside txiki.js (40 hex)
+#   quickjs.commit           vendor/quickjs-turbo HEAD commit (40 hex)
 #   overlay.key              overlay key from capsid_compute_txiki_overlay_key
 #   overlay.manifest         overlay content manifest from the stamp
 # With CAPSID_BUILD_WORKER=ON the locked values are compared against the
@@ -156,8 +156,8 @@ function(capsid_generate_build_identity)
     if(CAPSID_BUILD_WORKER)
         # The overlay was prepared and stamped during configure
         # (build_worker.cmake); validate the locked values against the
-        # actual build inputs: the outer txiki.js HEAD and the QuickJS
-        # gitlink must both match their locked commits.
+        # actual build inputs: the outer txiki.js HEAD and the
+        # vendor/quickjs-turbo HEAD must both match their locked commits.
         find_program(CGBI_GIT git REQUIRED)
         execute_process(
             COMMAND "${CGBI_GIT}" -C
@@ -209,7 +209,7 @@ function(capsid_generate_build_identity)
            NOT CGBI_ACTUAL_MANIFEST STREQUAL CGBI_OVERLAY_MANIFEST)
             message(FATAL_ERROR
                 "Prepared overlay key/manifest differs from the locked "
-                "build identity; update docs/txiki-upgrade-baseline.json "
+                "build identity; update docs/data/txiki-upgrade-baseline.json "
                 "only after an audited vendor upgrade")
         endif()
     endif()
@@ -346,7 +346,7 @@ function(capsid_generate_build_identity)
     # WP-08, spec §12.2: the packaged build-info.txt. One canonical file
     # shipped in the package (share/capsid/build-info.txt) carrying the
     # identity in a form consumers can probe: the two records verbatim plus
-    # a stable summary. commitDate is the git author commit date, which is
+    # a stable summary. commitDate is the git committer date (%cI), which is
     # deterministic per commit — the SBOM 'created' field uses it so two
     # builds of the same commit produce identical SBOM bytes.
     set(CGBI_BUILD_INFO_FILE

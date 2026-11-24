@@ -934,7 +934,7 @@ void test_fs_module_contract(const char* worker_path) {
 #if defined(_WIN32)
     // capsid:fs requires openat2 path semantics (Linux-only; the module
     // reports "unavailable" on other platforms). The contract is not
-    // exercised on Windows — see docs/windows.md.
+    // exercised on Windows — see docs/guides/build-on-windows.md.
     (void)worker_path;
     return;
 #else

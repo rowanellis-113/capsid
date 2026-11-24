@@ -2,7 +2,7 @@
 #define CAPSID_HOST_WS_CODEC_H
 
 // RFC 6455 WebSocket framing for the host data plane (FetchRPC v4,
-// docs/fetchrpc-v4.md decision D1): the host terminates every
+// docs/reference/fetchrpc-v4.md decision D1): the host terminates every
 // WebSocket — answering upgrade handshakes, framing inbound client
 // connections, and dialing outbound ones under the egress policy.
 //

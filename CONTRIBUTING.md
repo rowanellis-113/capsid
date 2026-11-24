@@ -15,9 +15,18 @@ a small, reproducible change over a broad refactor or an unexplained green run.
 - Keep source revision, build profile and claimed evidence aligned. A passing
   older build is not acceptance of a new input.
 
+## Repository layout
+
+| When changing | Start here |
+| --- | --- |
+| Public embedding API, worker or Host | `include/capsid/` for public headers, `src/` for native code, `src/host/` for the Host and `js/` for worker JavaScript |
+| Builds, packaging and dependencies | `cmake/` for build rules, `tools/` for repository utilities, `vendor/` for pinned upstream sources, `patches/` for local changes and `licenses/` for third-party notices |
+| Tests and benchmarks | `tests/` for suites and fixtures, `tests/sandbox/` for delegated Linux checks, `tests/soak/` for long-running load tests and `bench/` for performance measurements |
+| Examples, documentation or publication | `examples/` for runnable integrations, `docs/` for guides and contracts, `release-notes/` for tagged release text and `perf-site/` for the published benchmark site |
+
 ## Prepare a Development Environment
 
-Follow [building from source](docs/building.md) for toolchains and platform
+Follow [building from source](docs/guides/build-from-source.md) for toolchains and platform
 commands. Initialize all recorded submodules and install the locked JavaScript
 dependencies: `vendor/txiki.js`, `examples/hono-reference`,
 `examples/itty-router-reference`, `examples/h3-v2-reference` and
@@ -34,7 +43,7 @@ cmake --build build-dev --parallel 2
 ```
 
 Run relevant CTests with `--no-tests=error`, then the appropriate broader
-profiles from the [testing guide](docs/testing-guide.md). Native Windows/macOS,
+profiles from the [testing guide](docs/guides/run-tests.md). Native Windows/macOS,
 Linux strict isolation, sanitizer dependency instrumentation and performance
 acceptance are different obligations; one cannot stand in for another.
 
@@ -44,7 +53,7 @@ check to obtain a package.
 
 ## Source Formatting
 
-Follow [source formatting](docs/formatting.md) for the pinned development-only
+Follow [source formatting](docs/guides/format-source.md) for the pinned development-only
 clang-format, Prettier and Ruff setup. Run `npm run format` to apply maintained
 source style and `npm run format:check` before committing (npm.cmd on Windows).
 Use `npm run format:list` to inspect scope. Do not format vendor, generated
@@ -68,15 +77,7 @@ existing runtime gates. Formatting does not transfer release qualification.
 
 ## Documentation Rules
 
-The [documentation index](docs/README.md) separates guides, references and
-[history/evidence](docs/history/README.md):
-
-- README: product boundary, short onboarding path, release channels and security
-  warnings. Do not turn it into an option catalogue or benchmark database.
-- Guides: executable steps, prerequisites, expected result and failure handling.
-- References: exact configuration, API, protocol and platform semantics.
-- Evidence and history: dated inputs, observations, original failures and review
-  boundaries. Do not append execution diaries to user tutorials.
+The [documentation index](docs/README.md#filing-a-document) describes naming, placement and the distinction between user guides, contracts and historical records.
 
 When prose conflicts with implementation, check public headers, capability
 manifests, configuration/build code and tests, then raw artifacts for the exact
@@ -96,17 +97,25 @@ For documentation changes:
 - Update documentary assertions when a real contract/status changes, but retain
   equivalent security, link, provenance and archive protections.
 
-Run the actual documentation checks:
+Write documentation and code comments in English. Preserve the original spelling of Unicode test inputs, captured process output and author names.
+
+The documentation audit verifies the English editions against their inventory and the original captures against their recorded SHA-256 digests. It reads the captures from the published `v0.3.1-beta.1` revision. In a shallow clone, fetch that revision once before running the checks.
+
+```sh
+git fetch --depth=1 --no-tags origin 845ae5dee5833c1bed1c2630cfb65e6ed76af7d7
+```
+
+Run the documentation checks:
 
 ```sh
 node tests/audit-current-docs.mjs .
 node --test tests/test_documentation_archive.mjs
-python3 tools/refresh-documentation-data.py --check
 ```
 
-The [coverage inventory](docs/documentation-coverage.json) must have a reviewed
+The [coverage inventory](docs/data/documentation-coverage.json) must have a reviewed
 current/reference/history disposition for every page. Update its canonical-text
 hashes after reviewed prose changes; immutable evidence uses exact-byte hashes.
+Run `python3 tools/refresh-documentation-data.py --check` on the clean source checkout named in the [testing guide](docs/guides/run-tests.md#documentation-checks) to validate the captured release data.
 Generated status does not contact GitHub or requalify a binary. Release metadata
 captures and measured sources must be updated explicitly, not relabeled. For
 site/transport changes, also run the archive controls and complete evidence

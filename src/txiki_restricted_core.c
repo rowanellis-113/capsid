@@ -204,6 +204,15 @@ static JSValue capsid_random_uuid(JSContext* ctx, JSValueConst this_val, int arg
     return JS_NewString(ctx, text);
 }
 
+/* QuickJS classes distinguish ordinary instances from proxies and native
+ * objects even when script has replaced their prototypes or toStringTag. */
+static JSValue capsid_object_class(JSContext* ctx, JSValueConst this_val, int argc,
+                                   JSValueConst* argv) {
+    (void)this_val;
+    (void)argc;
+    return JS_NewUint32(ctx, JS_GetClassID(argv[0]));
+}
+
 static JSValue capsid_is_array_buffer(JSContext* ctx, JSValueConst this_val, int argc,
                                       JSValueConst* argv) {
     (void)this_val;
@@ -363,6 +372,7 @@ void tjs__mod_os_init(JSContext* ctx, JSValue ns) {
 void tjs__mod_sys_init(JSContext* ctx, JSValue ns) {
     static const JSCFunctionListEntry functions[] = {
         TJS_CFUNC_DEF("randomUUID", 0, capsid_random_uuid),
+        TJS_CFUNC_DEF("objectClass", 1, capsid_object_class),
         TJS_CFUNC_DEF("isArrayBuffer", 1, capsid_is_array_buffer),
         TJS_CFUNC_DEF("detachArrayBuffer", 1, capsid_detach_array_buffer),
         TJS_CFUNC_DEF("legacyDecode", 3, capsid_legacy_decode),

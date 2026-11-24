@@ -1,6 +1,5 @@
-// WorkerExecutor implementation — see worker_executor.h. Extracted from
-// single_worker_server.cc (WP-04 §8.1): everything that talks to one
-// capsid_worker process. The owner thread submits commands and drains
+// WorkerExecutor implementation — see worker_executor.h. Owns everything that
+// talks to one capsid_worker process. Callers submit commands and drain
 // events; the worker thread owns the capsid_worker exclusively and reaps
 // it (capsid_worker_destroy) in its exit path — the only destroy site.
 
@@ -130,7 +129,11 @@ bool decode_worker_log_event(const capsid_event& event, WorkerEvent* output, std
     return true;
 }
 
-WorkerExecutor::WorkerExecutor() = default;
+WorkerExecutor::WorkerExecutor()
+    : id_([] {
+          static std::atomic<std::uint64_t> g_next_executor_id{1};
+          return g_next_executor_id.fetch_add(1, std::memory_order_relaxed);
+      }()) {}
 void WorkerExecutor::set_channel_budget(std::shared_ptr<ServiceChannelBudget> budget) {
     if (started_)
         throw std::logic_error("channel budget must be set before worker startup");
@@ -233,38 +236,61 @@ void WorkerExecutor::stop_and_join() {
 #endif
 }
 
-void WorkerExecutor::submit(Command command) {
-    if (metrics_enabled_.load(std::memory_order_relaxed)) {
-        metrics_.commands_submitted.fetch_add(1, std::memory_order_relaxed);
-    }
-    const bool counts_inflight = command.type == CommandType::kBeginRequest;
-    const std::uint64_t request_id = command.request_id;
+bool WorkerExecutor::submit(Command command) { return submit_command(std::move(command), false); }
+
+bool WorkerExecutor::submit_begin_from_dispatch(Command command) {
+    return submit_command(std::move(command), true);
+}
+
+bool WorkerExecutor::submit_command(Command command, bool from_dispatch) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (counts_inflight && inflight_ids_.insert(request_id).second) {
+    if (exit_event_queued_ || destroying_ || exited_) {
+        if (from_dispatch)
+            release_dispatch();
+        return false;
+    }
+    if (command.type == CommandType::kBeginRequest &&
+        inflight_ids_.insert(command.request_id).second) {
+        if (from_dispatch)
+            pending_dispatches_.fetch_sub(1, std::memory_order_acq_rel);
+        else
+            request_claims_.fetch_add(1, std::memory_order_acq_rel);
         inflight_.fetch_add(1, std::memory_order_acq_rel);
+    } else if (from_dispatch) {
+        release_dispatch();
     }
     const bool was_empty = commands_.empty();
     commands_.push_back(std::move(command));
-    if (was_empty) {
-        if (metrics_enabled_.load(std::memory_order_relaxed)) {
-            metrics_.command_batches.fetch_add(1, std::memory_order_relaxed);
-        }
-        // Wake the worker thread out of its blocking wait. The byte is
-        // written on the empty→non-empty transition only: a push into a
-        // non-empty queue is already covered by an outstanding byte (or the
-        // worker is draining), so the wake pipe cannot fill.
+    if (was_empty)
         source_.wake();
-    }
     if (metrics_enabled_.load(std::memory_order_relaxed)) {
-        {
-            const std::uint64_t size = static_cast<std::uint64_t>(commands_.size());
-            std::uint64_t hw = metrics_.command_queue_high_water.load(std::memory_order_relaxed);
-            while (hw < size && !metrics_.command_queue_high_water.compare_exchange_weak(
-                                    hw, size, std::memory_order_relaxed)) {
-            }
+        metrics_.commands_submitted.fetch_add(1, std::memory_order_relaxed);
+        if (was_empty)
+            metrics_.command_batches.fetch_add(1, std::memory_order_relaxed);
+        const std::uint64_t size = static_cast<std::uint64_t>(commands_.size());
+        std::uint64_t hw = metrics_.command_queue_high_water.load(std::memory_order_relaxed);
+        while (hw < size && !metrics_.command_queue_high_water.compare_exchange_weak(
+                                hw, size, std::memory_order_relaxed)) {
         }
     }
     cv_.notify_one();
+    return true;
+}
+
+bool WorkerExecutor::is_idle() const {
+    const std::uint64_t claims_before = request_claims_.load(std::memory_order_acquire);
+    if (idle_check_hook_) {
+        idle_check_hook_();
+    }
+    if (claims_before != 0) {
+        return false;
+    }
+    return request_claims_.load(std::memory_order_acquire) == 0 &&
+           connection_owners_.load(std::memory_order_acquire) == 0;
+}
+
+void WorkerExecutor::set_idle_check_hook_for_test(std::function<void()> hook) {
+    idle_check_hook_ = std::move(hook);
 }
 
 bool WorkerExecutor::try_submit_channel(Command command) {
@@ -286,7 +312,8 @@ bool WorkerExecutor::try_submit_channel(Command command) {
             !add_charge(64))
             return false;
     std::unique_lock<std::mutex> lock(mutex_);
-    if (exited_ || charge > limit || channel_command_bytes_ > limit - charge)
+    if (exit_event_queued_ || destroying_ || exited_ || charge > limit ||
+        channel_command_bytes_ > limit - charge)
         return false;
     const bool was_empty = commands_.empty();
     command.channel_charge = charge;
@@ -308,6 +335,8 @@ void WorkerExecutor::submit_probe(const std::string& url) {
         // A fresh probe: any earlier verdict is stale (the supervisor
         // consumed or cancelled it). The worker thread clears the rest on
         // execute.
+        if (exit_event_queued_ || destroying_ || exited_)
+            return;
         probe_in_flight_ = true;
         probe_complete_ = false;
     }
@@ -340,6 +369,7 @@ void WorkerExecutor::mark_canceled(std::uint64_t request_id) {
     // cannot double-count.
     if (inflight_ids_.erase(request_id) == 1) {
         inflight_.fetch_sub(1, std::memory_order_acq_rel);
+        request_claims_.fetch_sub(1, std::memory_order_acq_rel);
     }
 }
 
@@ -348,6 +378,7 @@ void WorkerExecutor::retire_terminal_request(std::uint64_t request_id) {
     canceled_.insert(request_id);
     if (inflight_ids_.erase(request_id) == 1) {
         inflight_.fetch_sub(1, std::memory_order_acq_rel);
+        request_claims_.fetch_sub(1, std::memory_order_acq_rel);
     }
     // Anything still in the shared queue has not reached the Runtime and is
     // stale now. A command already swapped into the worker's local batch is
@@ -567,16 +598,26 @@ worker_exit:
     source_.set_worker(nullptr);
     const capsid::WorkerExitStatus status = capsid::destroy_worker_with_status(retired_worker);
     std::shared_ptr<WorkerCgroupLease> retired_cgroup;
+    std::size_t cleared_inflight = 0;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         exit_status_ = status;
         worker_ = nullptr;
         destroying_ = false;
         exited_ = true;
+        // Close the wake pipe immediately under mutex_ (synchronized with
+        // submit()/try_submit_channel()) so exited executors never retain OS
+        // descriptors while any observer or mailbox still references them.
+        source_.close_wake_pipe();
         retired_cgroup = std::move(cgroup_lease_);
         // Every request still owned by this worker is gone with it; the
         // pool sees inflight 0 and routes new work to a replacement.
+        cleared_inflight = inflight_ids_.size();
         inflight_ids_.clear();
+        if (cleared_inflight > 0) {
+            inflight_.fetch_sub(cleared_inflight, std::memory_order_acq_rel);
+            request_claims_.fetch_sub(cleared_inflight, std::memory_order_acq_rel);
+        }
     }
     // Remove the per-worker leaf cgroup only after wait_for_child() reaped
     // the worker and cgroup.procs is empty.
@@ -586,7 +627,6 @@ worker_exit:
     }
     retained_contexts_.store(0, std::memory_order_relaxed);
     publish_channels(0);
-    inflight_.store(0, std::memory_order_release);
     cv_.notify_all();
     // The exit event (and its notifier) fired before the blocking destroy
     // above; this second notify carries the exited_ flip. An owner whose

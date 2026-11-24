@@ -108,7 +108,8 @@ typedef struct capsid_build_info {
      * provenance_dirty is 1 whenever release packaging must reject this
      * build (non-Release configure, unresolved commit, or dirty tree).
      * build_feature_flags is one canonical ASCII string:
-     *   "lto=ON|OFF asan=... ubsan=... tsan=... mimalloc=... host=... worker=..." */
+     *   "lto=ON|OFF asan=... ubsan=... tsan=... mimalloc=... host=...
+     *    worker=... sandbox_profile=..." */
     const char* build_id;
     const char* capsid_commit;
     uint32_t capsid_tree_clean;
@@ -345,7 +346,7 @@ typedef struct capsid_worker_config {
 } capsid_worker_config;
 
 /*
- * FetchRPC v4 capability bits (docs/fetchrpc-v4.md §1.2). Effective
+ * FetchRPC v4 capability bits (docs/reference/fetchrpc-v4.md §1.2). Effective
  * capabilities are the conjunction with the worker's READY reply.
  * Requested through capsid_protocol_options (spawn_ex); the published
  * capsid_worker_config layout is frozen at the ABI v7 shape.
@@ -661,9 +662,9 @@ capsid_result capsid_worker_channel_cancel(capsid_worker* worker, uint32_t chann
  * begin_bodyless_request) using request_id. That call sends its normal
  * head with the upgrade flag and A2 tail. A queue refusal preserves the
  * reservation for retry. The worker's 101 commits an independent channel;
- * Both begin variants mark an upgrade bodyless and ended; callers must not
- * write a request body or issue end_request again for this handshake.
- * a non-101 response releases it. Cancel channel_id to abort a reservation.
+ * a non-101 response releases it. Both begin variants mark an upgrade
+ * bodyless and ended; callers must not write a request body or issue
+ * end_request again for this handshake. Cancel channel_id to abort a reservation.
  * Host-assigned ids must be announced in increasing order on the IPC stream.
  */
 capsid_result capsid_worker_upgrade_begin(capsid_worker* worker, uint64_t request_id,
@@ -800,10 +801,9 @@ capsid_result capsid_worker_spawn_ex(const capsid_worker_config* config,
  * caller_size is the size of the caller's allocation; the function
  * writes at most min(caller_size, library-known size) bytes and
  * records caller_size in struct_size. A caller_size smaller than the
- * fixed prefix (through per_channel_queue_bytes) is
- * CAPSID_INVALID_ARGUMENT and writes nothing. Defaults: descriptor
- * version 1, wire version 3, no capabilities, zero limits (deployment
- * defaults).
+ * fixed prefix (through capabilities) is CAPSID_INVALID_ARGUMENT and
+ * writes nothing. Defaults: descriptor version 1, wire version 3, no
+ * capabilities, zero limits (deployment defaults).
  */
 capsid_result capsid_protocol_options_init(capsid_protocol_options* options, uint32_t caller_size);
 
@@ -823,9 +823,9 @@ capsid_result capsid_worker_get_protocol_info(const capsid_worker* worker,
  * never throws. A host that wants a graceful stop must run the explicit
  * sequence capsid_worker_shutdown → capsid_worker_flush → poll
  * capsid_worker_next_event until CAPSID_EVENT_EXIT / CAPSID_CLOSED →
- * capsid_worker_destroy. Terminate-on-deadline is the only non-abortive
- * escape: the Host's normal stop is graceful, and only a shutdown deadline
- * turns into capsid_worker_terminate.
+ * capsid_worker_destroy. Terminate-on-deadline is the only abortive escape
+ * from a graceful stop: the Host's normal stop is graceful, and only a
+ * shutdown deadline turns into capsid_worker_terminate.
  */
 void capsid_worker_destroy(capsid_worker* worker);
 int capsid_worker_fd(const capsid_worker* worker);
@@ -854,7 +854,7 @@ capsid_result capsid_worker_load_bundle_named(capsid_worker* worker, const uint8
                                               size_t bundle_size, const char* source_name);
 
 /*
- * Binding v1 (docs/binding-technical-design.md §6): additive, versioned
+ * Binding v1 (docs/design/bindings-v1.md §6): additive, versioned
  * descriptor API. Every field is copied before the call returns; the
  * descriptor may only be loaded before capsid_worker_load_bundle* — after
  * the bundle call the sequence is sealed and further loads fail with
@@ -952,9 +952,9 @@ capsid_result capsid_worker_next_event(capsid_worker* worker, capsid_event* even
  */
 capsid_result capsid_worker_shutdown(capsid_worker* worker);
 /*
- * Abortive signal: SIGKILLs the worker process without a graceful frame.
- * Use only when a shutdown deadline expired; the worker must still be
- * reaped with capsid_worker_destroy afterwards.
+ * Abortive signal: SIGKILLs the worker process (TerminateProcess on Windows)
+ * without a graceful frame. Use only when a shutdown deadline expired; the
+ * worker must still be reaped with capsid_worker_destroy afterwards.
  */
 capsid_result capsid_worker_terminate(capsid_worker* worker);
 

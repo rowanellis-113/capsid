@@ -2,6 +2,7 @@
 
 #include "host/admin_api.h"
 
+#include "host/config.h"
 #include "host/metrics.h"
 #include "host/structured_log.h"
 #include "json_escape.h"
@@ -126,29 +127,11 @@ bool ascii_alnum(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
 }
 
-// Frozen identifier grammars. App, Version and operation IDs are validated
-// separately: an App ID must start lowercase alphanumeric and every
-// character stays within [a-z0-9._-] (uppercase ASCII is rejected both at
-// the first and every later position); a Version ID starts alphanumeric
-// and stays within [A-Za-z0-9._-]; an operation ID starts alphanumeric
-// and stays within [A-Za-z0-9_-] (no dot). A malformed ID on a known
-// route is a 400 and never reaches the coordinator.
-bool valid_app_id(const std::string& value) {
-    if (value.empty() || value.size() > 63) {
-        return false;
-    }
-    if (!((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= '0' && value[0] <= '9'))) {
-        return false;
-    }
-    for (const char c : value) {
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' ||
-              c == '-')) {
-            return false;
-        }
-    }
-    return true;
-}
-
+// Frozen identifier grammars. App/Tenant ID validation reuses
+// host/config.h valid_tenant_id ([a-z0-9][a-z0-9._-]{0,62}); a Version ID
+// starts alphanumeric and stays within [A-Za-z0-9._-]; an operation ID starts
+// alphanumeric and stays within [A-Za-z0-9_-] (no dot). A malformed ID on a
+// known route is a 400 and never reaches the coordinator.
 bool valid_version_id(const std::string& value) {
     if (value.empty() || value.size() > 128) {
         return false;
@@ -233,7 +216,7 @@ bool parse_deploy_body(const std::string& body, std::string* application, std::s
         *tenant = *application;
     }
     json_decref(root);
-    return valid_app_id(*application) && valid_version_id(*version) && valid_app_id(*tenant);
+    return valid_tenant_id(*application) && valid_version_id(*version) && valid_tenant_id(*tenant);
 }
 
 // Strict re-derivation of the backend's App-status document. Only the
@@ -277,8 +260,8 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
     }
     if (tenant_json != nullptr) {
         if (!json_is_string(tenant_json) ||
-            !valid_app_id(
-                std::string(json_string_value(tenant_json), json_string_length(tenant_json)))) {
+            !valid_tenant_id(std::string_view(json_string_value(tenant_json),
+                                              json_string_length(tenant_json)))) {
             json_decref(root);
             return false;
         }
@@ -374,7 +357,7 @@ bool query_admin_peer_credentials(int fd, AdminPeerCredentials* peer, std::strin
     }
 #if defined(_WIN32)
     // Windows AF_UNIX carries no peer uid/gid. Access control is the
-    // containing directory's NTFS ACL (see docs/windows.md), and the
+    // containing directory's NTFS ACL (see docs/guides/build-on-windows.md), and the
     // authorization check below matches the reported identity 0/0.
     (void)fd;
     peer->uid = 0;
@@ -427,7 +410,7 @@ bool verify_socket_parent(const std::string& path) {
 #if defined(_WIN32)
     // Windows has no uid/mode on socket inodes: the parent just has to be
     // a real directory. NTFS ACLs on it are the access-control boundary
-    // (see docs/windows.md).
+    // (see docs/guides/build-on-windows.md).
     struct _stat64 st = {};
     if (_stat64(parent.c_str(), &st) != 0) {
         return false;
@@ -526,7 +509,7 @@ bool open_admin_listener(const AdminSocketOptions& options, int* listener, std::
 #if defined(_WIN32)
     // Windows socket inodes have no mode/uid/gid to manage: the parent
     // directory's NTFS ACL is the access-control boundary (see
-    // docs/windows.md). Bind, with the same one-shot stale-socket retry
+    // docs/guides/build-on-windows.md). Bind, with the same one-shot stale-socket retry
     // as POSIX.
     int bind_result =
         bind_unix_fd(fd, reinterpret_cast<const struct sockaddr*>(&address), sizeof(address));
@@ -733,7 +716,7 @@ AdminResponse handle_admin_request(const AdminApiOptions& options, const AdminPe
             // A deeper path is not one of the known App routes.
             return error_response(404, "not found");
         }
-        if (!valid_app_id(rest)) {
+        if (!valid_tenant_id(rest)) {
             return error_response(400, "invalid request");
         }
         const std::string application = rest;

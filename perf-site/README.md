@@ -1,13 +1,14 @@
 # Performance History Site
 
 The [performance site](https://rowanellis-113.github.io/capsid/) defaults to the
-latest verified point: a local WSL2 Release/LTO rebuild of the exact
-`v0.3.1-beta.1` tag (`6d4cc61`, 2026-11-22, `quickjs-turbo`). Its results do
+latest verified point: a local WSL2 Release/LTO rebuild of the pre-publication
+`v0.3.1-beta.1` snapshot (`6d4cc61`, 2026-11-22, `quickjs-turbo`; the published
+`v0.3.1-beta.1` Git tag points to `845ae5d`). Its results do
 **not** measure the distributed packages. The earlier `v0.3.0-beta.5` (`c7a80b9`),
 untagged beta.4 `v3` point (`82eaab9`), archived `v1` cross-language point and
 unverified `v0.2.2` observation remain selectable.
-See [current status](../docs/current-status.md) and
-[performance methodology/data](../docs/performance-benchmarks.md).
+See [current status](../docs/reference/release-status.md) and
+[performance methodology/data](../docs/reference/benchmarks.md).
 
 ## Files and Data Authority
 
@@ -20,21 +21,27 @@ See [current status](../docs/current-status.md) and
 | `archive-index.json` / generated `archive-index.js` | Hashed compressed transport/part index and its UI projection for complete sealed evidence |
 | `archives/` | Full original lane bytes in deterministic gzip/TAR transports, split `<= 40 MiB` |
 
-`v0.3.1-beta.1` and `v0.3.0-beta.5` have matching Git source tags; beta.4
-development snapshot `82eaab9` has archive label `v0.3.0-beta.4` and an empty
-`sourceTag`. None represents a measurement of the distributed binaries. Do not
-draw a paired trend from separate sessions with different reference versions,
-contracts or unverified historical records.
+`v0.3.0-beta.5` (`c7a80b9`) matches its Git source tag, while `6d4cc61` carries
+`sourceTag: "v0.3.1-beta.1"` from its pre-publication measurement snapshot
+(`matchesPublishedBetaSource: false` against published `v0.3.1-beta.1` at
+`845ae5d`); beta.4 development snapshot `82eaab9` has archive label
+`v0.3.0-beta.4` and an empty `sourceTag`. None represents a measurement of the
+distributed binaries. Do not draw a paired trend from separate sessions with
+different reference versions, contracts or unverified historical records.
 
 ## Prepare the Site
 
 From the repository root with Python 3.12+:
 
 ```sh
-python3 tools/refresh-documentation-data.py --check
 python3 tests/test_perf_archive.py
 python3 bench/prepare-perf-site.py --repo . --output /path/to/new-site-output
 ```
+
+To also validate the generated `v0.3.1-beta.1` release/status data, run
+`python3 tools/refresh-documentation-data.py --check` in the clean recorded
+`dev/v0.3.1` checkout at `a7fd47e` (on `dev/v0.3.2`, `CMakeLists.txt` is `0.3.2`
+while the captured `v0.3.1-beta.1` release record pins `0.3.1`).
 
 The output must be new and outside `perf-site`. Allow at least 14 GiB of scratch:
 replaying `18671` evidence files plus 12 checksum manifests (`18683` files total)
@@ -99,7 +106,7 @@ through a version string, source-tree equality or release CI.
 ## Publishing
 
 `.github/workflows/perf-pages.yml` publishes an Actions artifact, not a
-`gh-pages` branch. Its push filter follows **`dev/v0.3.1`** and includes the
+`gh-pages` branch. Its push filter follows **`dev/v0.3.1`** and **`dev/v0.3.2`** and includes the
 site, data, archive/staging and status-generation inputs. It checks generated
 status, restores/revalidates evidence, uploads the staged site and deploys it.
 GitHub Pages must use **GitHub Actions** as its source; environment protection

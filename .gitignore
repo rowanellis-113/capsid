@@ -1,6 +1,7 @@
 # Local agent, editor, and analysis state.
 /.agents/
 /.codex/
+/.playwright-mcp/
 /.claude/
 /.cache/
 /.vscode/

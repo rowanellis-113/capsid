@@ -40,6 +40,112 @@ int main(int argc, char** argv) {
         fail("expected one ledger test mode");
     }
     const std::string mode = argv[1];
+    if (mode == "ledger_fresh_after_elastic") {
+        WorkerCapacityLedger ledger(2, 0);
+        require(ledger.reserve_fresh("orders", 1), "reserve serving worker");
+        ledger.commit_fresh("orders");
+        require(ledger.try_acquire_elastic("orders"), "fill last slot with an elastic worker");
+        require(!ledger.reserve_fresh("billing", 1),
+                "fresh deploy admitted while steady=1, elastic=1, workersTotal=2");
+        require(!ledger.holds("billing") && ledger.steady_used() == 1 &&
+                    ledger.elastic_of("orders") == 1 && ledger.surge_used() == 0,
+                "rejection changed the ledger");
+        ledger.release_elastic("orders");
+        require(ledger.reserve_fresh("billing", 1), "could not reuse the returned slot");
+        ledger.commit_fresh("billing");
+        require(ledger.steady_used() == 2 && ledger.elastic_used() == 0, "wrong final occupancy");
+        return 0;
+    }
+    if (mode == "ledger_replace_after_elastic") {
+        WorkerCapacityLedger ledger(3, 2);
+        require(ledger.reserve_fresh("orders", 1) && ledger.reserve_fresh("billing", 1),
+                "reserve both serving apps");
+        ledger.commit_fresh("orders");
+        ledger.commit_fresh("billing");
+        require(ledger.try_acquire_elastic("billing"), "fill last slot in sibling app");
+        require(!ledger.reserve_replace("orders", 2),
+                "replacement's final steady fleet would displace a sibling's held elastic slot");
+        require(ledger.steady_of("orders") == 1 && ledger.elastic_of("billing") == 1 &&
+                    ledger.surge_used() == 0,
+                "rejected replacement retained a reservation");
+        ledger.release_elastic("billing");
+        require(ledger.reserve_replace("orders", 2), "replacement should fit after release");
+        ledger.commit_replace("orders", 2, 1);
+        ledger.release_drained("orders", 1);
+        require(ledger.steady_used() == 3 && ledger.elastic_used() == 0 && ledger.surge_used() == 0,
+                "replacement did not settle at the steady ceiling");
+        return 0;
+    }
+    if (mode == "ledger_elastic_during_replace") {
+        WorkerCapacityLedger ledger(2, 2);
+        require(ledger.reserve_fresh("orders", 1) && ledger.reserve_fresh("cold", 0),
+                "reserve serving apps");
+        ledger.commit_fresh("orders");
+        ledger.commit_fresh("cold");
+        require(ledger.reserve_replace("orders", 2), "growing replacement should fit");
+        require(!ledger.reserve_fresh("peer", 1), "fresh deploy consumed promised steady capacity");
+        require(!ledger.try_acquire_elastic("cold"),
+                "elastic admission consumed capacity already promised to the new generation");
+        require(ledger.elastic_used() == 0 && ledger.surge_used() == 2, "overlap counts changed");
+        ledger.abort_reserve("orders", 2, true);
+        require(ledger.reserve_fresh("peer", 1), "abort did not return fresh deploy headroom");
+        ledger.abort_reserve("peer", 1, false);
+        require(ledger.try_acquire_elastic("cold"), "aborted replacement did not return headroom");
+        ledger.release_elastic("cold");
+        require(ledger.steady_used() == 1 && ledger.elastic_used() == 0 && ledger.surge_used() == 0,
+                "abort did not preserve the serving generation");
+        return 0;
+    }
+    if (mode == "ledger_concurrent_shrink_surge") {
+        WorkerCapacityLedger ledger(4, 3);
+        require(ledger.reserve_fresh("a", 2) && ledger.reserve_fresh("b", 2), "reserve two floors");
+        ledger.commit_fresh("a");
+        ledger.commit_fresh("b");
+        require(ledger.reserve_replace("a", 1), "first shrink should fit within surge=3");
+        require(!ledger.reserve_replace("b", 1),
+                "second concurrent shrink must not overcommit post-swap surge headroom");
+        ledger.commit_replace("a", 1, 2);
+        require(ledger.steady_used() == 3 && ledger.surge_used() == 2,
+                "committed shrink left unexpected counts");
+        require(!ledger.reserve_replace("b", 1),
+                "second shrink must still wait while first old generation drains 2 surge slots");
+        ledger.release_drained("a", 2);
+        require(ledger.reserve_replace("b", 1), "second shrink should fit once surge drains");
+        ledger.abort_reserve("b", 1, true);
+        require(ledger.reserve_replace("b", 1), "aborted shrink did not release surge promise");
+        ledger.commit_replace("b", 1, 2);
+        require(ledger.steady_used() == 2 && ledger.surge_used() == 2, "unexpected final counts");
+        ledger.release_drained("b", 2);
+        require(ledger.surge_used() == 0, "drained surge not cleared");
+        return 0;
+    }
+    if (mode == "ledger_mixed_resize_abort_and_drain") {
+        WorkerCapacityLedger ledger(5, 5);
+        require(ledger.reserve_fresh("shrinking", 2) && ledger.reserve_fresh("growing", 1),
+                "reserve both serving floors");
+        ledger.commit_fresh("shrinking");
+        ledger.commit_fresh("growing");
+        require(ledger.reserve_replace("shrinking", 1) && ledger.reserve_replace("growing", 3),
+                "both overlapping warmups should fit");
+        ledger.abort_reserve("shrinking", 1, true);
+        require(ledger.steady_of("shrinking") == 2 && ledger.surge_used() == 3 &&
+                    !ledger.try_acquire_elastic("peer"),
+                "aborting shrink must keep old floor and concurrent growth reservation");
+        require(ledger.reserve_replace("shrinking", 1), "could not reuse aborted reservation");
+        ledger.commit_replace("growing", 3, 1);
+        ledger.commit_replace("shrinking", 1, 2);
+        require(ledger.steady_of("growing") == 3 && ledger.steady_of("shrinking") == 1 &&
+                    ledger.steady_used() == 4 && ledger.surge_used() == 3,
+                "swaps must charge both old generations until reaped");
+        ledger.release_drained("growing", 1);
+        require(ledger.surge_used() == 2, "reaping growing app released another app's charge");
+        ledger.release_drained("shrinking", 2);
+        require(ledger.surge_used() == 0 && ledger.try_acquire_elastic("peer") &&
+                    !ledger.try_acquire_elastic("peer"),
+                "expected exactly one reusable steady slot after both drains");
+        ledger.release_elastic("peer");
+        return 0;
+    }
     if (mode == "ledger_retired_headroom") {
         WorkerCapacityLedger ledger(4, 0);
         require(ledger.reserve_fresh("orders", 4), "reserve old actual capacity");

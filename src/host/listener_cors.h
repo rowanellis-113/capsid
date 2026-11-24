@@ -1,9 +1,8 @@
 #pragma once
 // Listener-level CORS: the Host owns Access-Control-* at the edge (a
-// trust boundary, like `trusted`). One shared decision engine backs the
-// managed listener and the single-worker/static-pool data plane so both
-// edges enforce the identical grammar and wire behavior: browser
-// preflights are answered before routing, simple responses get the
+// trust boundary, like `trusted`). One shared decision engine backs both
+// ManagedListener and LocalDevHost so all edges enforce the identical grammar
+// and wire behavior: browser preflights are answered before routing, simple responses get the
 // matching Access-Control-Allow-Origin stamped, and App-supplied CORS
 // fields are stripped (the App can never widen the Host allow-list).
 

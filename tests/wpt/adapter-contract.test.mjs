@@ -10,6 +10,14 @@ const upstream = upstreamPath ? fs.readFileSync(upstreamPath, 'utf8') : null;
 async function outcome(source, expression) {
     const context = vm.createContext({ setTimeout, clearTimeout, DOMException });
     vm.runInContext('globalThis.self = globalThis;', context);
+    vm.runInContext(`
+        globalThis.QuotaExceededError = class QuotaExceededError extends DOMException {
+            constructor(requested, quota) {
+                super('quota', 'QuotaExceededError');
+                Object.assign(this, { requested, quota });
+            }
+        };
+    `, context);
     vm.runInContext(source, context);
     return vm.runInContext(`(async () => {
         try { await (${expression}); return 'PASS'; }
@@ -20,6 +28,14 @@ async function outcome(source, expression) {
 // Expected outcomes follow the locked WPT testharness.js. When WPT is present,
 // run that independent harness too; the adapter must not define its own oracle.
 const cases = [
+    ['quota exact fields', 'assert_throws_quotaexceedederror(() => { throw new QuotaExceededError(7, 5); }, 7, 5)', 'PASS'],
+    ['quota explicit realm', 'assert_throws_quotaexceedederror(QuotaExceededError, () => { throw new QuotaExceededError(null, null); }, null, null)', 'PASS'],
+    ['quota predicates', 'assert_throws_quotaexceedederror(() => { throw new QuotaExceededError(7, 5); }, n => n > 5, n => n === 5)', 'PASS'],
+    ['generic named exception', 'assert_throws_quotaexceedederror(() => { throw Object.assign(new DOMException("quota", "QuotaExceededError"), {requested: 7, quota: 5}); }, 7, 5)', 'AssertionError'],
+    ['missing nullable property', 'assert_throws_quotaexceedederror(() => { const e = new QuotaExceededError(null, null); delete e.quota; throw e; }, null, null)', 'AssertionError'],
+    ['incorrect requested amount', 'assert_throws_quotaexceedederror(() => { throw new QuotaExceededError(7, 5); }, 8, 5)', 'AssertionError'],
+    ['incorrect quota predicate', 'assert_throws_quotaexceedederror(() => { throw new QuotaExceededError(7, 5); }, 7, n => n > 5)', 'AssertionError'],
+    ['quota callback succeeds', 'assert_throws_quotaexceedederror(() => {}, null, null)', 'AssertionError'],
     ['approximate finite match', 'assert_approx_equals(1, 1.01, .02)', 'PASS'],
     ['approximate finite mismatch', 'assert_approx_equals(1, 2, .02)', 'AssertionError'],
     ['NaN actual', 'assert_approx_equals(NaN, 1, .02)', 'AssertionError'],
@@ -106,4 +122,49 @@ test('cleanup diagnostics retain the message when stack contains only frames', a
     assert.equal(result.phase, 'cleanup');
     assert.match(result.message, /cleanup diagnostic must survive/);
     assert.match(result.message, /at cleanup.js:1:1/);
+});
+
+test('promise tests wait for preceding cleanup and require a thenable', async () => {
+    const context = vm.createContext({ setTimeout, clearTimeout });
+    vm.runInContext(adapter, context);
+    vm.runInContext(`
+        const events = [];
+        promise_test(async t => {
+            t.add_cleanup(() => new Promise(resolve => {
+                setTimeout(() => { events.push('clean'); resolve(); }, 0);
+            }));
+            events.push('first');
+        }, 'first');
+        promise_test(async () => assert_array_equals(events, ['first', 'clean']), 'second');
+        promise_test(() => {}, 'missing return');
+        promise_test(async t => {
+            t.add_cleanup(async () => { throw new Error('cleanup rejected'); });
+        }, 'bad cleanup');
+        __wptSeal();
+    `, context);
+    const results = JSON.parse(JSON.stringify(await context.__wptCompletion));
+    assert.deepEqual(results.map(r => [r.name, r.status, r.phase]), [
+        ['first', 'PASS', 'test'], ['second', 'PASS', 'test'],
+        ['missing return', 'FAIL', 'test'], ['bad cleanup', 'FAIL', 'cleanup'],
+    ]);
+    assert.match(results[3].message, /cleanup rejected/);
+});
+
+test('a stuck promise or cleanup times out and releases the next test', async () => {
+    const context = vm.createContext({
+        setTimeout: callback => setTimeout(callback, 15), clearTimeout,
+    });
+    vm.runInContext(adapter, context);
+    vm.runInContext(`
+        promise_test(() => new Promise(() => {}), 'stuck body');
+        promise_test(async t => t.add_cleanup(() => new Promise(() => {})), 'stuck cleanup');
+        promise_test(async () => {}, 'next');
+        __wptSeal();
+    `, context);
+    const results = JSON.parse(JSON.stringify(await context.__wptCompletion));
+    assert.deepEqual(results.map(r => [r.name, r.status, r.phase]), [
+        ['stuck body', 'TIMEOUT', 'timeout'],
+        ['stuck cleanup', 'TIMEOUT', 'cleanup'],
+        ['next', 'PASS', 'test'],
+    ]);
 });

@@ -60,6 +60,7 @@ export const profileGlobalNames = Object.freeze(
     'Promise',
     'PromiseRejectionEvent',
     'Proxy',
+    'QuotaExceededError',
     'RangeError',
     'ReadableByteStreamController',
     'ReadableStream',

@@ -152,8 +152,8 @@ void parse_listen(const std::string& value, std::string* out_address, std::uint1
 #if defined(_WIN32)
 // The managed coordinator is POSIX-only (dirfd-relative openat/mkdirat
 // state walks, uid-based verification, UDS admin plane). Windows builds
-// ship the single-worker and static-pool data planes only; see
-// docs/windows.md for the full capability matrix.
+// ship the local dev Host (LocalDevHost) only; see
+// docs/guides/build-on-windows.md for the full capability matrix.
 #else
 
 // Process-level stop signal. SIGTERM is blocked process-wide and waited
@@ -470,8 +470,9 @@ std::string read_host_config(const std::string& path) {
         [&](const std::string& application, const std::string& tenant,
             const std::vector<capsid_worker*>& workers,
             const capsid::host::WorkerExecutor::WorkerFactory& factory, const std::string& version,
-            const std::string& generation_digest, const capsid::host::EffectiveConfig& effective)
-        -> std::shared_ptr<capsid::host::GenerationPool> {
+            const std::string& generation_digest, const capsid::host::EffectiveConfig& effective,
+            std::uint32_t pre_acquired_elastic =
+                0) -> std::shared_ptr<capsid::host::GenerationPool> {
         if (!factory) {
             for (capsid_worker* worker : workers) {
                 capsid_worker_destroy(worker);
@@ -516,19 +517,29 @@ std::string read_host_config(const std::string& path) {
         pool_options.startup_permits = &startup_permits;
         pool_options.log = structured_log.get();
         pool_options.metrics = metrics.get();
+        pool_options.on_worker_exited =
+            [&memory_sampler](const capsid::host::WorkerExecutor* executor) {
+                if (executor != nullptr) {
+                    memory_sampler.erase_pid(executor->process_id());
+                }
+            };
         const std::uint32_t pool_size = effective.min_ready;
         const auto capacity = std::make_shared<capsid::host::WorkerPoolCapacityLease>(
             &ledger, application, pool_size);
         pool_options.capacity_lease = capacity;
         std::vector<capsid_worker*> adopted_workers;
         adopted_workers.reserve(workers.size());
-        std::size_t acquired_elastic = 0;
+        std::size_t consumed_pre_acquired = 0;
+        std::size_t extra_elastic_acquired = 0;
         for (std::size_t index = 0; index < workers.size(); ++index) {
             if (index < effective.min_ready) {
                 adopted_workers.push_back(workers[index]);
+            } else if (consumed_pre_acquired < pre_acquired_elastic) {
+                adopted_workers.push_back(workers[index]);
+                ++consumed_pre_acquired;
             } else if (ledger.try_acquire_elastic(application)) {
                 adopted_workers.push_back(workers[index]);
-                ++acquired_elastic;
+                ++extra_elastic_acquired;
             } else {
                 capsid_worker_destroy(workers[index]);
                 capsid::host::release_worker_cgroup(workers[index]);
@@ -585,7 +596,7 @@ std::string read_host_config(const std::string& path) {
         // touches the ledger and pools_mutex only, never the pool
         // itself (its destructor joins this very thread).
         pool_options.on_drain_complete = [&draining_pools, &generation_reclaimer, &pools_mutex,
-                                          pool_box] {
+                                          &eviction_coordinator, pool_box] {
             std::shared_ptr<capsid::host::GenerationPool> pool;
             {
                 std::lock_guard<std::mutex> lock(pools_mutex);
@@ -594,6 +605,7 @@ std::string read_host_config(const std::string& path) {
             if (pool == nullptr) {
                 return;
             }
+            eviction_coordinator.unregister_pool(pool.get());
             std::lock_guard<std::mutex> lock(pools_mutex);
             for (auto it = draining_pools.begin(); it != draining_pools.end();) {
                 if (*it == pool) {
@@ -613,10 +625,13 @@ std::string read_host_config(const std::string& path) {
             *pool_box = pool;
         }
         if (pool == nullptr) {
-            if (acquired_elastic > 0) {
-                ledger.release_elastic(application, acquired_elastic);
+            if (extra_elastic_acquired > 0) {
+                ledger.release_elastic(application, extra_elastic_acquired);
             }
             return nullptr;
+        }
+        if (consumed_pre_acquired < pre_acquired_elastic) {
+            ledger.release_elastic(application, pre_acquired_elastic - consumed_pre_acquired);
         }
         // The sink must be installed before the pool starts serving:
         // a request pinned before wiring would lose its response
@@ -643,7 +658,8 @@ std::string read_host_config(const std::string& path) {
         plan->new_workers = prepared.effective.min_ready;
         std::shared_ptr<capsid::host::GenerationPool> pool = adopt_generation(
             application, prepared.tenant, prepared.workers, prepared.generation_factory,
-            prepared.version, prepared.generation_digest, prepared.effective);
+            prepared.version, prepared.generation_digest, prepared.effective,
+            prepared.pre_acquired_elastic);
         if (pool == nullptr) {
             *error = "cannot activate the new generation";
             return nullptr;
@@ -680,8 +696,9 @@ std::string read_host_config(const std::string& path) {
         if (plan->old_pool != nullptr) {
             // Drain signal only: new requests route to the new pool,
             // in-flight requests finish on the old one, and a drained
-            // generation never starts a replacement.
-            eviction_coordinator.unregister_pool(plan->old_pool.get());
+            // generation never starts a replacement. Keep registered in
+            // eviction_coordinator until on_drain_complete so live draining
+            // workers continue to count toward host and tenant memory budgets.
             plan->old_pool->request_drain();
         }
         eviction_coordinator.register_pool(plan->new_pool);
@@ -761,9 +778,8 @@ std::string read_host_config(const std::string& path) {
     const auto commit_retire = [&](capsid::host::RetirePlan* plan) {
         std::lock_guard<std::mutex> lock(pools_mutex);
         if (plan->pool != nullptr) {
-            // Drain signal only; the reference is parked in
-            // draining_pools.
-            eviction_coordinator.unregister_pool(plan->pool.get());
+            // Drain signal only; keep registered in eviction_coordinator until
+            // on_drain_complete so in-flight draining workers stay metered.
             plan->pool->request_drain();
         }
         routing->publish(plan->new_snapshot);
@@ -818,6 +834,10 @@ std::string read_host_config(const std::string& path) {
     // App's coordinator options.
     for (capsid::host::ManagedHostOptions* options : app_options) {
         options->ledger = &ledger;
+        options->tenancy = &config.tenancy;
+        options->reclaim_elastic_slot = [&eviction_coordinator] {
+            return eviction_coordinator.reclaim_one_idle_elastic();
+        };
         options->prepare_activation = prepare_activation;
         options->commit_activation = commit_activation;
         options->abort_activation = abort_activation;
@@ -828,6 +848,17 @@ std::string read_host_config(const std::string& path) {
                                            const std::string& tenant, std::uint32_t min_ready,
                                            std::string* error) {
             return eviction_coordinator.check_deploy_quota(application, tenant, min_ready, error);
+        };
+        options->reserve_tenant_deploy =
+            [&eviction_coordinator,
+             application = options->application](const std::string& tenant, std::uint32_t min_ready,
+                                                 std::uint32_t warm_workers, std::string* error) {
+                return eviction_coordinator.reserve_deploy_quota(application, tenant, min_ready,
+                                                                 warm_workers, error);
+            };
+        options->release_tenant_deploy = [&eviction_coordinator,
+                                          application = options->application] {
+            eviction_coordinator.release_deploy_quota(application);
         };
     }
     // Startup recovery: a durable active App is revalidated and its
@@ -1088,13 +1119,13 @@ int main(int argc, char** argv) {
 #else
             fail("--mode managed is unavailable on this platform: the managed "
                  "coordinator requires Linux strict sandbox (see "
-                 "docs/platform-support.md)");
+                 "docs/reference/platform-support.md)");
 #endif
         }
         fail("unknown --mode \"" + *mode + "\": only --mode managed is supported on Linux");
     }
 
-    // Strict allowlist for local dev CLI (docs/config-v2-design.md §5).
+    // Strict allowlist for local dev CLI (docs/design/config-v2.md §5).
     static constexpr std::string_view known_local_arguments[] = {
         "app-dir",     "app",          "host-config",    "listen",   "worker",  "workers",
         "secrets-dir", "bindings-dir", "strict-sandbox", "ready-fd", "stop-fd",
@@ -1164,7 +1195,8 @@ int main(int argc, char** argv) {
     }
 #if !defined(__linux__)
     if (options.strict_sandbox) {
-        fail("--strict-sandbox on requires Linux strict sandbox (see docs/platform-support.md)");
+        fail(
+            "--strict-sandbox on requires Linux strict sandbox (see docs/reference/platform-support.md)");
     }
 #endif
     std::optional<std::uint64_t> ready_fd;

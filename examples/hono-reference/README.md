@@ -2,7 +2,7 @@
 
 > Reviewed 2026-11-17 against the pinned beta.2 fixture. Commands below run in
 > this directory; use npm.cmd on Windows. Prepare the complete test dependencies
-> using the [source-build guide](../../docs/building.md) before configuring CMake.
+> using the [source-build guide](../../docs/guides/build-from-source.md) before configuring CMake.
 
 This directory pins the Hono version used by the Capsid Runtime compatibility suite:
 
@@ -15,4 +15,4 @@ The three entry points cover the allowed export forms. CMake/esbuild generates a
 the app runtime never imports from this directory.
 
 For the verification scope, exclusions, and test commands, see
-[`../../docs/framework-compatibility/hono.md`](../../docs/framework-compatibility/hono.md).
+[`../../docs/reference/frameworks/hono.md`](../../docs/reference/frameworks/hono.md).

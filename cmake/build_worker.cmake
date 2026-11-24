@@ -107,7 +107,7 @@ if(CAPSID_BUILD_WORKER)
     )
 
     # Use APPEND so this does not overwrite the CMAKE_CONFIGURE_DEPENDS entries
-    # already set by the parent CMakeLists.txt (e.g. docs/capability-manifest.json).
+    # already set by the parent CMakeLists.txt (e.g. docs/data/capability-manifest.json).
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrepareTxiki.cmake"
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ComputeTxikiOverlayKey.cmake"

@@ -190,7 +190,7 @@ void test_symlink_rejected() {
 #if defined(_WIN32)
     // Creating a file symlink needs the SeCreateSymbolicLinkPrivilege on
     // Windows; the store's reparse-point rejection is exercised where the
-    // privilege exists (documented in docs/windows.md).
+    // privilege exists (documented in docs/guides/build-on-windows.md).
 #else
     Fixture fixture;
     fixture.write_key("real.raw");
@@ -215,7 +215,7 @@ void test_non_regular_file_rejected() {
 void test_group_or_world_writable_rejected() {
 #if defined(_WIN32)
     // Windows has no uid/mode bits on files; the store skips the
-    // ownership gate and relies on NTFS ACLs (docs/windows.md).
+    // ownership gate and relies on NTFS ACLs (docs/guides/build-on-windows.md).
 #else
     Fixture fixture;
     fixture.write_key("group-writable.raw", kKeyBytes.data(), kKeyBytes.size(), 0620, false);

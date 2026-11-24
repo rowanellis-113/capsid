@@ -32,6 +32,7 @@
 #include "host/protocol_launch.h"
 #include "host/routing_snapshot.h"
 #include "host/worker_capacity_ledger.h"
+#include "host/worker_cgroup.h"
 
 #include "capsid/runtime.h"
 
@@ -52,11 +53,13 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -352,12 +355,13 @@ make_elastic_pool(const std::string& worker_path, const std::string& app, const 
                   std::uint32_t min_ready, std::uint32_t max_workers, std::uint64_t queue_requests,
                   std::uint64_t queue_timeout_ms, std::uint64_t max_inflight,
                   WorkerCapacityLedger* ledger, GlobalEvictionCoordinator* coordinator,
-                  MetricsRegistry* metrics, const std::string& bundle = kWorkerBundle) {
+                  MetricsRegistry* metrics, const std::string& bundle = kWorkerBundle,
+                  std::function<void()> on_executor_notify = {}) {
     GenerationPoolOptions opts;
     opts.application_id = app;
     opts.tenant_id = tenant;
     opts.version = "v1";
-    opts.generation_digest = std::string(64, 'a');
+    opts.generation_digest = "sha256:" + std::string(64, 'a');
     opts.workers = max_workers;
     opts.has_min_ready = true;
     opts.min_ready = min_ready;
@@ -366,6 +370,7 @@ make_elastic_pool(const std::string& worker_path, const std::string& app, const 
     opts.max_queued_requests = queue_requests;
     opts.queue_timeout_ms = queue_timeout_ms;
     opts.factory = spawn_factory(worker_path, 5000, bundle);
+    opts.on_executor_notify = std::move(on_executor_notify);
     opts.recovery = default_recovery_policy();
     opts.metrics = metrics;
     opts.acquire_worker_slot = [coordinator](const GenerationPool* req, std::string* reason) {
@@ -386,6 +391,495 @@ void assign_pid_footprints(const std::shared_ptr<GenerationPool>& pool,
     for (const auto& w : pool->snapshot_workers()) {
         (*pid_bytes)[w.pid] = bytes_per_worker;
     }
+}
+
+void run_deploy_with_protected_sibling(const std::string& worker_path) {
+    MemoryBudgetConfig memory;
+    memory.min_residency_ms = 60000;
+    TenancyConfig tenancy;
+    tenancy.configured = true;
+    tenancy.overrides["team"].max_workers = 2;
+    WorkerCapacityLedger ledger(8, 2);
+    GlobalEvictionCoordinator coordinator(memory, tenancy, &ledger, nullptr);
+    require(ledger.reserve_fresh("orders", 1), "reserve the sibling's floor");
+    ledger.commit_fresh("orders");
+    auto pool = make_elastic_pool(worker_path, "orders", "team", 1, 2, 0, 0, 1, &ledger,
+                                  &coordinator, nullptr);
+    std::string error;
+    require(coordinator.check_deploy_quota("billing", "team", 1, &error),
+            "both floors should fit before scale-out");
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "could not fill the tenant's second slot");
+    require(wait_for([&] { return pool->ready_workers() == 2; }, std::chrono::seconds(5)),
+            "sibling did not reach two ready workers");
+    const bool other_tenant = coordinator.check_deploy_quota("reports", "other", 1, &error);
+    const bool admitted = coordinator.check_deploy_quota("billing", "team", 1, &error);
+    const auto ready = pool->ready_workers();
+    const auto elastic = ledger.elastic_used();
+    pool->stop_and_join();
+    ledger.release_active("orders", 1);
+    require(other_tenant, "one full tenant blocked an unrelated tenant");
+    require(!admitted, "deploy admitted a third tenant worker while both slots were protected");
+    require(ready == 2 && elastic == 1, "quota check disturbed a protected sibling");
+    require(coordinator.check_deploy_quota("billing", "team", 1, &error),
+            "deploy was still blocked after the sibling drained");
+}
+
+void run_deploy_at_tenant_memory_limit(const std::string& worker_path) {
+    constexpr std::uint64_t limit = 16 * 1024 * 1024;
+    TenancyConfig tenancy;
+    tenancy.configured = true;
+    tenancy.overrides["team"].hard_memory_bytes = limit;
+    MemorySampler sampler({}, [](std::int64_t, std::uint64_t* bytes) {
+        *bytes = limit;
+        return true;
+    });
+    WorkerCapacityLedger ledger(8, 0);
+    GlobalEvictionCoordinator coordinator({}, tenancy, &ledger, &sampler);
+    std::string error;
+    require(coordinator.check_deploy_quota("billing", "team", 1, &error),
+            "empty tenant should have memory headroom");
+    require(ledger.reserve_fresh("orders", 1), "reserve the serving floor");
+    ledger.commit_fresh("orders");
+    auto pool = make_elastic_pool(worker_path, "orders", "team", 1, 1, 0, 0, 1, &ledger,
+                                  &coordinator, nullptr);
+    const bool other_tenant = coordinator.check_deploy_quota("reports", "other", 1, &error);
+    const bool admitted = coordinator.check_deploy_quota("billing", "team", 1, &error);
+    pool->stop_and_join();
+    ledger.release_active("orders", 1);
+    require(other_tenant, "memory charged to the wrong tenant");
+    require(!admitted, "deploy passed at hardMemory with no evictable sibling or maxWorkers cap");
+    require(coordinator.check_deploy_quota("billing", "team", 1, &error),
+            "tenant footprint survived its last worker");
+}
+
+void run_tenant_memory_recovers_without_global_budget(const std::string& worker_path) {
+    constexpr std::uint64_t limit = 16 * 1024 * 1024;
+    std::atomic<std::uint64_t> footprint{limit};
+    MemorySampler sampler({}, [&](std::int64_t, std::uint64_t* bytes) {
+        *bytes = footprint.load();
+        return true;
+    });
+    TenancyConfig tenancy;
+    tenancy.configured = true;
+    tenancy.overrides["team"].hard_memory_bytes = limit;
+    WorkerCapacityLedger ledger(2, 0);
+    require(ledger.reserve_fresh("orders", 1), "reserve the serving floor");
+    ledger.commit_fresh("orders");
+    MemoryBudgetConfig memory;
+    GlobalEvictionCoordinator coordinator(memory, tenancy, &ledger, &sampler);
+    auto pool = make_elastic_pool(worker_path, "orders", "team", 1, 2, 0, 0, 1, &ledger,
+                                  &coordinator, nullptr);
+    coordinator.start();
+    std::string reason;
+    const auto first = pool->request_scale_out(&reason);
+    require(first == GenerationPool::ScaleOutResult::kCapacityRejected &&
+                reason == "tenant_hard_memory" && ledger.elastic_used() == 0,
+            "initial footprint at hardMemory should block the second worker");
+    footprint.store(limit / 4);
+    // Allow two default sampling periods. The same live PID's footprint fell, so admission
+    // must recover even when only a tenant budget is configured.
+    const bool recovered = wait_for(
+        [&] { return pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight; },
+        std::chrono::milliseconds(2 * memory.check_interval_ms + 1000));
+    const bool ready =
+        recovered && wait_for([&] { return pool->ready_workers() == 2; }, std::chrono::seconds(5));
+    coordinator.stop_and_join();
+    pool->stop_and_join();
+    ledger.release_active("orders", 1);
+    require(ready, "tenant-only memory admission did not observe the decreased footprint");
+    require(ledger.elastic_used() == 0, "elastic slot remained after drain");
+}
+
+void run_shrink_to_floor_returns_elastic_slot(const std::string& worker_path) {
+    WorkerCapacityLedger ledger(2, 0);
+    require(ledger.reserve_fresh("orders", 1), "reserve serving worker");
+    ledger.commit_fresh("orders");
+    GlobalEvictionCoordinator coordinator({}, {}, &ledger, nullptr);
+    auto pool = make_elastic_pool(worker_path, "orders", "team", 1, 2, 0, 0, 1, &ledger,
+                                  &coordinator, nullptr);
+    // LRU timestamps have millisecond precision. Start the elastic worker on a later
+    // tick so an arbitrary tie cannot hide an accounting error when the floor is older.
+    const auto floor_activity = pool->snapshot_workers().at(0).last_active_at_ms;
+    require(wait_for(
+                [&] {
+                    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+                    const auto ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+                    return static_cast<std::uint64_t>(ms) > floor_activity;
+                },
+                std::chrono::seconds(2)),
+            "clock did not advance past the floor worker's last activity");
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "could not allocate the remaining elastic slot");
+    require(wait_for([&] { return pool->ready_workers() == 2; }, std::chrono::seconds(5)),
+            "elastic worker did not become ready");
+    require(ledger.elastic_of("orders") == 1, "missing elastic charge before eviction");
+    require(pool->evict_idle_worker(0, "global_lru"), "expected one idle worker above floor");
+    const auto ready = pool->ready_workers();
+    const auto charged = ledger.elastic_of("orders");
+    const bool reused = ledger.try_acquire_elastic("billing");
+    if (reused) {
+        ledger.release_elastic("billing");
+    }
+    pool->stop_and_join();
+    ledger.release_active("orders", 1);
+    require(ready == 1, "eviction did not preserve the serving floor");
+    require(charged == 0 && reused, "only the floor remains but a peer cannot reuse the slot");
+}
+
+void run_draining_generation_counted_in_memory(const std::string& worker_path) {
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    MemoryBudgetConfig mem;
+    mem.configured = true;
+    mem.limit_bytes = 25ULL * kMiB;
+    mem.high_watermark_percent = 85;
+    mem.low_watermark_percent = 75;
+    mem.min_residency_ms = 0;
+    mem.check_interval_ms = 0;
+
+    TenancyConfig tenancy;
+    tenancy.configured = true;
+    tenancy.overrides["team"].hard_memory_bytes = 25ULL * kMiB;
+
+    std::mutex fp_mutex;
+    std::unordered_map<std::int64_t, std::uint64_t> pid_bytes;
+    MemorySampler sampler({}, [&](std::int64_t pid, std::uint64_t* bytes_out) {
+        std::lock_guard<std::mutex> lock(fp_mutex);
+        const auto found = pid_bytes.find(pid);
+        if (found == pid_bytes.end()) {
+            return false;
+        }
+        *bytes_out = found->second;
+        return true;
+    });
+
+    WorkerCapacityLedger ledger(4, 2);
+    MetricsRegistry metrics;
+    GlobalEvictionCoordinator coordinator(mem, tenancy, &ledger, &sampler, &metrics);
+
+    require(ledger.reserve_fresh("orders", 1), "reserve orders floor");
+    ledger.commit_fresh("orders");
+    auto old_pool = make_elastic_pool(worker_path, "orders", "team", 1, 1, 0, 0, 1, &ledger,
+                                      &coordinator, &metrics);
+    auto peer_pool = make_elastic_pool(worker_path, "peer", "other", 0, 1, 0, 0, 1, &ledger,
+                                       &coordinator, &metrics);
+
+    auto routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"orders", old_pool}, {"peer", peer_pool}}));
+
+    ManagedListenerOptions lopts;
+    lopts.config = loopback_path_listener();
+    lopts.routing = routing;
+    lopts.metrics = &metrics;
+    ManagedListener listener(lopts);
+    std::string error;
+    require(listener.start(&error), "listener start failed: " + error);
+    const std::uint16_t port = listener.bound_port();
+
+    std::thread sse_thread([port] {
+        const HttpResponse sse = do_http_get(port, "/@capsid/orders/sse?hold=700");
+        require(sse.status == 200 && sse.body.find("data: done") != std::string::npos,
+                "orders draining SSE failed");
+    });
+    require(wait_for([&] { return old_pool->ready_workers() == 1 && old_pool->inflight() == 1; },
+                     std::chrono::seconds(4)),
+            "orders pool did not enter busy SSE");
+    assign_pid_footprints(old_pool, 25ULL * kMiB, &fp_mutex, &pid_bytes);
+
+    old_pool->request_drain();
+    require(old_pool->state() == GenerationPool::State::kDraining,
+            "old pool did not enter kDraining");
+
+    // While old_pool is still draining an active SSE stream, its footprint must continue
+    // to block both same-tenant deploy hardMemory and cross-tenant global limit scale-out.
+    std::string deploy_err;
+    require(!coordinator.check_deploy_quota("orders-next", "team", 1, &deploy_err),
+            "draining generation was omitted from tenant hardMemory deploy gate");
+    std::string reason;
+    require(peer_pool->request_scale_out(&reason) ==
+                    GenerationPool::ScaleOutResult::kCapacityRejected &&
+                reason == "host_capacity_exhausted",
+            "draining generation was omitted from global memory limit gate, got: " + reason);
+
+    sse_thread.join();
+    old_pool->stop_and_join();
+    ledger.release_active("orders", 1);
+
+    require(coordinator.check_deploy_quota("orders-next", "team", 1, &deploy_err),
+            "deploy quota stayed blocked after draining generation exited: " + deploy_err);
+    require(peer_pool->request_scale_out(&reason) == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "global headroom did not recover after draining generation exited: " + reason);
+    require(wait_for([&] { return peer_pool->ready_workers() == 1; }, std::chrono::seconds(4)),
+            "peer pool did not become ready after draining exit");
+
+    listener.request_stop();
+    listener.wait(&error);
+    peer_pool->stop_and_join();
+    std::cout << "PASS: draining_generation_counted_in_memory" << std::endl;
+}
+
+void run_active_retiring_worker_counted_in_soft_watermark(const std::string& worker_path) {
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    MemoryBudgetConfig mem;
+    mem.configured = true;
+    mem.limit_bytes = 100ULL * kMiB;
+    mem.high_watermark_percent = 85;
+    mem.low_watermark_percent = 75;
+    mem.min_residency_ms = 0;
+    mem.check_interval_ms = 0;
+
+    std::mutex fp_mutex;
+    std::unordered_map<std::int64_t, std::uint64_t> pid_bytes;
+    MemorySampler sampler({}, [&](std::int64_t pid, std::uint64_t* bytes_out) {
+        std::lock_guard<std::mutex> lock(fp_mutex);
+        const auto found = pid_bytes.find(pid);
+        if (found == pid_bytes.end()) {
+            return false;
+        }
+        *bytes_out = found->second;
+        return true;
+    });
+
+    WorkerCapacityLedger ledger(8, 0);
+    MetricsRegistry metrics;
+    GlobalEvictionCoordinator coordinator(mem, {}, &ledger, &sampler, &metrics);
+
+    const std::string slow_exit_bundle =
+        "export default {\n"
+        "  fetch(request) {\n"
+        "    const url = new URL(request.url);\n"
+        "    const spin = Number(url.searchParams.get('spin') ?? '0');\n"
+        "    if (spin > 0) {\n"
+        "      const end = Date.now() + spin;\n"
+        "      while (Date.now() < end) {}\n"
+        "    }\n"
+        "    return new Response('ok');\n"
+        "  }\n"
+        "};\n";
+
+    auto pool_a = make_elastic_pool(worker_path, "retiring-app", "tenant-a", 0, 2, 32, 5000, 1,
+                                    &ledger, &coordinator, &metrics, slow_exit_bundle);
+    auto pool_b = make_elastic_pool(worker_path, "idle-peer", "tenant-b", 0, 2, 32, 5000, 1,
+                                    &ledger, &coordinator, &metrics);
+
+    auto routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"retiring-app", pool_a}, {"idle-peer", pool_b}}));
+
+    ManagedListenerOptions lopts;
+    lopts.config = loopback_path_listener();
+    lopts.routing = routing;
+    lopts.metrics = &metrics;
+    ManagedListener listener(lopts);
+    std::string error;
+    require(listener.start(&error), "listener start failed: " + error);
+    const std::uint16_t port = listener.bound_port();
+
+    // Start one worker in pool_b (idle, 80 MiB < 85 MiB highWatermark).
+    require(do_http_get(port, "/@capsid/idle-peer/").status == 200, "idle-peer warmup failed");
+    require(pool_b->ready_workers() == 1, "idle-peer did not warm");
+    assign_pid_footprints(pool_b, 80ULL * kMiB, &fp_mutex, &pid_bytes);
+
+    // Start a busy worker in active pool_a (40 MiB) spinning on JS execution so it remains
+    // alive in pool_a's retired_ list briefly after health-recycle issues shutdown.
+    std::thread busy_thread([port] { (void)do_http_get(port, "/@capsid/retiring-app/?spin=800"); });
+    require(wait_for([&] { return pool_a->ready_workers() == 1 && pool_a->inflight() == 1; },
+                     std::chrono::seconds(4)),
+            "retiring-app did not enter busy request");
+    assign_pid_footprints(pool_a, 40ULL * kMiB, &fp_mutex, &pid_bytes);
+    auto retiring_worker = pool_a->current_worker_snapshot();
+    require(retiring_worker != nullptr && pool_a->recycle_worker(retiring_worker.get()),
+            "could not recycle active retiring-app worker into retired_");
+    require(pool_a->ready_workers() == 0 && pool_a->state() == GenerationPool::State::kActive,
+            "pool_a should remain active with its retired worker still alive");
+    require(!pool_a->snapshot_workers().empty(),
+            "retiring worker exited before soft-watermark cycle could sample it");
+
+    // 80 MiB (pool_b ready) + 40 MiB (pool_a active retired_) = 120 MiB >= 85 MiB highWatermark.
+    // A fresh soft-watermark cycle must count the still-alive retired worker and evict pool_b.
+    const std::size_t evicted = coordinator.run_eviction_cycle(/*refresh_samples=*/true);
+    require(evicted == 1 && pool_b->ready_workers() == 0,
+            "active pool retired worker was omitted from soft-watermark eviction");
+
+    busy_thread.join();
+    listener.request_stop();
+    listener.wait(&error);
+    pool_a->stop_and_join();
+    pool_b->stop_and_join();
+    std::cout << "PASS: active_retiring_worker_counted_in_soft_watermark" << std::endl;
+}
+
+void run_on_demand_watermark_counts_previous_victim(const std::string& worker_path) {
+    using namespace std::chrono_literals;
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    MemoryBudgetConfig mem;
+    mem.configured = true;
+    mem.limit_bytes = 100 * kMiB;
+    mem.high_watermark_percent = 85;
+    mem.low_watermark_percent = 75;
+    mem.min_residency_ms = 0;
+    mem.check_interval_ms = 0;
+    std::mutex mutex;
+    std::unordered_map<std::int64_t, std::uint64_t> footprints;
+    MemorySampler sampler({}, [&](std::int64_t pid, std::uint64_t* bytes) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto it = footprints.find(pid);
+        if (it == footprints.end())
+            return false;
+        *bytes = it->second;
+        return true;
+    });
+    WorkerCapacityLedger ledger(5, 0);
+    MetricsRegistry metrics;
+    GlobalEvictionCoordinator coordinator(mem, {}, &ledger, &sampler, &metrics);
+    std::atomic<bool> pause_io{false};
+    std::promise<void> paused;
+    std::promise<void> resume;
+    auto gate = resume.get_future();
+    auto victim = make_elastic_pool(worker_path, "victim", "team", 0, 1, 0, 0, 1, &ledger,
+                                    &coordinator, &metrics, kWorkerBundle, [&] {
+                                        if (pause_io.exchange(false)) {
+                                            paused.set_value();
+                                            gate.wait();
+                                        }
+                                    });
+    auto peer = make_elastic_pool(worker_path, "peer", "team", 0, 1, 0, 0, 1, &ledger, &coordinator,
+                                  &metrics);
+    auto requester = make_elastic_pool(worker_path, "requester", "team", 0, 1, 0, 0, 1, &ledger,
+                                       &coordinator, &metrics);
+    for (const auto& pool : {victim, peer}) {
+        require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight &&
+                    wait_for([&] { return pool->ready_workers() == 1; }, 5s),
+                "fixture worker did not become ready");
+    }
+    auto worker = victim->current_worker_snapshot();
+    auto lease = peer->acquire_worker();
+    require(worker && lease, "missing victim worker or peer lease");
+    assign_pid_footprints(victim, 25 * kMiB, &mutex, &footprints);
+    assign_pid_footprints(peer, 65 * kMiB, &mutex, &footprints);
+
+    // Hold the executor at a notification while its child is alive. A probe wakes
+    // the I/O thread without taking an HTTP dispatch lease or affecting eligibility.
+    pause_io.store(true);
+    worker->submit_probe("http://localhost/health");
+    require(paused.get_future().wait_for(5s) == std::future_status::ready,
+            "victim did not reach I/O barrier");
+    std::string reason;
+    require(coordinator.acquire_worker_slot(requester.get(), &reason),
+            "first admission failed: " + reason);
+    ledger.release_elastic("requester");
+    const auto retired = victim->snapshot_workers();
+    require(victim->ready_workers() == 0 && retired.size() == 1 &&
+                retired.front().pid == worker->process_id() && retired.front().pid > 0 &&
+                !retired.front().evictable && peer->ready_workers() == 1,
+            "first admission did not retire just the 25 MiB victim");
+
+    // A new admission sees 25 + 70 MiB. The retired PID is no longer a
+    // candidate, but its sample still puts the host above the 85 MiB watermark.
+    lease.release();
+    assign_pid_footprints(peer, 70 * kMiB, &mutex, &footprints);
+    const bool admitted = coordinator.acquire_worker_slot(requester.get(), &reason);
+    const auto peer_ready = peer->ready_workers();
+    const auto peer_charge = ledger.elastic_of("peer");
+    if (admitted)
+        ledger.release_elastic("requester");
+    resume.set_value();
+    victim->stop_and_join();
+    peer->stop_and_join();
+    requester->stop_and_join();
+    require(admitted, "second admission failed below the 100 MiB hard limit: " + reason);
+    require(peer_ready == 0 && peer_charge == 0,
+            "second admission omitted the previous victim: peer ready=" +
+                std::to_string(peer_ready) + " elastic=" + std::to_string(peer_charge));
+}
+
+void run_fair_share_boundary(const std::string& worker_path, bool slot_contention, bool overshare) {
+    constexpr std::uint64_t mib = 1024ULL * 1024;
+    MemoryBudgetConfig memory;
+    memory.configured = true;
+    memory.limit_bytes = 100 * mib;
+    // The same 90 MiB must stay below the watermark in the slot-contention cases.
+    memory.high_watermark_percent = slot_contention ? 95 : 85;
+    memory.low_watermark_percent = 75;
+    memory.min_residency_ms = 0;
+    memory.check_interval_ms = 0;
+    std::mutex mutex;
+    std::unordered_map<std::int64_t, std::uint64_t> readings;
+    MemorySampler sampler({}, [&](std::int64_t pid, std::uint64_t* bytes) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto found = readings.find(pid);
+        if (found == readings.end()) {
+            return false;
+        }
+        *bytes = found->second;
+        return true;
+    });
+    WorkerCapacityLedger ledger(2, 0);
+    MetricsRegistry metrics;
+    GlobalEvictionCoordinator coordinator(memory, {}, &ledger, &sampler, &metrics);
+    require(ledger.reserve_fresh("floor", 1), "reserve the protected floor");
+    ledger.commit_fresh("floor");
+    auto floor = make_elastic_pool(worker_path, "floor", "a", 1, 1, 0, 0, 1, &ledger, &coordinator,
+                                   &metrics);
+    auto peer =
+        make_elastic_pool(worker_path, "peer", "b", 0, 1, 0, 0, 1, &ledger, &coordinator, &metrics);
+    auto requester = make_elastic_pool(worker_path, "requester", "b", 0, 1, 0, 0, 1, &ledger,
+                                       &coordinator, &metrics);
+    require(peer->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "peer failed to wake");
+    require(wait_for([&] { return peer->ready_workers() == 1; }, std::chrono::seconds(5)),
+            "peer did not become ready");
+    const auto floor_before = floor->snapshot_workers();
+    const auto peer_before = peer->snapshot_workers();
+    require(floor_before.size() == 1 && peer_before.size() == 1 && peer_before[0].idle &&
+                floor_before[0].pid > 0 && peer_before[0].pid > 0 &&
+                floor_before[0].pid != peer_before[0].pid && ledger.elastic_used() == 1,
+            "expected two resident workers and one occupied elastic slot");
+    assign_pid_footprints(floor, (overshare ? 80 : 45) * mib, &mutex, &readings);
+    assign_pid_footprints(peer, (overshare ? 10 : 45) * mib, &mutex, &readings);
+
+    bool decision_matches;
+    std::string reason;
+    if (slot_contention) {
+        const auto result = requester->request_scale_out(&reason);
+        decision_matches =
+            overshare ? result == GenerationPool::ScaleOutResult::kCapacityRejected &&
+                            reason == "host_capacity_exhausted" && requester->ready_workers() == 0
+                      : result == GenerationPool::ScaleOutResult::kSpawnInFlight &&
+                            wait_for([&] { return requester->ready_workers() == 1; },
+                                     std::chrono::seconds(5));
+    } else {
+        decision_matches = coordinator.run_eviction_cycle(true) == (overshare ? 0U : 1U);
+    }
+    const auto floor_after = floor->snapshot_workers();
+    const auto peer_after = peer->snapshot_workers();
+    const auto peer_ready = peer->ready_workers();
+    const bool floor_preserved = floor->ready_workers() == 1 && floor_after.size() == 1 &&
+                                 floor_after[0].pid == floor_before[0].pid;
+    const bool peer_preserved =
+        peer_ready == 1 && peer_after.size() == 1 && peer_after[0].pid == peer_before[0].pid;
+    const auto elastic = ledger.elastic_used();
+    const std::string counters = metrics.render_prometheus_text();
+    requester->stop_and_join();
+    peer->stop_and_join();
+    floor->stop_and_join();
+    require(floor_preserved, "the original floor worker must survive");
+    require(decision_matches && (overshare ? peer_preserved : peer_ready == 0),
+            "wrong fairness decision: peer READY=" + std::to_string(peer_ready) +
+                ", rejection=" + reason + "\n" + counters);
+    require(elastic == (slot_contention || overshare ? 1U : 0U), "incorrect elastic slot count");
+    std::istringstream series(counters);
+    unsigned nonzero_evictions = 0;
+    for (std::string line; std::getline(series, line);) {
+        if (line.starts_with("capsid_pool_evictions_total{") && !line.ends_with(" 0")) {
+            require(
+                line ==
+                    "capsid_pool_evictions_total{app=\"peer\",tenant=\"b\",reason=\"global_lru\"} 1",
+                "incorrect eviction counter: " + line);
+            ++nonzero_evictions;
+        }
+    }
+    require(nonzero_evictions == (overshare ? 0U : 1U), "incorrect eviction counters: " + counters);
 }
 
 void run_phase1_overshare_protects_small_tenant(const std::string& worker_path) {
@@ -495,6 +989,11 @@ void run_phase1_overshare_protects_small_tenant(const std::string& worker_path) 
 
     // Hysteresis check: 72 MiB + 12 MiB = 84 MiB (between 75% low and 85% high) must NOT evict.
     require(coordinator.run_eviction_cycle(false) == 0, "eviction ran below highWatermark");
+    // An independent admission re-samples retired PIDs. Establish the 72 MiB
+    // starting point before measuring hysteresis at 84 MiB.
+    require(
+        wait_for([&] { return pool_a->snapshot_workers().size() == 2; }, std::chrono::seconds(5)),
+        "evicted workers still counted in the 72 MiB fixture");
     std::string reason;
     require(pool_a->request_scale_out(&reason) == GenerationPool::ScaleOutResult::kSpawnInFlight,
             "scale-out to 84 MiB rejected: " + reason);
@@ -888,6 +1387,25 @@ std::string read_text_file(const std::string& path) {
 }
 #endif
 
+void run_overlapping_tenant_warmups() {
+    TenancyConfig tenancy;
+    tenancy.configured = true;
+    tenancy.overrides["shared"].max_workers = 1;
+    WorkerCapacityLedger ledger(4, 0);
+    MemorySampler sampler;
+    GlobalEvictionCoordinator coordinator({}, tenancy, &ledger, &sampler);
+    std::string error;
+    require(coordinator.reserve_deploy_quota("first", "shared", 0, 1, &error),
+            "first cold app could not reserve its probe");
+    require(!coordinator.reserve_deploy_quota("second", "shared", 0, 1, &error) &&
+                error.find("maxWorkers") != std::string::npos,
+            "second probe consumed the first warm-up reservation: " + error);
+    coordinator.release_deploy_quota("first");
+    require(coordinator.reserve_deploy_quota("second", "shared", 0, 1, &error),
+            "released probe quota was not reusable");
+    coordinator.release_deploy_quota("second");
+}
+
 void run_admin_deploy_tenant_and_persistence(const std::string& worker_path) {
 #if defined(_WIN32)
     (void)worker_path;
@@ -932,6 +1450,7 @@ void run_admin_deploy_tenant_and_persistence(const std::string& worker_path) {
     MetricsRegistry metrics;
     GlobalEvictionCoordinator coordinator(mem, tenancy, &ledger, &sampler, &metrics);
 
+    std::vector<std::shared_ptr<GenerationPool>> retired_pools;
     std::map<std::string, std::shared_ptr<GenerationPool>> active_pools;
     auto make_opts = [&](const std::string& app) {
         auto opts = std::make_unique<ManagedHostOptions>();
@@ -946,9 +1465,13 @@ void run_admin_deploy_tenant_and_persistence(const std::string& worker_path) {
         opts->host_policy.max_worker_memory_bytes = 256ULL * 1024ULL * 1024ULL;
         opts->ledger = &ledger;
         opts->metrics = &metrics;
-        opts->check_tenant_deploy = [&coordinator, app](const std::string& tenant,
-                                                        std::uint32_t min_ready, std::string* err) {
-            return coordinator.check_deploy_quota(app, tenant, min_ready, err);
+        opts->reserve_tenant_deploy = [&coordinator, app](const std::string& tenant,
+                                                          std::uint32_t floor,
+                                                          std::uint32_t warming, std::string* err) {
+            return coordinator.reserve_deploy_quota(app, tenant, floor, warming, err);
+        };
+        opts->release_tenant_deploy = [&coordinator, app] {
+            coordinator.release_deploy_quota(app);
         };
         opts->prepare_activation =
             [&](const std::string& app_id, const capsid::host::DeployOutcome& prepared,
@@ -964,10 +1487,16 @@ void run_admin_deploy_tenant_and_persistence(const std::string& worker_path) {
             popts.factory = prepared.generation_factory;
             popts.recovery = default_recovery_policy();
             popts.metrics = &metrics;
+            auto draining = std::make_shared<std::weak_ptr<GenerationPool>>();
+            popts.on_drain_complete = [&coordinator, draining] {
+                if (auto pool = draining->lock())
+                    coordinator.unregister_pool(pool.get());
+            };
             auto pool = GenerationPool::create_adopted(std::move(popts), prepared.workers, err);
             if (!pool) {
                 return nullptr;
             }
+            *draining = pool;
             auto plan = std::make_unique<capsid::host::ActivationPlan>();
             plan->application = app_id;
             plan->new_pool = std::move(pool);
@@ -990,7 +1519,7 @@ void run_admin_deploy_tenant_and_persistence(const std::string& worker_path) {
         };
         opts->commit_retire = [&](capsid::host::RetirePlan* plan) {
             if (plan->pool) {
-                coordinator.unregister_pool(plan->pool.get());
+                retired_pools.push_back(plan->pool);
                 plan->pool->request_drain();
             }
             active_pools.erase(plan->application);
@@ -1107,8 +1636,178 @@ void run_admin_deploy_tenant_and_persistence(const std::string& worker_path) {
             pool->stop_and_join();
         }
     }
+    for (const auto& pool : retired_pools)
+        pool->stop_and_join();
     close(apps_fd);
     std::cout << "PASS: admin_deploy_tenant_and_persistence" << std::endl;
+#endif
+}
+
+void run_real_cgroup_memory_current(const std::string& worker_path) {
+#if !defined(__linux__)
+    (void)worker_path;
+    std::cout << "SKIP: real_cgroup_memory_current requires Linux cgroup v2" << std::endl;
+    std::exit(77);
+#else
+    // Use the delegated root shared by the native and container sandbox probes.
+    // Only the workers created by this test may be moved to a new cgroup.
+    const std::string workers_cg =
+        "/sys/fs/cgroup/capsid-cgtest-workers-" + std::to_string(getpid());
+    if (mkdir(workers_cg.c_str(), 0755) != 0) {
+        if (errno == EACCES || errno == EPERM || errno == EROFS || errno == ENOENT) {
+            std::cout << "SKIP: cgroup v2 delegation unavailable (" << std::strerror(errno) << ")"
+                      << std::endl;
+            std::exit(77);
+        }
+        fail(std::string("cannot create worker cgroup: ") + std::strerror(errno));
+    }
+    std::ifstream controllers(workers_cg + "/cgroup.controllers");
+    std::string name;
+    bool memory_delegated = false;
+    while (controllers >> name) {
+        if (name == "memory")
+            memory_delegated = true;
+    }
+    if (!memory_delegated) {
+        require(rmdir(workers_cg.c_str()) == 0, "cannot remove empty test cgroup");
+        std::cout << "SKIP: memory controller is not delegated to " << workers_cg << std::endl;
+        std::exit(77);
+    }
+    std::ofstream control(workers_cg + "/cgroup.subtree_control");
+    control << "+memory\n";
+    control.close();
+    require(!control.fail(), "cannot enable delegated memory controller at " + workers_cg);
+
+    // Install nullptr CgroupReader (real <cgroup>/memory.current) and a trap FootprintReader
+    // so any accidental fallback to /proc/<pid> fails the test immediately.
+    MemorySampler sampler(nullptr, [](std::int64_t, std::uint64_t*) -> bool {
+        fail("MemorySampler fell back to /proc PID footprint despite active cgroup v2");
+        return false;
+    });
+
+    WorkerCapacityLedger ledger(4, 0);
+    TenancyConfig tenancy;
+    MemoryBudgetConfig setup_mem;
+    setup_mem.configured = false;
+    setup_mem.min_residency_ms = 0;
+
+    GlobalEvictionCoordinator setup_coord(setup_mem, tenancy, &ledger, &sampler);
+    require(ledger.reserve_fresh("cgapp", 1), "reserve cgapp failed");
+    ledger.commit_fresh("cgapp");
+
+    GenerationPoolOptions popts;
+    popts.application_id = "cgapp";
+    popts.tenant_id = "cgtenant";
+    popts.version = "v1";
+    popts.generation_digest = "sha256:" + std::string(64, 'c');
+    popts.workers = 2;
+    popts.has_min_ready = true;
+    popts.min_ready = 1;
+    popts.idle_timeout_ms = 60000;
+    popts.max_inflight_per_worker = 1;
+    popts.max_queued_requests = 16;
+    popts.queue_timeout_ms = 5000;
+    popts.recovery = default_recovery_policy();
+    const std::string bundle_str(kWorkerBundle);
+    popts.factory = [worker_path, workers_cg, bundle_str](capsid_worker** out,
+                                                          std::string* factory_error) -> bool {
+        std::string cg_err;
+        auto lease = capsid::host::create_worker_cgroup(workers_cg, &cg_err);
+        if (!lease) {
+            *factory_error = cg_err;
+            return false;
+        }
+        capsid_worker_config config;
+        capsid_worker_config_init(&config);
+        config.worker_path = worker_path.c_str();
+        config.strict_sandbox = 1;
+        config.sandbox_cgroup_path = lease->path.c_str();
+        config.request_timeout_ms = 5000;
+        capsid_worker* worker = nullptr;
+        const capsid::host::ProtocolLaunch launch;
+        if (capsid::host::spawn_with_protocol(&config, launch, &worker) != CAPSID_OK) {
+            *factory_error = "worker spawn with cgroup failed";
+            return false;
+        }
+        if (capsid_worker_load_bundle(worker,
+                                      reinterpret_cast<const std::uint8_t*>(bundle_str.data()),
+                                      bundle_str.size()) != CAPSID_OK ||
+            capsid_worker_flush(worker) != CAPSID_OK) {
+            capsid_worker_destroy(worker);
+            *factory_error = "bundle load/flush failed";
+            return false;
+        }
+        capsid::host::register_worker_cgroup(worker, lease);
+        *out = worker;
+        return true;
+    };
+    popts.acquire_worker_slot = [&setup_coord](const GenerationPool* req, std::string* reason) {
+        return setup_coord.acquire_worker_slot(req, reason);
+    };
+    popts.release_elastic_slot = [&ledger] { ledger.release_elastic("cgapp", 1); };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(popts), &error);
+    require(pool != nullptr, "GenerationPool::create with cgroup v2 failed: " + error);
+    setup_coord.register_pool(pool);
+
+    auto routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"cgapp", pool}}));
+    ManagedListenerOptions lopts;
+    lopts.config = loopback_path_listener();
+    lopts.routing = routing;
+    ManagedListener listener(lopts);
+    require(listener.start(&error), "listener start failed: " + error);
+    const std::uint16_t port = listener.bound_port();
+
+    std::thread req1([port] {
+        const HttpResponse r = do_http_get(port, "/@capsid/cgapp/?delay=250");
+        require(r.status == 200, "cgapp req1 failed");
+    });
+    std::thread req2([port] {
+        const HttpResponse r = do_http_get(port, "/@capsid/cgapp/?delay=250");
+        require(r.status == 200, "cgapp req2 failed");
+    });
+    req1.join();
+    req2.join();
+    require(wait_for([&] { return pool->ready_workers() == 2 && pool->inflight() == 0; },
+                     std::chrono::seconds(5)),
+            "cgapp did not scale out to 2 idle workers");
+
+    const auto snaps = pool->snapshot_workers();
+    require(snaps.size() == 2, "expected 2 worker snapshots");
+    std::uint64_t total_cgroup_bytes = 0;
+    for (const auto& w : snaps) {
+        require(!w.cgroup_path.empty() && w.cgroup_path.rfind(workers_cg + "/", 0) == 0,
+                "worker snapshot missing leaf cgroup path: " + w.cgroup_path);
+        const std::uint64_t b = sampler.sample_worker_bytes(w.pid, w.cgroup_path, true);
+        require(b > 0, "real kernel cgroup memory.current returned 0");
+        total_cgroup_bytes += b;
+    }
+
+    MemoryBudgetConfig budget;
+    budget.configured = true;
+    budget.limit_bytes = total_cgroup_bytes;
+    budget.high_watermark_percent = 80;
+    budget.low_watermark_percent = 50;
+    budget.min_residency_ms = 0;
+    GlobalEvictionCoordinator coordinator(budget, tenancy, &ledger, &sampler);
+    coordinator.register_pool(pool);
+    const std::size_t evicted = coordinator.run_eviction_cycle(/*refresh_samples=*/true);
+    require(evicted == 1 && pool->ready_workers() == 1,
+            "real cgroup eviction did not evict exactly 1 worker (evicted=" +
+                std::to_string(evicted) + ")");
+    require(wait_for([&] { return ledger.elastic_used() == 0; }, std::chrono::seconds(5)),
+            "elastic slot not returned after cgroup eviction");
+
+    listener.request_stop();
+    listener.wait(&error);
+    pool->stop_and_join();
+    ledger.release_active("cgapp", 1);
+    require(wait_for([&] { return rmdir(workers_cg.c_str()) == 0 || errno == ENOENT; },
+                     std::chrono::seconds(3)),
+            "worker leaf cgroups did not clean up cleanly");
+    std::cout << "PASS: real_cgroup_memory_current (" << total_cgroup_bytes << " bytes)"
+              << std::endl;
 #endif
 }
 
@@ -1123,6 +1822,40 @@ int main(int argc, char** argv) {
 #endif
     const std::string worker_path = argv[1];
     const std::string mode = argv[2];
+    if (mode == "watermark_protected_overshare" || mode == "watermark_within_share" ||
+        mode == "slot_protected_overshare" || mode == "slot_within_share") {
+        run_fair_share_boundary(worker_path, mode.starts_with("slot_"),
+                                mode.ends_with("_overshare"));
+        return 0;
+    }
+    if (mode == "on_demand_watermark_counts_previous_victim") {
+        run_on_demand_watermark_counts_previous_victim(worker_path);
+        return 0;
+    }
+    if (mode == "deploy_with_protected_sibling") {
+        run_deploy_with_protected_sibling(worker_path);
+        return 0;
+    }
+    if (mode == "deploy_at_tenant_memory_limit") {
+        run_deploy_at_tenant_memory_limit(worker_path);
+        return 0;
+    }
+    if (mode == "tenant_memory_recovers_without_global_budget") {
+        run_tenant_memory_recovers_without_global_budget(worker_path);
+        return 0;
+    }
+    if (mode == "shrink_to_floor_returns_elastic_slot") {
+        run_shrink_to_floor_returns_elastic_slot(worker_path);
+        return 0;
+    }
+    if (mode == "draining_generation_counted_in_memory") {
+        run_draining_generation_counted_in_memory(worker_path);
+        return 0;
+    }
+    if (mode == "active_retiring_worker_counted_in_soft_watermark") {
+        run_active_retiring_worker_counted_in_soft_watermark(worker_path);
+        return 0;
+    }
     if (mode == "phase1_overshare_protects_small_tenant") {
         run_phase1_overshare_protects_small_tenant(worker_path);
         return 0;
@@ -1137,6 +1870,14 @@ int main(int argc, char** argv) {
     }
     if (mode == "admin_deploy_tenant_and_persistence") {
         run_admin_deploy_tenant_and_persistence(worker_path);
+        return 0;
+    }
+    if (mode == "overlapping_tenant_warmups") {
+        run_overlapping_tenant_warmups();
+        return 0;
+    }
+    if (mode == "real_cgroup_memory_current") {
+        run_real_cgroup_memory_current(worker_path);
         return 0;
     }
     fail("unknown eviction coordinator test case: " + mode);

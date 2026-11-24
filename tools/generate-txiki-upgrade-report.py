@@ -244,7 +244,7 @@ def source_configuration(
         root / "src/worker_runtime.cc",
         root / "js/bootstrap.js",
         root / "js/profile-manifest.js",
-        root / "docs/capability-manifest.json",
+        root / "docs/data/capability-manifest.json",
         build / "generated/bootstrap.js",
     ]
     return {
@@ -386,7 +386,7 @@ def ctest_evidence(
 
 
 def deviations(root: Path, baseline: dict[str, Any]) -> dict[str, Any]:
-    path = root / "docs/conformance.md"
+    path = root / "docs/reference/web-conformance.md"
     current: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.startswith("| CAPSID-D"):
@@ -434,7 +434,7 @@ def surface_inventory(root: Path) -> dict[str, Any]:
     if len(globals_list) != len(set(globals_list)):
         raise RuntimeError("duplicate profile globals")
 
-    capability_path = root / "docs/capability-manifest.json"
+    capability_path = root / "docs/data/capability-manifest.json"
     capability = json.loads(capability_path.read_text(encoding="utf-8"))
     native_path = root / "src/txiki_restricted_core.c"
     native_text = native_path.read_text(encoding="utf-8")
@@ -481,39 +481,39 @@ def render_report(document: dict[str, Any]) -> str:
     inventory = document["surface_inventory"]
     return "\n".join(
         [
-            "# txiki.js 升级门禁报告",
+            "# txiki.js upgrade qualification report",
             "",
-            f"> 生成时间：{document['generated_at']}",
-            f"> vendor：`{document['vendor']['tag']}` / `{document['vendor']['commit']}`",
+            f"> Generated at: {document['generated_at']}",
+            f"> Vendor: `{document['vendor']['tag']}` / `{document['vendor']['commit']}`",
             "",
-            "## 结论",
+            "## Outcome",
             "",
             (
-                "workerd版本兼容验收通过，原始标准矩阵的五项失败仍保留。"
-                "完整参考/context证据已重新核验；privileged矩阵和其他Hosted任务仍须通过。"
+                "The workerd version compatibility check passed. The original standards matrix still records five failures. "
+                "The complete reference and context evidence was rechecked. The privileged matrix and remaining hosted jobs must still pass."
                 if tests.get("compatibility_evidence")
-                else "门禁通过。vendor、patch、overlay、受限源码与符号、完整测试矩阵、"
-                "合规偏差差异和运行时表面清单已汇总到同一份 JSON 证据。"
+                else "Qualification passed. The JSON report records the vendor revision, patches, overlay, restricted sources and symbols, "
+                "full test matrix, changes in conformance deviations, and runtime API inventory."
             ),
             "",
-            "## 测试",
+            "## Tests",
             "",
-            f"- 注册：{tests['registered']}",
-            f"- 通过：{tests['passed']}",
-            f"- 原始失败：{len(tests['failed'])}（{', '.join(tests['failed']) or '无'}）",
-            f"- 环境型 skip：{len(tests['skipped'])} （{', '.join(tests['skipped']) or '无'}）",
-            f"- 固定 WPT 文件：{tests['wpt_files']}",
+            f"- Registered: {tests['registered']}",
+            f"- Passed: {tests['passed']}",
+            f"- Original failures: {len(tests['failed'])} ({', '.join(tests['failed']) or 'none'})",
+            f"- Environment-dependent skips: {len(tests['skipped'])} ({', '.join(tests['skipped']) or 'none'})",
+            f"- Pinned WPT files: {tests['wpt_files']}",
             "",
-            "## 合规与表面",
+            "## Conformance and API inventory",
             "",
-            f"- 偏差：{len(deviation['current'])} 项；相对 baseline "
-            f"{'无变化' if deviation['unchanged'] else '有变化，见 JSON diff'}；",
-            f"- 全局：{inventory['globals']['count']} 个，`worker_global_surface` 验证精确集合；",
-            f"- 应用可见原生模块：{', '.join(inventory['modules']['application_visible'])}；",
-            f"- 受限原生 helper：{inventory['native']['restricted_helper_count']} 个。",
+            f"- Deviations: {len(deviation['current'])} relative to the baseline ("
+            f"{'unchanged' if deviation['unchanged'] else 'changed, see the JSON diff'}).",
+            f"- Globals: {inventory['globals']['count']}. The `worker_global_surface` test checks the exact set.",
+            f"- Application-visible native modules: {', '.join(inventory['modules']['application_visible'])}.",
+            f"- Restricted native helpers: {inventory['native']['restricted_helper_count']}.",
             "",
-            "权威明细、哈希、patch 列表、审计输出、完整全局/模块/原生清单和 "
-            "JUnit 摘要均在同名 JSON 文件中。",
+            "The accompanying JSON file contains the hashes, patch list, audit output, "
+            "complete global, module and native inventories, and JUnit summary.",
             "",
         ]
     )
@@ -623,8 +623,8 @@ def write_document(args: argparse.Namespace, document: dict[str, Any]) -> None:
         render_report(document)
         if document["state"] == "complete"
         else (
-            "# txiki.js 升级报告未完成\n\n"
-            f"状态：{document['state']}。\n\n{document.get('error', '验收仍在执行。')}\n"
+            "# Incomplete txiki.js upgrade report\n\n"
+            f"State: {document['state']}.\n\n{document.get('error', 'Qualification is still running.')}\n"
         )
     )
     args.output_md.write_text(text, encoding="utf-8")

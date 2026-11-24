@@ -470,7 +470,7 @@ std::string host_v2_signature(const ParsedHostConfig& c) {
 }
 
 // 100%-schema-field-consumption gate test for orthogonal host-v2 + app-v2
-// (docs/config-v2-design.md §3.2): every single schema field must alter the
+// (docs/design/config-v2.md §3.2): every single schema field must alter the
 // parsed/compiled typed model when mutated.
 void test_host_v2_orthogonal_and_full_consumption() {
     const std::string max_host_v2 = R"json({
@@ -861,6 +861,112 @@ void test_host_v2_orthogonal_and_full_consumption() {
     }
 }
 
+void test_worker_memory_inheritance(bool conflicting) {
+    constexpr std::uint64_t mib = 1024ULL * 1024;
+    ParsedHostConfig host;
+    require_valid_parse(R"({
+        "apiVersion":"capsid/host-v2",
+        "paths":{"applications":"/apps","state":"/state","secrets":"/secrets/{application}"},
+        "admin":{"unix":"/run/capsid.sock"},
+        "listeners":[{"name":"public","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],
+        "defaults":{"worker":{"memoryMax":"96MiB","jsHeap":"64MiB"}}
+    })",
+                        "host with worker defaults", &host);
+
+    struct Case {
+        std::string_view worker;
+        unsigned memory_mib;
+        unsigned heap_mib;
+    };
+    const std::vector<Case> cases =
+        conflicting ? std::vector<Case>{{R"({"memoryMax":"32MiB"})", 32, 64}}
+                    : std::vector<Case>{{"{}", 96, 64},
+                                        {R"({"memoryMax":"72MiB"})", 72, 64},
+                                        {R"({"memoryMax":"64MiB"})", 64, 64},
+                                        {R"({"jsHeap":"32MiB"})", 96, 32},
+                                        {R"({"memoryMax":"32MiB","jsHeap":"16MiB"})", 32, 16}};
+    for (const auto& item : cases) {
+        const std::string json =
+            R"({"apiVersion":"capsid/app-v2","worker":)" + std::string(item.worker) + "}";
+        require(validate_config_json(ConfigDocument::kApplication, json).ok,
+                "invalid app: " + json);
+        capsid::host::AppRequest app;
+        std::string parse_error;
+        require(capsid::host::parse_app_request({json.begin(), json.end()}, &app, &parse_error),
+                "invalid app model: " + json);
+        const auto result = capsid::host::compile_policy(host.policy, app, {});
+        if (!result.ok) {
+            const auto& error = result.error;
+            const bool explains_memory = error.find("memory") != std::string::npos ||
+                                         error.find("heap") != std::string::npos ||
+                                         error.find("jsHeap") != std::string::npos;
+            require(conflicting && explains_memory,
+                    "unexpected policy rejection: " + json + " " + error);
+            continue;
+        }
+        require(result.effective.memory_bytes == item.memory_mib * mib &&
+                    result.effective.js_heap_bytes == item.heap_mib * mib,
+                json + " compiled to memoryMax=" + std::to_string(result.effective.memory_bytes) +
+                    " and jsHeap=" + std::to_string(result.effective.js_heap_bytes) +
+                    ", expected " + std::to_string(item.memory_mib * mib) + " and " +
+                    std::to_string(item.heap_mib * mib));
+    }
+}
+
+void test_min_ready_ceiling() {
+    for (unsigned ceiling : {0U, 1U}) {
+        const std::string host_json = R"({
+            "apiVersion":"capsid/host-v2",
+            "paths":{"applications":"/apps","state":"/state","secrets":"/keys/{application}"},
+            "admin":{"unix":"/admin.sock"},
+            "listeners":[{"name":"public","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}],
+            "capacity":{"workersTotal":8},
+            "defaults":{"pool":{"minReady":)" +
+                                      std::to_string(ceiling) + R"(,"maxWorkers":4}},
+            "maximums":{"pool":{"minReady":)" +
+                                      std::to_string(ceiling) + R"(,"maxWorkers":4}}
+        })";
+        ParsedHostConfig host;
+        require_valid_parse(host_json, "per-app minReady ceiling", &host);
+        struct Case {
+            const char* pool;
+            bool accepted;
+            unsigned min_ready;
+            unsigned max_workers;
+        };
+        const Case cases[] = {
+            {"{}", true, ceiling, 4},
+            {R"({"minReady":0,"maxWorkers":4})", true, 0, 4},
+            {R"({"minReady":1,"maxWorkers":4})", ceiling == 1, 1, 4},
+            {R"({"workers":1})", ceiling == 1, 1, 1},
+            {R"({"minReady":2,"maxWorkers":4})", false, 0, 0},
+            {R"({"workers":2})", false, 0, 0},
+        };
+        std::ostringstream mismatches;
+        for (const Case& item : cases) {
+            const std::string json =
+                std::string(R"({"apiVersion":"capsid/app-v2","pool":)") + item.pool + "}";
+            capsid::host::AppRequest app;
+            std::string error;
+            require(validate_config_json(ConfigDocument::kApplication, json).ok,
+                    "invalid App fixture: " + json);
+            require(capsid::host::parse_app_request({json.begin(), json.end()}, &app, &error),
+                    "cannot parse App fixture: " + json);
+            const auto result = capsid::host::compile_policy(host.policy, app, {});
+            if (result.ok != item.accepted ||
+                (result.ok && (result.effective.min_ready != item.min_ready ||
+                               result.effective.workers != item.max_workers))) {
+                mismatches << "\n  pool=" << item.pool << " accepted=" << result.ok
+                           << " minReady=" << result.effective.min_ready
+                           << " maxWorkers=" << result.effective.workers
+                           << " error=" << result.error;
+            }
+        }
+        require(mismatches.str().empty(), "maximums.pool.minReady=" + std::to_string(ceiling) +
+                                              " mismatch:" + mismatches.str());
+    }
+}
+
 void test_semantic_gates() {
     std::string admin_mode =
         R"json({
@@ -1169,7 +1275,17 @@ void test_ipv6_fetch_authorities_reach_the_host_policy() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && (std::string_view(argv[1]) == "memory_inheritance_compatible" ||
+                      std::string_view(argv[1]) == "memory_inheritance_conflict")) {
+        test_worker_memory_inheritance(std::string_view(argv[1]) == "memory_inheritance_conflict");
+        return 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "min_ready_ceiling") {
+        test_min_ready_ceiling();
+        return 0;
+    }
+    require(argc == 1, "unexpected test arguments");
     test_full_document_maps_every_field();
     test_channels_section_maps_and_gates();
     test_minimal_document_parses();

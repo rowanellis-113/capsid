@@ -1,10 +1,8 @@
-// RED for the queue-saturation activity fix (docs/queue-saturation-activity-fix.md).
-//
-// Frozen before the implementation. Each test asserts the post-fix
-// contract; the current implementation fails at least #1, #2 and #3
-// deterministically (size > max_queued_bytes raises RangeError, and
-// 64 concurrent 65537-byte responses cross the shared 4 MiB pending
-// budget), and hangs on #5 under saturation.
+// Regression suite for the response queue-saturation activity contract:
+// asserts that responses larger than max_queued_bytes do not fail with
+// spurious RangeError, 64 concurrent 65537-byte responses stay bounded under
+// the shared 4 MiB pending budget without stalling, and saturation drains
+// cleanly without hanging.
 //
 // Run: test-response-queue-saturation <capsid-worker> <fixture.js>
 

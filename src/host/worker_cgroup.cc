@@ -9,13 +9,48 @@
 #include <mutex>
 
 #if defined(__linux__)
+#include "cgroup_io.h"
+#include "host/config.h"
+#include <linux/magic.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 #endif
 
 namespace capsid::host {
 
 namespace {
+
+#if defined(__linux__)
+// Serialize creation of the first leaf with removal of the last leaf for the same tenant.
+std::mutex g_cgroup_tree_mutex;
+
+bool configure_tenant_memory(int directory, std::uint64_t bytes) {
+    struct statfs fs{};
+    if (::fstatfs(directory, &fs) != 0 ||
+        static_cast<unsigned long>(fs.f_type) != CGROUP2_SUPER_MAGIC) {
+        return false;
+    }
+    const std::string desired = std::to_string(bytes);
+    std::string actual;
+    if (!cgroup_read_at(directory, "memory.max", &actual)) {
+        return false;
+    }
+    if (!cgroup_value_matches("memory.max", desired, actual)) {
+        // An empty group may survive a Host restart. Never change an occupied group's
+        // budget while admitting another generation.
+        std::string events;
+        if (!cgroup_read_at(directory, "cgroup.events", &events) ||
+            ("\n" + events + "\n").find("\npopulated 0\n") == std::string::npos ||
+            !cgroup_write_at(directory, "memory.max", desired) ||
+            !cgroup_read_at(directory, "memory.max", &actual) ||
+            !cgroup_value_matches("memory.max", desired, actual)) {
+            return false;
+        }
+    }
+    return cgroup_write_at(directory, "cgroup.subtree_control", "+memory");
+}
+#endif
 
 std::mutex g_worker_cgroup_mutex;
 std::map<capsid_worker*, std::shared_ptr<WorkerCgroupLease>> g_worker_cgroups;
@@ -27,16 +62,25 @@ WorkerCgroupLease::~WorkerCgroupLease() { release(); }
 void WorkerCgroupLease::release() {
 #if defined(__linux__)
     if (!path.empty()) {
+        std::lock_guard<std::mutex> lock(g_cgroup_tree_mutex);
         ::rmdir(path.c_str());
+        if (!tenant_path.empty()) {
+            ::rmdir(tenant_path.c_str()); // remains busy until its last worker leaf is gone
+        }
     }
 #endif
     path.clear();
+    tenant_path.clear();
 }
 
 std::shared_ptr<WorkerCgroupLease> create_worker_cgroup(const std::string& cgroup_root,
-                                                        std::string* error) {
+                                                        std::string* error,
+                                                        const std::string& tenant,
+                                                        std::uint64_t hard_memory_bytes) {
 #if !defined(__linux__)
     (void)cgroup_root;
+    (void)tenant;
+    (void)hard_memory_bytes;
     if (error != nullptr) {
         *error = "cgroup v2 isolation requires Linux";
     }
@@ -52,6 +96,34 @@ std::shared_ptr<WorkerCgroupLease> create_worker_cgroup(const std::string& cgrou
     while (base.size() > 1 && base.back() == '/') {
         base.pop_back();
     }
+    std::lock_guard<std::mutex> lock(g_cgroup_tree_mutex);
+    std::string tenant_path;
+    if (hard_memory_bytes != 0) {
+        if (!valid_tenant_id(tenant)) {
+            if (error)
+                *error = "invalid cgroup tenant id";
+            return nullptr;
+        }
+        tenant_path = base + "/tenant-" + tenant;
+        const bool created = ::mkdir(tenant_path.c_str(), 0755) == 0;
+        if (!created && errno != EEXIST) {
+            if (error)
+                *error = "cannot create tenant cgroup";
+            return nullptr;
+        }
+        const int fd = ::open(tenant_path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        const bool configured = fd >= 0 && configure_tenant_memory(fd, hard_memory_bytes);
+        if (fd >= 0)
+            ::close(fd);
+        if (!configured) {
+            if (created)
+                ::rmdir(tenant_path.c_str());
+            if (error)
+                *error = "cannot enforce tenant hardMemory in delegated cgroup";
+            return nullptr;
+        }
+        base = tenant_path;
+    }
     static std::atomic<std::uint64_t> counter{0};
     const std::uint64_t seq = counter.fetch_add(1, std::memory_order_relaxed);
     std::string leaf = base + "/worker-" + std::to_string(::getpid()) + "-" + std::to_string(seq);
@@ -59,9 +131,11 @@ std::shared_ptr<WorkerCgroupLease> create_worker_cgroup(const std::string& cgrou
         if (error != nullptr) {
             *error = std::string("cannot create worker leaf cgroup: ") + std::strerror(errno);
         }
+        if (!tenant_path.empty())
+            ::rmdir(tenant_path.c_str());
         return nullptr;
     }
-    return std::make_shared<WorkerCgroupLease>(std::move(leaf));
+    return std::make_shared<WorkerCgroupLease>(std::move(leaf), std::move(tenant_path));
 #endif
 }
 

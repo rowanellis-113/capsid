@@ -1135,9 +1135,8 @@ try {
   }
 }
 
-// ---- Listener-level CORS on the single-worker CLI: --cors-origins and
-// --cors-methods are both required (mirroring the host.json grammar),
-// --cors-headers / --cors-max-age optional. The listener answers browser
+// ---- Listener-level CORS in local mode (configured via --host-config,
+// mirroring the managed host.json grammar). The listener answers browser
 // preflights before routing; simple responses get the matching
 // Access-Control-Allow-Origin stamped, disallowed origins get nothing.
 {

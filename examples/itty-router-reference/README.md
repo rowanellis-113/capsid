@@ -2,7 +2,7 @@
 
 > Reviewed 2026-11-17 against the pinned beta.2 fixture. Commands below run in
 > this directory; use npm.cmd on Windows. Prepare the complete test dependencies
-> using the [source-build guide](../../docs/building.md) before configuring CMake.
+> using the [source-build guide](../../docs/guides/build-from-source.md) before configuring CMake.
 
 This directory pins the itty-router version used by the Capsid Runtime compatibility suite:
 
@@ -18,4 +18,4 @@ npm run build
 - the named `fetch` for the hand-written `IttyRouter` promise pipeline.
 
 CMake uses the same `build.mjs` and audits each self-contained ESM before worker tests load it. See the verification scope, exclusions, and differential rules in
-[`../../docs/framework-compatibility/itty-router.md`](../../docs/framework-compatibility/itty-router.md).
+[`../../docs/reference/frameworks/itty-router.md`](../../docs/reference/frameworks/itty-router.md).

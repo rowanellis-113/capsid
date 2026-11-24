@@ -13,12 +13,18 @@
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <utility>
 
 namespace capsid::host {
 
 namespace {
+
+std::uint64_t sat_kib_to_bytes(std::uint64_t kib) noexcept {
+    constexpr std::uint64_t kMaxKib = std::numeric_limits<std::uint64_t>::max() / 1024ULL;
+    return kib > kMaxKib ? std::numeric_limits<std::uint64_t>::max() : kib * 1024ULL;
+}
 
 #if defined(_WIN32)
 
@@ -221,11 +227,11 @@ bool read_process_footprint_bytes(std::int64_t pid, std::uint64_t* bytes_out) {
     }
     std::uint64_t kib = 0;
     if (read_pss_kib(static_cast<pid_t>(pid), &kib)) {
-        *bytes_out = kib * 1024ULL;
+        *bytes_out = sat_kib_to_bytes(kib);
         return true;
     }
     if (read_rss_kib(static_cast<pid_t>(pid), &kib)) {
-        *bytes_out = kib * 1024ULL;
+        *bytes_out = sat_kib_to_bytes(kib);
         return true;
     }
     return false;

@@ -82,7 +82,7 @@ bool install_windows_memory_limit(uint64_t limit_bytes, std::string* error) {
     // Windows job objects bound committed memory (JOB_OBJECT_LIMIT_PROCESS_MEMORY),
     // not the virtual address range RLIMIT_AS bounds on Linux and not the
     // working set. The enforcement is real but the semantics differ; see
-    // docs/windows.md for the capability matrix.
+    // docs/guides/build-on-windows.md for the capability matrix.
     if (limit_bytes > static_cast<uint64_t>(std::numeric_limits<SIZE_T>::max())) {
         if (error) {
             *error = "process memory limit exceeds platform range";
@@ -1193,7 +1193,7 @@ bool apply_sandbox(const SandboxConfig& config, uint32_t* applied_features, uint
     // committed working set (not the virtual address range RLIMIT_AS
     // bounds on Linux). Per-process file-descriptor limits have no Windows
     // equivalent: a nonzero config.file_descriptor_limit is accepted but
-    // NOT enforced (documented in docs/windows.md). Strict sandbox mode
+    // NOT enforced (documented in docs/guides/build-on-windows.md). Strict sandbox mode
     // (seccomp/Landlock/namespaces) has no Windows equivalent and is
     // rejected below, matching the non-Linux behavior of every other
     // platform.

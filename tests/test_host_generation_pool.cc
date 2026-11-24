@@ -4,8 +4,8 @@
 // PR-07 gate (spec §8.4): N→N-1→N replacement, retire/drain races with a
 // replacement in flight, poisoned EXIT never misjudged as healthy, new
 // requests only ever enter READY workers (0 ready → pick_worker() returns
-// nullptr — the caller's 503 point), and the SingleWorkerServer suite as
-// the extraction regression gate (run separately).
+// nullptr — the caller's 503 point), alongside the local Host integration
+// suite (run separately).
 //
 // The pool's pump owns every slot's event drain, so this test observes
 // request completion through the pool's inflight counter (begin + an

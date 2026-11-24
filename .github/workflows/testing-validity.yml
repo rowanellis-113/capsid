@@ -33,6 +33,12 @@ jobs:
           # submodule checkouts must carry the tag refs.
           fetch-tags: true
 
+      - name: Make the original documentation captures available to CTest
+        shell: bash
+        run: |
+          revision=845ae5dee5833c1bed1c2630cfb65e6ed76af7d7
+          git cat-file -e "$revision^{commit}" 2>/dev/null || git fetch --depth=1 --no-tags origin "$revision"
+
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -278,7 +284,7 @@ jobs:
             --source-root . \
             --build-dir build-validity \
             --junit "${evidence}/ordinary-junit.xml" \
-            --baseline docs/txiki-upgrade-baseline.json \
+            --baseline docs/data/txiki-upgrade-baseline.json \
             --node-executable "$(node -p 'process.execPath')" \
             --workerd-python "${CAPSID_WS_INTEROP_PYTHON}" \
             --workerd-acceptance "${evidence}/compatibility-acceptance.json" \
@@ -302,7 +308,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}/build-validity:/build:ro" \
             --entrypoint /bin/bash \
             ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 \
-            /repo/scripts/run-delegated-sandbox-tests.sh /build
+            /repo/tests/sandbox/run-delegated-sandbox-tests.sh /build
 
       - name: Archive workerd execution evidence
         if: always()
@@ -383,6 +389,12 @@ jobs:
           # The txiki vendor audit derives the pinned tag via git describe;
           # submodule checkouts must carry the tag refs.
           fetch-tags: true
+
+      - name: Make the original documentation captures available to CTest
+        shell: bash
+        run: |
+          revision=845ae5dee5833c1bed1c2630cfb65e6ed76af7d7
+          git cat-file -e "$revision^{commit}" 2>/dev/null || git fetch --depth=1 --no-tags origin "$revision"
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -719,6 +731,12 @@ jobs:
           # submodule checkouts must carry the tag refs.
           fetch-tags: true
 
+      - name: Make the original documentation captures available to CTest
+        shell: bash
+        run: |
+          revision=845ae5dee5833c1bed1c2630cfb65e6ed76af7d7
+          git cat-file -e "$revision^{commit}" 2>/dev/null || git fetch --depth=1 --no-tags origin "$revision"
+
       # Keep the POSIX gate honest for the complete M1D Admin surface.  The
       # transport and long-lived service are intentionally conditional on
       # Boost, so relying on the runner image could silently skip their
@@ -858,6 +876,12 @@ jobs:
           # The txiki vendor audit derives the pinned tag via git describe;
           # submodule checkouts must carry the tag refs.
           fetch-tags: true
+
+      - name: Make the original documentation captures available to CTest
+        shell: bash
+        run: |
+          revision=845ae5dee5833c1bed1c2630cfb65e6ed76af7d7
+          git cat-file -e "$revision^{commit}" 2>/dev/null || git fetch --depth=1 --no-tags origin "$revision"
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

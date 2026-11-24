@@ -1,8 +1,7 @@
-// Unit test for capsid::OutboundBuffer (docs/queue-saturation-activity-fix.md
-// §3.4): with an injected short-write / EAGAIN writer, physical storage
-// must stay bounded by one frame plus the wire limit, the logical queue
-// must never exceed the limit, frame boundaries must never be corrupted,
-// and full drains must reset the buffer.
+// Unit test for capsid::OutboundBuffer: with an injected short-write /
+// EAGAIN writer, physical storage must stay bounded by one frame plus the
+// wire limit, the logical queue must never exceed the limit, frame boundaries
+// must never be corrupted, and full drains must reset the buffer.
 //
 // Run: test-outbound-buffer
 

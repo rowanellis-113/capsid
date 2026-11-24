@@ -1,10 +1,8 @@
 // M2 E-1 admission control RED/GREEN (design §10.3): the five-level gate
 // chain in its v1 fixed-pool form —
 //   ① listener/header gate;
-//   ② Host-global inflight/queue gate — merged with ③ in the v1 single-App
-//     pool: admission is enforced per shard, and the pool's Host budget is
-//     the shard budget times the shard count (recorded in
-//     static_pool_server.cc);
+//   ② Host-global inflight/queue gate — enforced through LocalDevHost's
+//     GenerationPool and ManagedListener admission limits;
 //   ③ App inflight/queue gate — the bounded per-shard queue
 //     (queueRequests / queueHeaderBytes / queueTimeout);
 //   ④ shard pool capacity — no READY worker maps to 503;
@@ -348,7 +346,7 @@ RawHttpResponse http_get(std::uint16_t port, const std::string& target) {
 // it. The kill is the worker-fault injection for the ④ → 503 path.
 // (Linux-only: the worker-death case is not registered on Windows, where
 // the child-pid scan would need Toolhelp and SIGKILL has no portable
-// form; see docs/windows.md.)
+// form; see docs/guides/build-on-windows.md.)
 pid_t find_worker_child_pid(const char* worker_path) {
 #if defined(_WIN32)
     (void)worker_path;

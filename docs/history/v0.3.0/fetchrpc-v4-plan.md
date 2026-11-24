@@ -1,0 +1,226 @@
+# v0.3.0 Plan — FetchRPC v4 and the WebSocket Foundation
+
+<!-- capsid-historical-context-20261117 -->
+> **Historical plan/review — not current execution instructions.** The original
+> body, counts, failures and pending language below retain their captured source/date.
+> Stable is v0.2.2 and experimental 0.3.0-beta is now published. Use
+> [current status](../../reference/release-status.md) for delivered scope, exact qualification and
+> measured-source data; do not restart old campaigns from this record.
+<!-- /capsid-historical-context-20261117 -->
+
+Working plan for the v0.3.0 milestone defined by
+[ROADMAP.md](../../../ROADMAP.md#v030-fetchrpc-v4-and-websocket-foundation).
+The contract document itself (`docs/fetchrpc-v4.md`) is the first
+deliverable of this plan; this file tracks research, workstreams,
+sequencing, and acceptance mapping. It is a living planning document:
+update it as decisions land.
+
+The implementation and audit-remediation design is in
+[v0.3.0-implementation-design.md](implementation-design.md).
+The task-by-task handoff to GLM is
+[2026-10-12-v0.3.0-remediation-and-delivery.md](delivery-plan.md).
+Proposed A2 layouts and APIs in that design must be validated and recorded
+as a versioned amendment before channel implementation; they are not yet
+shipped behavior.
+
+## 1. Research baseline (current state, verified against the tree)
+
+### What exists today
+
+- **FetchRPC foundations** (`src/protocol.h`): 24-byte headers, v3
+  types 1–18 (including Audit, MemoryMetrics and LoadBinding), v4
+  channel types 19–26, version-pinned parsing, a full startup HELLO
+  plus capability tail, and a READY capability reply. The worker
+  accepts v3/v4 at bootstrap and currently announces no channel
+  features. The registered v4 frame types do not constitute a
+  working channel state machine. v3 retains its 64 KiB payload limit
+  and existing request/response credit behavior.
+- **Credit machinery in the worker** (`src/worker_runtime.cc`):
+  per-stream credit accounting with a `kWouldBlock` pending-promise
+  model — the right primitive to generalize to channels.
+- **Host HTTP**: the host has an RFC 6455 frame codec and partial
+  pre-admission handshake gates in `single_worker_server.cc`.
+  `managed_listener.cc` has not adopted those gates. The 101 bridge,
+  socket/channel pumps and outbound dialer remain to be implemented.
+- **txiki WebSocket client** (`vendor/txiki.js/src/ws.c`, lws-based)
+  is compiled into the txiki VM but **not exposed** by the Capsid
+  profile (`js/profile-manifest.js` lists no `WebSocket`), and it
+  would bypass the host egress policy if it were.
+- **Egress policy** (`src/egress_policy.h`): host-mediated, deny by
+  default — outbound WebSockets must ride the same mediation.
+- **C ABI v7** (`include/capsid/runtime.h`): request/response/stream
+  pump only; no upgrade or duplex surface. The added protocol fields
+  currently enlarge a released structure. Restore the original v7
+  layout and frozen consumer snapshot, and select v4 through a
+  separate size-checked options descriptor and spawn entry point.
+
+### workerd reference (release-source commit `8f311ae…`, compat date 2026-08-20)
+
+The lock now binds release v1.20261010.1 to source commit `8f311ae3e3cf3064983f56a6a1c8b7ee33d6b99f`, the decompressed binary hash, Node v24.14.0 and undici 7.21.0. Remaining reference cases are tracked in the takeover review. A complete reference lock must include binary/build provenance,
+compatibility flags and independently executed assertions. The semantics dossier must
+be corrected by task T04 before it governs JS implementation:
+
+- `new WebSocketPair()` creates an indexed, iterable pair. The normal
+  inbound idiom obtains `[client, server]` using `Object.values()`,
+  accepts the server and transfers the client into the response.
+- A worker accepts an inbound WebSocket by returning a 101 response
+  carrying `webSocket: client` after `server.accept()`. Repeated accept
+  on an ordinary already-accepted socket returns without throwing;
+  using an endpoint already transferred to a response is different.
+- The declared event map contains `open`, `message`, `close`, and
+  `error`. Invalid UTF-8 behavior, event ordering and send conversions
+  require actual reference assertions; do not assume a messageerror
+  event from the existing fixture commentary.
+- Close validation depends on compatibility flags. The Close frame
+  body limit is 125 bytes including its two-byte status code, leaving
+  at most 123 reason bytes. Empty Close and abnormal termination must
+  remain distinguishable from normal wire status codes.
+- Outbound `new WebSocket(url)` connects through the runtime with
+  egress control — the model Capsid must mirror through FetchRPC
+  channels plus the host egress policy.
+
+## 2. Design inputs to validate before channel implementation
+
+| # | Decision | Alternatives | Implementation input |
+| - | --- | --- | --- |
+| D1 | Where WebSocket framing lives | (a) host implements an RFC 6455 codec for both inbound and outbound; (b) reuse lws on the host; (c) expose txiki's ws.c in the worker | (a): the host already terminates HTTP; a minimal, property-tested frame codec keeps the sandbox and policy story uniform. (c) is rejected because it bypasses egress mediation. |
+| D2 | Channel identity | host-assigned u32 vs per-request scoping | host-assigned u32 per IPC connection, independent of request_id; every channel payload carries it. Outbound dial_id is a separate u64 correlation ID. |
+| D3 | Half-close on the wire | dedicated HALF_CLOSE op vs close-code sentinel | dedicated op for duplex transport; ordinary WebSocket allowHalfOpen semantics are determined separately by the reference fixtures. |
+| D4 | Ping/pong ownership | worker-visible vs transport-internal | transport-internal on both planes (host answers pings for inbound; worker API never surfaces them), matching workerd. |
+| D5 | C ABI shape | independent additive v7 entry points vs ABI v8 | restore released v7 structs, add size-checked protocol options and spawn_ex, then channel event decoders and operations. ABI v8 requires a documented concrete blocker and v7 compatibility path. |
+| D6 | Profile placement of the JS API | add `WebSocketPair`/`WebSocket` to `CAPSID-MIN` now vs hold for the v0.5 workerd profile | add to `CAPSID-MIN` with the workerd method surface (the roadmap's v0.3 slice is the API), recorded as a profile addition; v0.5 adds `env`/`ctx`, not a different WebSocket. |
+
+## 3. Workstreams
+
+### WS-A · workerd fixtures and semantics dossier (first)
+
+- A1 Write the semantics dossier: close-code matrix, accept rules,
+  event ordering, error surfaces, limits — every claim cited to the
+  pinned workerd commit.
+- A2 Fixture pack `tests/fixtures/workerd-ws/`: echo, fan-out to two
+  clients, fragmented upload, slow consumer, server-close-with-reason,
+  protocol violation, ping flood, timeout, disconnect mid-stream.
+  Each fixture carries **absolute** assertions (roadmap: identical
+  failures in both runtimes must not read as compatibility).
+
+### WS-B · FetchRPC v4 contract (spec + frozen tests, before any impl)
+
+Deliverable: `docs/fetchrpc-v4.md`. Sections required by the roadmap:
+
+- B1 Hello v4: version 4, capability bitset, deterministic rejection
+  matrix for every version/capability mismatch (v3 host ↔ v4 worker,
+  unknown capability bits, legacy Hello shape). Record A2 capability
+  dependencies and its limits extension as an explicit amendment.
+- B2 Channel frames: OPEN/ACCEPT/REJECT, DATA (chunk flags), CREDIT
+  (independent per direction), HALF_CLOSE, CLOSE (code+reason),
+  ERROR, CANCEL — full frame table with field layouts.
+- B3 Sequencing rules: fragmentation, message boundaries, maximum
+  frame/message/channel-buffer sizes, and the handling table for
+  duplicate, unknown, late, and out-of-order frames.
+- B4 Ownership: a channel is owned by a request, a response stream, a
+  duplex connection, a future tail task, or stands alone. Define the
+  transfer from handshake request to connection owner at 101; cleanup
+  rules for client disconnect, request timeout, worker shutdown, and worker
+  replacement (who emits CLOSE, when the host reclaims).
+- B5 Test vectors: golden encodings and complete golden sequences,
+  plus the seed corpus for the protocol fuzzer. Frozen at review.
+
+### WS-C · Protocol and host implementation
+
+- C1 `src/protocol.{h,cc}`: v4 frames, negotiation, validation.
+- C2 Worker runtime: channel registry, duplex pump into QuickJS,
+  backpressure via the existing credit/`kWouldBlock` machinery.
+- C3 Host: 101/Upgrade path in `single_worker_server.cc` and
+  `managed_listener.cc`; RFC 6455 codec (D1); client-disconnect
+  propagation; outbound dialing under `egress_policy`.
+- C4 C ABI surface per D5 with embedder examples updated.
+
+### WS-D · Worker JS API
+
+- D1 `WebSocketPair`, server `accept()`/events/`send()`/`close()`,
+  outbound `new WebSocket(url)` through a host-dialed channel; method
+  surface identical to workerd's (A1 dossier is the reference).
+- D2 `js/profile-manifest.js` addition, conformance doc update,
+  capability declaration (`capsid:ws`? none needed — inbound upgrade
+  is part of HTTP serving).
+
+### WS-E · Tests and gates
+
+- E1 Protocol conformance suite from B5 (runs against the frozen
+  vectors; fails on any deviation).
+- E2 Process interop: real external clients (Node `ws`, Python
+  `websockets`) against the capsid host, both directions, under the
+  strict sandbox.
+- E3 Differential run of A2 fixtures on pinned workerd vs capsid with
+  absolute assertions.
+- E4 Structure-aware protocol fuzzer over v4 frame streams and the
+  upgrade handshake; corpus from B5 seeds.
+- E5 Sanitizer/soak runs with live channels; leak check on every
+  cleanup path in B4. Optionally add a WebSocket smoke workload to
+  the bench lanes (out of the acceptance critical path).
+
+## 4. Sequencing
+
+First repair the original ABI consumer, failed-spawn reclamation and
+codec buffering (execution tasks T01–T03). Then correct and execute
+the workerd reference (T04), amend the contract and freeze executable
+vectors (T05), and implement the channel core and public ABI (T06–T07).
+The remaining host, JS, outbound and lifecycle work proceeds through
+T08–T12, followed by real differential clients and dynamic gates
+(T13–T14). Performance lane and provenance repairs are T15–T16;
+release acceptance is T17.
+
+The existing boundary parser, codec and carriage tests are useful
+regressions, but textual sequence steps and an exit-77 fixture pack
+do not establish a channel or WebSocket acceptance result. Each task
+has concrete files, Red cases and completion criteria in the GLM plan.
+
+```text
+ABI / spawn / codec repairs
+            │
+            v
+reference assertions -> amended contract + executable golden sequences
+            │
+            v
+channel registry + C ABI -> host + JS inbound -> outbound + cleanup
+            │
+            v
+real clients + differential + sanitizer / fuzz / soak -> release gates
+```
+
+The roadmap's hard rule holds: the vertical slice is implemented only
+after the amended protocol tests are frozen. A draft implementation
+input does not silently replace the normative wire contract.
+
+## 5. Acceptance mapping (roadmap → this plan)
+
+| Roadmap acceptance | Covered by |
+| --- | --- |
+| real client/server interoperability | E2 |
+| fragmented messages | A2 fixture + B3 vectors + E1 |
+| slow consumers | A2 + C2 credit paths + E2 |
+| simultaneous close | B4 ownership table + executable E1 sequences + E2 |
+| half-close | B2 HALF_CLOSE + E1; reference allowHalfOpen tested independently |
+| invalid frames | B3 handling table + E4 fuzzer |
+| timeouts, disconnects | B4 cleanup matrix + E2/E5 |
+| worker replacement | B4 + E5 managed-mode deploy during live channels |
+| sanitizers + protocol fuzzing | E4/E5 |
+
+## 2026-10-13 Continued status
+
+The protocol has added the following options: v4.2 confirmation: capability bit 4, ACK type 27, 16 bytes for pending dial CANCEL,
+and result/terminal barrier. The original v3 and ABI v7 layouts, along with 8 bytes for assigned CANCEL, remain
+unchanged. For details on the complete byte order and dual-end sequencing rules, please refer to…
+[wire contract](../../reference/fetchrpc-v4.md#351-confirmation-amendment-v42-2026-10-13).
+
+ChannelIO holds copies of messages and a budget lease, supporting fragment pumps across initial credits, independent
+aggregate/per-channel budget and metadata charge for zero-byte messages. Worker has been connected.
+Launch/READY/Frame Collection/Duration/Shutdown verification, C ABI provides confirmation events and methods. Worker
+The current configuration declares the following tags as the inbound paths: 27 – for independent events; owner/roots, Pair/Response – for three types of listeners.
+The real 101 and incremental two-way transfer are connected. Bounded control pumps, cross-thread event replication, C++ wrapper
+The service-level slots/network budget has also been integrated. User-origin outbound constructor and host ws/wss dialer
+Connected now. Using immutable spawn snapshots, actual DNS/IP authorization, and TLS verification.
+result ACK. Three modes, real WS/WSS, cancellation/arbitrary order/pressure has been verified in existing development; complete for T11
+DNS/TCP cancellation, production strict, lifecycle/platform/client, and release gate are still incomplete.
+Current delivery and remaining items
+With [Handoff Record](takeover-review.md) Subject to the execution task list.

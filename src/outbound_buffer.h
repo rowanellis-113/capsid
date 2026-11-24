@@ -1,5 +1,5 @@
-// Frame-granular outbound buffer with an injectable writer (design
-// §3.4 of docs/queue-saturation-activity-fix.md).
+// Frame-granular outbound buffer with an injectable writer for bounded
+// queue-saturation backpressure.
 //
 // The worker owns one instance; unit tests instantiate one directly
 // with a short-write / EAGAIN writer to assert logical and physical

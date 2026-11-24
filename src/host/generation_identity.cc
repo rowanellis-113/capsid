@@ -1,12 +1,12 @@
 // Canonical generation identity.
 //
-// Binary record: "capsid-generation-v1\0" (the NUL is part of the hash
-// input), followed by every input field in declaration order as a 32-bit
-// big-endian byte length plus UTF-8 bytes. selected_artifact contributes
-// the stable ASCII value "source" or "trusted-bytecode". The result is
-// "sha256:" plus the lowercase hex SHA-256 of exactly those bytes. This
-// framing is locale-independent and unambiguous; see the Host design review
-// §6.3.
+// Binary record: "capsid-generation-v2\0" (the NUL is part of the hash
+// input), followed by every input field in declaration order (including
+// protocol_limits_digest) as a 32-bit big-endian byte length plus UTF-8 bytes.
+// selected_artifact contributes the stable ASCII value "source" or
+// "trusted-bytecode". The result is "sha256:" plus the lowercase hex SHA-256
+// of exactly those bytes. This framing is locale-independent and unambiguous;
+// see the Host design review §6.3.
 
 #include "host/config.h"
 #include "host/generation_identity.h"

@@ -1,6 +1,7 @@
 #ifndef CAPSID_HOST_MEMORY_SAMPLER_H
 #define CAPSID_HOST_MEMORY_SAMPLER_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -32,12 +33,21 @@ class MemorySampler {
     void erase_pid(std::int64_t pid);
     void prune_pids(const std::unordered_set<std::int64_t>& live_pids);
     std::size_t cached_pid_count() const;
+    void set_max_age_ms(std::uint64_t max_age_ms) noexcept {
+        max_age_ms_.store(max_age_ms, std::memory_order_release);
+    }
 
   private:
+    struct CachedSample {
+        std::uint64_t bytes = 0;
+        std::uint64_t sampled_at_ms = 0;
+    };
+
     CgroupReader cgroup_reader_;
     FootprintReader footprint_reader_;
+    std::atomic<std::uint64_t> max_age_ms_{5000};
     mutable std::mutex mutex_;
-    std::unordered_map<std::int64_t, std::uint64_t> cached_pid_bytes_;
+    std::unordered_map<std::int64_t, CachedSample> cached_pid_bytes_;
 };
 
 } // namespace capsid::host

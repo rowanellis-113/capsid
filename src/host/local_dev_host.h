@@ -1,4 +1,4 @@
-// Cross-platform local development Host shell (docs/config-v2-design.md §5).
+// Cross-platform local development Host shell (docs/design/config-v2.md §5).
 // Mounts an isomorphic application directory (capsid.json + bundle) onto
 // GenerationPool + ManagedListener + RoutingTable on Linux, macOS, and Windows.
 

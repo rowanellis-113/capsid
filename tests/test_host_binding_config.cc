@@ -1,4 +1,4 @@
-// Binding v1 configuration schema (docs/binding-technical-design.md §2).
+// Binding v1 configuration schema (docs/design/bindings-v1.md §2).
 //
 // The v2 apiVersion values enable Binding: capsid/host-v2 adds the optional
 // bindingsRoot, capsid/app-v2 adds the bindings map keyed by the Binding ID.

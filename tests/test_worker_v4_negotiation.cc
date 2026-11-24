@@ -1,6 +1,6 @@
 // FetchRPC v4 end-to-end negotiation through the public C ABI.
 //
-// Contract: docs/fetchrpc-v4.md (amended §1.2). The spawn config's
+// Contract: docs/reference/fetchrpc-v4.md (amended §1.2). The spawn config's
 // additive tail selects the wire version; the host library emits the
 // v4 HELLO (full v3 startup payload + capability tail), the worker
 // locks the connection to v4, and its READY appends the worker's

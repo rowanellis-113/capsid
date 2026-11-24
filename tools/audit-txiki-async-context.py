@@ -10,8 +10,7 @@ libuv callback must be consciously classified:
   * structs that store a ``JSValue callback`` / ``JSValue func`` field and
     use it across a libuv tick.
 
-Each item must belong to one of the classes below; an unclassified site is
-a CI failure (spec §7.3: "出现新调用点而未分类时 CI 失败"). The tables in
+Section 7.3 requires CI to fail when a new call site has no classification. The tables in
 this file are the archived inventory for the txiki upgrade report.
 
 Classes
@@ -25,7 +24,7 @@ Classes
 ``profile-unreachable``
     Reachable only through the native ``tjs`` global or native module
     imports. ``tjs`` is absent from ``profileGlobalNames`` in
-    ``src/js/profile-manifest.js``, so the capsid bootstrap deletes it from
+    ``js/profile-manifest.js``, so the capsid bootstrap deletes it from
     the app realm (``delete globalThis[name]`` for every non-profile
     global). A module that the application cannot name cannot invoke its
     callbacks — but the gate keeps that reasoning explicit and auditable

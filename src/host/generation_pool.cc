@@ -299,8 +299,7 @@ void GenerationPool::request_drain(std::optional<std::chrono::milliseconds> dead
             if (slot.executor == nullptr) {
                 continue;
             }
-            const bool idle =
-                slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+            const bool idle = slot.executor->is_idle();
             if (idle || (effective_deadline.count() == 0 && !options_.before_forced_shutdown)) {
                 if (!slot.shutdown_issued && !idle) {
                     const std::uint64_t active = slot.executor->inflight();
@@ -384,23 +383,24 @@ std::int64_t GenerationPool::worker_process_id() const {
     return 0;
 }
 
-WorkerExecutor* GenerationPool::pick_worker() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (state_ != State::kActive) {
-        return nullptr; // draining/dead: the caller answers 503
+std::shared_ptr<WorkerExecutor>
+GenerationPool::select_best_worker_locked(std::size_t* best_index_out, bool enforce_max_inflight,
+                                          bool* saw_ready_worker_out) const {
+    if (saw_ready_worker_out != nullptr) {
+        *saw_ready_worker_out = false;
     }
     const std::size_t count = slots_.size();
-    if (count == 0) {
+    if (state_ != State::kActive || count == 0) {
         return nullptr;
     }
     const std::size_t start = options_.round_robin_tie_break ? (next_pick_index_ % count) : 0;
-    WorkerExecutor* best = nullptr;
+    std::shared_ptr<WorkerExecutor> best;
     std::size_t best_index = start;
     std::uint64_t best_load = std::numeric_limits<std::uint64_t>::max();
     for (std::size_t step = 0; step < count; ++step) {
         const std::size_t index = (start + step) % count;
         const Slot& slot = slots_[index];
-        if (!slot.ready || slot.executor == nullptr) {
+        if (!slot.ready || slot.shutdown_issued || slot.executor == nullptr) {
             continue;
         }
         WorkerExecutor* candidate = slot.executor.get();
@@ -410,22 +410,61 @@ WorkerExecutor* GenerationPool::pick_worker() {
         if (!candidate->available()) {
             continue;
         }
-        // §8.2 load: inflight + connection_owners + pending client bytes
-        // (session-layer hook, keyed by the executor identity; 0 when unset).
+        if (saw_ready_worker_out != nullptr) {
+            *saw_ready_worker_out = true;
+        }
+        if (enforce_max_inflight && options_.max_inflight_per_worker != 0 &&
+            candidate->active_http_requests() >= options_.max_inflight_per_worker) {
+            continue;
+        }
+        // §8.2 load: inflight + connection_owners + pending_dispatches +
+        // pending client bytes (session-layer hook; 0 when unset).
         std::uint64_t load = candidate->load_score();
         if (options_.client_bytes_loader) {
             load += options_.client_bytes_loader(candidate);
         }
         if (load < best_load) {
             best_load = load;
-            best = candidate;
+            best = slot.executor;
             best_index = index;
         }
     }
-    if (best != nullptr && options_.round_robin_tie_break) {
-        next_pick_index_ = (best_index + 1) % count;
+    if (best_index_out != nullptr) {
+        *best_index_out = best_index;
     }
     return best;
+}
+
+GenerationPool::DispatchLease GenerationPool::acquire_worker(bool* at_max_inflight) {
+    if (at_max_inflight != nullptr) {
+        *at_max_inflight = false;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    std::size_t best_index = 0;
+    bool saw_ready = false;
+    std::shared_ptr<WorkerExecutor> best =
+        select_best_worker_locked(&best_index, /*enforce_max_inflight=*/true, &saw_ready);
+    if (!best) {
+        if (at_max_inflight != nullptr && saw_ready && options_.max_inflight_per_worker != 0) {
+            *at_max_inflight = true;
+        }
+        return DispatchLease{};
+    }
+    if (options_.round_robin_tie_break) {
+        next_pick_index_ = (best_index + 1) % slots_.size();
+    }
+    return DispatchLease(std::move(best));
+}
+
+WorkerExecutor* GenerationPool::pick_worker() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    std::size_t best_index = 0;
+    std::shared_ptr<WorkerExecutor> best =
+        select_best_worker_locked(&best_index, /*enforce_max_inflight=*/false);
+    if (best != nullptr && options_.round_robin_tie_break) {
+        next_pick_index_ = (best_index + 1) % slots_.size();
+    }
+    return best.get();
 }
 
 WorkerExecutor* GenerationPool::current_worker() { return current_worker_snapshot().get(); }
@@ -492,9 +531,8 @@ bool GenerationPool::recycle_worker(WorkerExecutor* target) {
     if (!quarantine_waiting_) {
         s.executor->request_shutdown();
         if (!s.replacement_in_flight && !s.needs_replacement && ready_after >= min_ready_) {
-            retired_.push_back(RetiredExecutor{std::move(s.executor), false});
-            if (s.elastic_held) {
-                s.elastic_held = false;
+            retired_.push_back(std::move(s.executor));
+            if (settle_evicted_slot_elastic_locked(s)) {
                 release_elastic = true;
                 release_cb = options_.release_elastic_slot;
             }
@@ -508,9 +546,11 @@ bool GenerationPool::recycle_worker(WorkerExecutor* target) {
 }
 
 GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* rejection_reason) {
-    std::size_t target_slot = slots_.size();
+    constexpr std::size_t kNoSlot = std::numeric_limits<std::size_t>::max();
+    std::size_t target_slot = kNoSlot;
     bool needs_elastic = false;
     bool spawning_already = false;
+    bool run_admission = false;
     std::function<bool()> acquire_cb;
     std::function<bool(const GenerationPool*, std::string*)> acquire_slot_cb;
     std::function<void()> release_cb;
@@ -533,7 +573,7 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* re
             if ((s.executor != nullptr || s.replacement_in_flight) && !s.elastic_held) {
                 ++non_elastic_active;
             }
-            if (target_slot == slots_.size() && !s.ready && !s.replacement_in_flight &&
+            if (target_slot == kNoSlot && !s.ready && !s.replacement_in_flight &&
                 s.executor == nullptr) {
                 target_slot = index;
             }
@@ -545,7 +585,7 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* re
         if (ready_count == 0 && spawning_already) {
             return ScaleOutResult::kSpawnInFlight;
         }
-        if (target_slot == slots_.size()) {
+        if (target_slot == kNoSlot) {
             if (spawning_already) {
                 return ScaleOutResult::kSpawnInFlight;
             }
@@ -565,53 +605,85 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* re
         acquire_cb = options_.acquire_elastic_slot;
         acquire_slot_cb = options_.acquire_worker_slot;
         release_cb = options_.release_elastic_slot;
+        run_admission = needs_elastic && (acquire_slot_cb || acquire_cb);
+        if (!run_admission) {
+            slots_[target_slot].elastic_held = false;
+            replacement_due_ms_[target_slot] = steady_ms();
+            cv_.notify_all();
+            return ScaleOutResult::kSpawnInFlight;
+        }
+        ++scale_admissions_in_flight_;
     }
 
-    if (needs_elastic && (acquire_slot_cb || acquire_cb)) {
-        std::string reason = "host_capacity_exhausted";
-        const bool acquired = acquire_slot_cb ? acquire_slot_cb(this, &reason) : acquire_cb();
-        if (!acquired) {
-            if (reason.empty()) {
-                reason = "host_capacity_exhausted";
+    std::string reason = "host_capacity_exhausted";
+    const bool acquired = acquire_slot_cb ? acquire_slot_cb(this, &reason) : acquire_cb();
+    if (!acquired) {
+        if (reason.empty()) {
+            reason = "host_capacity_exhausted";
+        }
+        bool active_spawn = false;
+        bool not_active = false;
+        std::function<void(const std::string&)> failed_cb;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (scale_admissions_in_flight_ > 0) {
+                --scale_admissions_in_flight_;
             }
-            bool active_spawn = false;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
+            if (target_slot < slots_.size()) {
                 Slot& s = slots_[target_slot];
                 s.replacement_in_flight = false;
                 s.scale_out_spawn = false;
-                if (replacements_scheduled_ > 0) {
-                    --replacements_scheduled_;
-                }
-                active_spawn = spawning_already || replacements_scheduled_ > 0;
             }
-            if (active_spawn) {
-                return ScaleOutResult::kSpawnInFlight;
-            }
-            if (rejection_reason != nullptr) {
-                *rejection_reason = reason;
-            }
-            if (options_.metrics != nullptr) {
-                options_.metrics->count_pool_rejection(options_.application_id,
-                                                       std::string(tenant_id()), reason);
-            }
-            return ScaleOutResult::kCapacityRejected;
-        }
-    }
-
-    bool roll_back_elastic = false;
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        Slot& s = slots_[target_slot];
-        if (state_ != State::kActive) {
-            s.replacement_in_flight = false;
-            s.scale_out_spawn = false;
             if (replacements_scheduled_ > 0) {
                 --replacements_scheduled_;
             }
-            roll_back_elastic = needs_elastic && (acquire_slot_cb || acquire_cb);
+            schedule_deferred_floor_locked();
+            not_active = state_ != State::kActive;
+            active_spawn = !not_active && replacements_scheduled_ > 0;
+            if (not_active || !active_spawn) {
+                failed_cb = on_scale_out_failed_;
+            }
+            cv_.notify_all();
+        }
+        if (failed_cb) {
+            failed_cb(not_active ? "pool_draining" : reason);
+        }
+        if (not_active) {
+            return ScaleOutResult::kNotActive;
+        }
+        if (active_spawn) {
+            return ScaleOutResult::kSpawnInFlight;
+        }
+        if (rejection_reason != nullptr) {
+            *rejection_reason = reason;
+        }
+        if (options_.metrics != nullptr) {
+            options_.metrics->count_pool_rejection(options_.application_id,
+                                                   std::string(tenant_id()), reason);
+        }
+        return ScaleOutResult::kCapacityRejected;
+    }
+
+    bool roll_back_elastic = false;
+    std::function<void(const std::string&)> failed_cb;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (scale_admissions_in_flight_ > 0) {
+            --scale_admissions_in_flight_;
+        }
+        if (state_ != State::kActive || target_slot >= slots_.size()) {
+            if (target_slot < slots_.size()) {
+                slots_[target_slot].replacement_in_flight = false;
+                slots_[target_slot].scale_out_spawn = false;
+            }
+            if (replacements_scheduled_ > 0) {
+                --replacements_scheduled_;
+            }
+            roll_back_elastic = true;
+            failed_cb = on_scale_out_failed_;
+            cv_.notify_all();
         } else {
-            s.elastic_held = needs_elastic && static_cast<bool>(release_cb);
+            slots_[target_slot].elastic_held = static_cast<bool>(release_cb);
             replacement_due_ms_[target_slot] = steady_ms();
             cv_.notify_all();
             return ScaleOutResult::kSpawnInFlight;
@@ -619,6 +691,9 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* re
     }
     if (roll_back_elastic && release_cb) {
         release_cb();
+    }
+    if (failed_cb) {
+        failed_cb("pool_draining");
     }
     return ScaleOutResult::kNotActive;
 }
@@ -650,13 +725,13 @@ std::size_t GenerationPool::active_or_spawning_workers() const {
 std::vector<GenerationPool::WorkerSlotSnapshot> GenerationPool::snapshot_workers() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<WorkerSlotSnapshot> out;
-    if (state_ != State::kActive) {
+    if (state_ == State::kPrepared || state_ == State::kDead) {
         return out;
     }
-    out.reserve(slots_.size());
+    out.reserve(slots_.size() + retired_.size());
     for (std::size_t index = 0; index < slots_.size(); ++index) {
         const Slot& slot = slots_[index];
-        if (!slot.ready || slot.shutdown_issued || slot.executor == nullptr) {
+        if (slot.executor == nullptr || slot.executor->exited()) {
             continue;
         }
         WorkerSlotSnapshot snap;
@@ -665,8 +740,25 @@ std::vector<GenerationPool::WorkerSlotSnapshot> GenerationPool::snapshot_workers
         snap.cgroup_path = slot.executor->cgroup_path();
         snap.started_at_ms = slot.executor->started_at_ms();
         snap.last_active_at_ms = slot.executor->last_active_at_ms();
-        snap.idle = slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+        snap.evictable = (state_ == State::kActive) && slot.ready && !slot.shutdown_issued &&
+                         !slot.replacement_in_flight;
+        snap.idle = snap.evictable && slot.executor->is_idle();
         snap.elastic_held = slot.elastic_held;
+        out.push_back(std::move(snap));
+    }
+    for (const auto& retired : retired_) {
+        if (retired == nullptr || retired->exited()) {
+            continue;
+        }
+        WorkerSlotSnapshot snap;
+        snap.slot_index = slots_.size();
+        snap.pid = retired->process_id();
+        snap.cgroup_path = retired->cgroup_path();
+        snap.started_at_ms = retired->started_at_ms();
+        snap.last_active_at_ms = retired->last_active_at_ms();
+        snap.evictable = false;
+        snap.idle = false;
+        snap.elastic_held = false;
         out.push_back(std::move(snap));
     }
     return out;
@@ -681,7 +773,10 @@ void GenerationPool::set_scale_callbacks(
 }
 
 bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std::string& reason,
-                                       bool require_elastic_held) {
+                                       bool require_elastic_held, std::int64_t* evicted_pid_out) {
+    if (evicted_pid_out != nullptr) {
+        *evicted_pid_out = 0;
+    }
     bool release_elastic = false;
     std::function<void()> release_cb;
     std::function<void(const std::string&)> eviction_cb;
@@ -696,13 +791,13 @@ bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std
         for (std::size_t rev = slots_.size(); rev > 0; --rev) {
             const std::size_t index = rev - 1;
             const Slot& s = slots_[index];
-            if (!s.ready || s.executor == nullptr || s.replacement_in_flight) {
+            if (!s.ready || s.shutdown_issued || s.executor == nullptr || s.replacement_in_flight) {
                 continue;
             }
             if (require_elastic_held && !s.elastic_held) {
                 continue;
             }
-            if (s.executor->inflight() != 0 || s.executor->connection_owners() != 0) {
+            if (!s.executor->is_idle()) {
                 continue;
             }
             if (min_residency_ms != 0) {
@@ -721,14 +816,14 @@ bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std
             return false;
         }
         Slot& victim = slots_[best_slot];
+        if (evicted_pid_out != nullptr) {
+            *evicted_pid_out = victim.executor->process_id();
+        }
         victim.ready = false;
         victim.shutdown_issued = true;
         victim.executor->request_shutdown();
-        retired_.push_back(RetiredExecutor{std::move(victim.executor), false});
-        if (victim.elastic_held) {
-            victim.elastic_held = false;
-            release_elastic = true;
-        }
+        retired_.push_back(std::move(victim.executor));
+        release_elastic = settle_evicted_slot_elastic_locked(victim);
         if (ready_workers_locked() < min_ready_) {
             stable_since_ms_ = 0;
         }
@@ -747,6 +842,25 @@ bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std
         eviction_cb(reason);
     }
     return true;
+}
+
+void GenerationPool::schedule_deferred_floor_locked() {
+    if (state_ != State::kActive || quarantine_waiting_)
+        return;
+    const auto ready = ready_workers_locked();
+    for (std::size_t index = 0; index < slots_.size(); ++index) {
+        if (ready + replacements_scheduled_ >= min_ready_ ||
+            replacements_scheduled_ >= policy_.replacements_concurrent_per_app)
+            break;
+        Slot& slot = slots_[index];
+        if (slot.needs_replacement && !slot.ready && !slot.replacement_in_flight) {
+            slot.needs_replacement = false;
+            slot.replacement_in_flight = true;
+            slot.scale_out_spawn = false;
+            ++replacements_scheduled_;
+            replacement_due_ms_[index] = steady_ms();
+        }
+    }
 }
 
 void GenerationPool::record_instability(std::size_t slot, WorkerInstabilityObservation observation,
@@ -783,6 +897,8 @@ void GenerationPool::record_instability(std::size_t slot, WorkerInstabilityObser
     if (decision.schedule_replacement) {
         Slot& s = slots_[slot];
         s.replacement_in_flight = true;
+        s.scale_out_spawn = false;
+        s.elastic_held = false;
         s.needs_replacement = false;
         ++replacements_scheduled_;
         s.replacement_reason = reason;
@@ -838,6 +954,12 @@ void GenerationPool::set_event_sink(std::function<void(const WorkerExecutor*, Wo
     options_.event_sink = std::move(sink);
 }
 
+void GenerationPool::set_shared_event_sink(
+    std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> sink) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    options_.shared_event_sink = std::move(sink);
+}
+
 std::uint64_t GenerationPool::inflight() const {
     std::unique_lock<std::mutex> lock(mutex_);
     std::uint64_t total = 0;
@@ -846,8 +968,8 @@ std::uint64_t GenerationPool::inflight() const {
             total += slot.executor->inflight();
         }
     }
-    for (const RetiredExecutor& retired : retired_) {
-        total += retired.executor->inflight();
+    for (const auto& retired : retired_) {
+        total += retired->inflight();
     }
     return total;
 }
@@ -910,8 +1032,7 @@ void GenerationPool::pump_loop() {
                 if (slot.executor == nullptr) {
                     continue;
                 }
-                const bool idle =
-                    slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+                const bool idle = slot.executor->is_idle();
                 if (!slot.executor->exited() && (idle || expired)) {
                     if (count_forced_drain_ && expired && !idle && !slot.shutdown_issued) {
                         const std::uint64_t active = slot.executor->inflight();
@@ -935,14 +1056,15 @@ void GenerationPool::pump_loop() {
                 if (slot.executor == nullptr) {
                     continue;
                 }
-                const bool idle =
-                    slot.executor->inflight() == 0 && slot.executor->connection_owners() == 0;
+                const bool idle = slot.executor->is_idle();
                 if (!slot.executor->exited() && (idle || expired_after)) {
                     slot.shutdown_issued = true;
                     slot.executor->request_shutdown();
                 }
             }
-            if (fleet_exited() && replacements_in_flight_ == 0) {
+            drain_check_cycles_.fetch_add(1, std::memory_order_release);
+            if (fleet_exited() && replacements_in_flight_ == 0 &&
+                scale_admissions_in_flight_ == 0) {
                 // finalize_drain takes the mutex itself; release first.
                 lock.unlock();
                 finalize_drain();
@@ -980,7 +1102,7 @@ void GenerationPool::pump_loop() {
                 if (!s.ready || s.executor == nullptr || s.replacement_in_flight) {
                     continue;
                 }
-                if (s.executor->inflight() != 0 || s.executor->connection_owners() != 0) {
+                if (!s.executor->is_idle()) {
                     continue;
                 }
                 const std::uint64_t active_at = s.executor->last_active_at_ms();
@@ -992,9 +1114,8 @@ void GenerationPool::pump_loop() {
                     s.ready = false;
                     s.shutdown_issued = true;
                     s.executor->request_shutdown();
-                    retired_.push_back(RetiredExecutor{std::move(s.executor), false});
-                    if (s.elastic_held) {
-                        s.elastic_held = false;
+                    retired_.push_back(std::move(s.executor));
+                    if (settle_evicted_slot_elastic_locked(s)) {
                         ++idle_elastic_releases;
                     }
                     ++idle_evictions;
@@ -1068,13 +1189,20 @@ void GenerationPool::pump_loop() {
                 }
             }
             std::vector<std::shared_ptr<WorkerExecutor>> join_retired;
-            for (RetiredExecutor& retired : retired_) {
-                if (retired.executor == nullptr) {
+            for (auto it = retired_.begin(); it != retired_.end();) {
+                if (!*it) {
+                    it = retired_.erase(it);
                     continue;
                 }
-                if (!retired.joined && retired.executor->exited()) {
-                    retired.joined = true;
-                    join_retired.push_back(retired.executor);
+                if ((*it)->exited()) {
+                    forward_executor_events_locked(*it);
+                    join_retired.push_back(std::move(*it));
+                    if (options_.on_worker_started) {
+                        observed_retired_.push_back(join_retired.back());
+                    }
+                    it = retired_.erase(it);
+                } else {
+                    ++it;
                 }
             }
             if (!finished_replacements.empty() || !join_retired.empty()) {
@@ -1087,6 +1215,9 @@ void GenerationPool::pump_loop() {
                 for (const auto& executor : join_retired) {
                     executor->stop_and_join();
                 }
+                // Release our shared_ptrs outside mutex_ so WorkerExecutor and
+                // its POSIX event wake descriptors close immediately.
+                join_retired.clear();
                 lock.lock();
             }
         }
@@ -1103,8 +1234,9 @@ void GenerationPool::pump_loop() {
             ready_workers_locked() > min_ready_ && next_due == kMaxDue) {
             next_due = steady_ms() + std::min<std::uint64_t>(options_.idle_timeout_ms, 500ULL);
         }
-        if (!events_pending_ && !(state_ == State::kDraining && !quarantine_waiting_ &&
-                                  fleet_exited() && replacements_in_flight_ == 0)) {
+        if (!events_pending_ &&
+            !(state_ == State::kDraining && !quarantine_waiting_ && fleet_exited() &&
+              replacements_in_flight_ == 0 && scale_admissions_in_flight_ == 0)) {
             // request_drain changes state without adding an event. Wake
             // an ACTIVE wait on that transition even when live channels
             // still pin the fleet, so the next iteration can enforce the
@@ -1162,38 +1294,11 @@ void GenerationPool::pump_loop() {
         // executor emits no per-request failure for a worker exit).
         std::vector<std::size_t> exited;
         for (std::size_t index = 0; index < slots_.size(); ++index) {
-            if (slots_[index].executor == nullptr) {
-                continue;
-            }
-            std::deque<WorkerEvent> batch = slots_[index].executor->drain_events();
-            for (const WorkerEvent& event : batch) {
-                if (event.type == WorkerEvent::Type::kExit) {
-                    exited.push_back(index);
-                }
-                if (options_.event_sink) {
-                    options_.event_sink(slots_[index].executor.get(), event);
-                }
-            }
+            if (slots_[index].executor && forward_executor_events_locked(slots_[index].executor))
+                exited.push_back(index);
         }
-        // WP-05 §9.2: retired executors (replaced slots or evicted idle slots
-        // in async reaping) are drained here too — pinned response events and
-        // final kExit notifications flow cleanly while the worker finishes.
-        for (RetiredExecutor& retired : retired_) {
-            if (retired.executor == nullptr) {
-                continue;
-            }
-            std::deque<WorkerEvent> batch = retired.executor->drain_events();
-            for (const WorkerEvent& event : batch) {
-                if (event.type == WorkerEvent::Type::kExit) {
-                    if (options_.on_worker_exited) {
-                        options_.on_worker_exited(retired.executor.get());
-                    }
-                }
-                if (options_.event_sink) {
-                    options_.event_sink(retired.executor.get(), event);
-                }
-            }
-        }
+        for (const auto& executor : retired_)
+            forward_executor_events_locked(executor);
         std::size_t exit_elastic_releases = 0;
         for (const std::size_t index : exited) {
             if (handle_executor_exit(index)) {
@@ -1217,8 +1322,8 @@ bool GenerationPool::fleet_exited() const {
             return false;
         }
     }
-    for (const RetiredExecutor& retired : retired_) {
-        if (retired.executor != nullptr && !retired.executor->exited())
+    for (const auto& retired : retired_) {
+        if (retired != nullptr && !retired->exited())
             return false;
     }
     return true;
@@ -1238,6 +1343,46 @@ bool GenerationPool::due_pending_locked() const {
     return false;
 }
 
+bool GenerationPool::settle_evicted_slot_elastic_locked(Slot& victim) {
+    if (victim.elastic_held) {
+        victim.elastic_held = false;
+        return true;
+    }
+    // Prefer transferring floor ownership from an already-READY worker first.
+    for (Slot& other : slots_) {
+        if (&other != &victim && other.elastic_held && other.ready && other.executor != nullptr) {
+            other.elastic_held = false;
+            return true;
+        }
+    }
+    for (Slot& other : slots_) {
+        if (&other != &victim && other.elastic_held && other.replacement_in_flight) {
+            other.elastic_held = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GenerationPool::forward_executor_events_locked(
+    const std::shared_ptr<WorkerExecutor>& executor) {
+    bool exited = false;
+    for (const WorkerEvent& event : executor->drain_events()) {
+        if (event.type == WorkerEvent::Type::kExit) {
+            // Each executor queues one exit. Deliver it even if a health recycle
+            // already removed this executor from the READY set.
+            exited = true;
+            if (options_.on_worker_exited)
+                options_.on_worker_exited(executor.get());
+        }
+        if (options_.event_sink)
+            options_.event_sink(executor.get(), event);
+        if (options_.shared_event_sink)
+            options_.shared_event_sink(executor, event);
+    }
+    return exited;
+}
+
 bool GenerationPool::handle_executor_exit(std::size_t slot) {
     // Under the pool mutex (pump thread).
     Slot& s = slots_[slot];
@@ -1248,9 +1393,6 @@ bool GenerationPool::handle_executor_exit(std::size_t slot) {
     }
     s.ready = false; // §8.3: EXIT removes the slot from the READY set now
     stable_since_ms_ = 0;
-    if (options_.on_worker_exited) {
-        options_.on_worker_exited(s.executor.get());
-    }
     bool recorded_instability = false;
     if (!s.shutdown_issued && options_.replace_exited_workers) {
         const std::uint64_t now = steady_ms();
@@ -1280,11 +1422,8 @@ bool GenerationPool::handle_executor_exit(std::size_t slot) {
     if (state_ == State::kActive && !s.replacement_in_flight && !s.needs_replacement &&
         (!recorded_instability || !quarantine_waiting_)) {
         if (s.executor != nullptr && ready_workers_locked() >= min_ready_) {
-            retired_.push_back(RetiredExecutor{std::move(s.executor), false});
-            if (s.elastic_held) {
-                s.elastic_held = false;
-                return true;
-            }
+            retired_.push_back(std::move(s.executor));
+            return settle_evicted_slot_elastic_locked(s);
         }
     }
     return false;
@@ -1297,9 +1436,10 @@ void GenerationPool::run_replacement(std::size_t slot) {
         std::unique_lock<std::mutex> lock(mutex_);
         is_scale_out = slots_[slot].scale_out_spawn;
     }
-    auto abandon = [this, slot] {
+    auto abandon = [this, slot, is_scale_out](const char* reason) {
         bool release_elastic = false;
         std::function<void()> release_cb;
+        std::function<void(const std::string&)> failed_cb;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             Slot& s = slots_[slot];
@@ -1315,17 +1455,47 @@ void GenerationPool::run_replacement(std::size_t slot) {
                 --replacements_scheduled_;
             }
             --replacements_in_flight_;
+            if (state_ == State::kActive && !quarantine_waiting_ &&
+                ready_workers_locked() + replacements_scheduled_ < min_ready_ &&
+                replacements_scheduled_ < policy_.replacements_concurrent_per_app) {
+                std::size_t recovery_slot = slots_.size();
+                for (std::size_t index = 0; index < slots_.size(); ++index) {
+                    if (!slots_[index].ready && !slots_[index].replacement_in_flight &&
+                        slots_[index].needs_replacement) {
+                        recovery_slot = index;
+                        break;
+                    }
+                }
+                if (recovery_slot == slots_.size() && !s.ready && !s.replacement_in_flight) {
+                    recovery_slot = slot;
+                }
+                if (recovery_slot < slots_.size()) {
+                    Slot& target = slots_[recovery_slot];
+                    target.needs_replacement = false;
+                    target.replacement_in_flight = true;
+                    target.scale_out_spawn = false;
+                    target.elastic_held = false;
+                    ++replacements_scheduled_;
+                    const std::uint64_t delay_ms =
+                        std::max<std::uint64_t>(policy_.backoff_initial_ms, 10ULL);
+                    replacement_due_ms_[recovery_slot] = steady_ms() + delay_ms;
+                }
+            }
+            failed_cb = is_scale_out ? on_scale_out_failed_ : nullptr;
             cv_.notify_all();
         }
         if (release_elastic && release_cb) {
             release_cb();
+        }
+        if (failed_cb) {
+            failed_cb(reason);
         }
     };
 
     // §8.3: a generation that is no longer active never starts a
     // replacement.
     if (!active_flag_.load(std::memory_order_relaxed)) {
-        abandon();
+        abandon("pool_draining");
         return;
     }
 
@@ -1345,10 +1515,8 @@ void GenerationPool::run_replacement(std::size_t slot) {
         if (!options_.startup_permits->enqueue_and_wait(request, aborted)) {
             // Queue full, singleflight, stop, or the drain aborted the
             // wait: nothing was granted; the pool-side bookkeeping
-            // releases so the slot can be re-scheduled by the next exit
-            // event (or the drain completes — the wait() join reclaims
-            // this thread).
-            abandon();
+            // releases and notifies cold-start waiters outside mutex_.
+            abandon("startup_permit_refused");
             return;
         }
         grant_held = true;
@@ -1398,18 +1566,28 @@ void GenerationPool::run_replacement(std::size_t slot) {
             }
             --replacements_in_flight_;
             failed_cb = is_scale_out ? on_scale_out_failed_ : nullptr;
+            std::size_t recovery_slot = slot;
+            if (is_scale_out) {
+                for (std::size_t index = 0; index < slots_.size(); ++index) {
+                    if (!slots_[index].ready && !slots_[index].replacement_in_flight &&
+                        slots_[index].needs_replacement) {
+                        recovery_slot = index;
+                        break;
+                    }
+                }
+            }
             WorkerInstabilityObservation observation;
             observation.kind = WorkerInstabilityKind::kReplacementStartupFailure;
             observation.worker_generation = options_.generation_digest;
             observation.now_ms = steady_ms();
             observation.ready_workers_after_removal = ready_workers_locked();
-            observation.target_ready_workers = is_scale_out ? 0U : min_ready_;
+            observation.target_ready_workers = min_ready_;
             observation.replacements_in_flight_for_app =
                 static_cast<std::uint32_t>(replacements_scheduled_);
             observation.chosen_jitter_basis_points = 0;
             count_event(options_.metrics, "crash", options_.application_id,
                         options_.generation_digest);
-            record_instability(slot, observation, "crashed");
+            record_instability(recovery_slot, observation, "crashed");
             cv_.notify_all();
         }
         if (release_elastic && release_cb) {
@@ -1429,12 +1607,14 @@ void GenerationPool::install_replacement(std::size_t slot,
     WorkerExecutor* installed = replacement.get();
     std::string reason;
     bool was_scale_out = false;
+    std::size_t elastic_releases = 0;
+    std::function<void()> release_cb;
     std::function<void()> ready_cb;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         Slot& s = slots_[slot];
         if (s.executor != nullptr) {
-            retired_.push_back(RetiredExecutor{std::move(s.executor), false});
+            retired_.push_back(std::move(s.executor));
         }
         s.executor = std::move(replacement);
         s.ready = true; // slot READY
@@ -1451,22 +1631,32 @@ void GenerationPool::install_replacement(std::size_t slot,
         }
         reason = std::move(s.replacement_reason);
         s.replacement_reason.clear();
-        if (min_ready_ > 0 && ready_workers_locked() >= min_ready_) {
+        const std::uint32_t ready_now = ready_workers_locked();
+        if (min_ready_ > 0 && ready_now >= min_ready_) {
             stable_since_ms_ = steady_ms(); // full-READY epoch base
         }
-        if (state_ == State::kActive) {
-            for (std::size_t index = 0; index < slots_.size(); ++index) {
-                Slot& other = slots_[index];
-                if (!other.ready && !other.replacement_in_flight && other.needs_replacement) {
-                    other.needs_replacement = false;
-                    other.replacement_in_flight = true;
-                    ++replacements_scheduled_;
-                    replacement_due_ms_[index] = steady_ms();
+        if (state_ == State::kActive && !quarantine_waiting_) {
+            schedule_deferred_floor_locked();
+            if (ready_now >= min_ready_) {
+                for (Slot& other : slots_) {
+                    if (!other.ready && !other.replacement_in_flight && other.needs_replacement) {
+                        other.needs_replacement = false;
+                        if (other.executor != nullptr) {
+                            retired_.push_back(std::move(other.executor));
+                        }
+                        if (settle_evicted_slot_elastic_locked(other)) {
+                            ++elastic_releases;
+                        }
+                    }
                 }
+                release_cb = options_.release_elastic_slot;
             }
         }
         ready_cb = on_worker_ready_;
         cv_.notify_all();
+    }
+    for (std::size_t k = 0; k < elastic_releases && release_cb; ++k) {
+        release_cb();
     }
     if (was_scale_out) {
         count_event(options_.metrics, "ready", options_.application_id, options_.generation_digest);
@@ -1526,17 +1716,25 @@ void GenerationPool::finalize_drain() {
                 ++elastic_to_release;
             }
             if (slot.executor != nullptr) {
+                forward_executor_events_locked(slot.executor);
                 reaped.push_back(std::move(slot.executor));
                 ++live_slot_count;
             }
         }
         slots_.clear();
-        for (RetiredExecutor& retired : retired_) {
-            if (retired.executor != nullptr) {
-                reaped.push_back(std::move(retired.executor));
+        for (auto& retired : retired_) {
+            if (retired != nullptr) {
+                forward_executor_events_locked(retired);
+                reaped.push_back(std::move(retired));
             }
         }
         retired_.clear();
+        for (auto& observed : observed_retired_) {
+            if (observed != nullptr) {
+                reaped.push_back(std::move(observed));
+            }
+        }
+        observed_retired_.clear();
     }
     for (std::size_t k = 0; k < elastic_to_release && options_.release_elastic_slot; ++k) {
         options_.release_elastic_slot();

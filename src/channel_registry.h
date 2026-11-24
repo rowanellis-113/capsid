@@ -14,7 +14,7 @@
 namespace capsid {
 
 // Production channel state machine for FetchRPC v4 A2
-// (docs/fetchrpc-v4.md). One instance validates the frame stream of
+// (docs/reference/fetchrpc-v4.md). One instance validates the frame stream of
 // one IPC connection from BOTH sides (the same rules run on the host
 // and in the worker; each side feeds the frames it sends and
 // receives), enforces the negotiated budgets, and exposes lifecycle

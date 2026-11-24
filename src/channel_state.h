@@ -8,7 +8,7 @@
 
 namespace capsid {
 
-// FetchRPC v4 A2 (docs/fetchrpc-v4.md §§3.1, 3.4, 3.5): the per-channel
+// FetchRPC v4 A2 (docs/reference/fetchrpc-v4.md §§3.1, 3.4, 3.5): the per-channel
 // state shared by the host and worker state machines. Both sides embed
 // the same ChannelRegistry so their rules cannot drift.
 

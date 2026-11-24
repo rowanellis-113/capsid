@@ -1,6 +1,6 @@
 // Spawn failure recovery (v0.3.0 remediation T02).
 //
-// Contract: docs/v0.3.0-implementation-design.md §2.3 — a rejected or
+// Contract: docs/history/v0.3.0/implementation-design.md §2.3 — a rejected or
 // failing spawn leaves nothing behind: no child process (fake-child
 // marker stays absent, no zombie or live descendants of this test), no
 // leaked descriptors, no accumulated residue across repeated failures.

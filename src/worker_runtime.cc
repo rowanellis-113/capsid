@@ -1838,7 +1838,7 @@ class WorkerRuntime {
     // §6.3: unified gate for request-level native APIs. Returns the active
     // token, or NULL when the caller is allowed worker scope (audit paths
     // with explicit id 0). Any violation throws and identity tampering
-    // poisons the worker (full poison mechanics land in WP-03).
+    // poisons the worker via enter_poison().
     RequestToken* require_active_request(JSContext* ctx, uint64_t explicit_id, bool has_explicit,
                                          bool allow_worker_scope, const char* site = "") {
         if (poisoned_) {

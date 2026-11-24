@@ -1,4 +1,4 @@
-// Binding v1 §7.2: zero-binding regression (docs/binding-technical-design.md).
+// Binding v1 §7.2: zero-binding regression (docs/design/bindings-v1.md).
 //
 // A worker that receives no LOAD_BINDING frame must behave exactly like the
 // pre-Binding single-runtime worker: READY carries the unchanged baseline

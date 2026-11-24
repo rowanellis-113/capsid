@@ -1,4 +1,4 @@
-// bindingsRoot security scan (docs/binding-technical-design.md §2.1).
+// bindingsRoot security scan (docs/design/bindings-v1.md §2.1).
 //
 // The scan is fd-relative from one no-follow root descriptor. Directory
 // entries, opened objects, final names, and directory contents are checked

@@ -12,17 +12,32 @@
 
 namespace capsid::host {
 
+std::uint64_t WorkerCapacityLedger::available_steady_or_elastic_locked() const {
+    if (steady_used_ > workers_total_) {
+        throw std::logic_error("invalid steady worker count");
+    }
+    const std::uint64_t surge_total = surge_used_ + pending_surge_growth_;
+    const std::uint64_t excess_surge =
+        surge_total > surge_workers_ ? (surge_total - surge_workers_) : 0;
+    std::uint64_t occupied = steady_used_;
+    if (pending_steady_growth_ > workers_total_ - occupied) {
+        return 0;
+    }
+    occupied += pending_steady_growth_;
+    if (elastic_used_ > workers_total_ - occupied) {
+        return 0;
+    }
+    occupied += elastic_used_;
+    if (excess_surge > workers_total_ - occupied) {
+        return 0;
+    }
+    occupied += excess_surge;
+    return workers_total_ - occupied;
+}
+
 bool WorkerCapacityLedger::reserve_fresh(const std::string& application, std::uint64_t pool_size) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (steady_used_ > workers_total_)
-        throw std::logic_error("invalid steady worker count");
-    auto available = workers_total_ - steady_used_;
-    if (surge_used_ > surge_workers_) {
-        const auto excess = surge_used_ - surge_workers_;
-        if (excess > available)
-            return false;
-        available -= excess;
-    }
+    const std::uint64_t available = available_steady_or_elastic_locked();
     if (pool_size > available) {
         return false;
     }
@@ -37,27 +52,51 @@ bool WorkerCapacityLedger::reserve_replace(const std::string& application,
                                            std::uint64_t new_pool_size) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = entries_.find(application);
-    if (found == entries_.end() || (!found->second.active && found->second.steady == 0)) {
-        // Not a replacement: the App has no serving pool. The caller
-        // should have used reserve_fresh.
+    if (found == entries_.end() || (!found->second.active && found->second.steady == 0) ||
+        found->second.replace_pending) {
+        // Not a valid replacement: either the App has no serving pool, or
+        // another replacement reserve is already pending.
         return false;
     }
     const std::uint64_t old_pool_size = found->second.steady;
-    // Steady state after the swap: the old pool stops serving.
-    if (steady_used_ < old_pool_size || steady_used_ - old_pool_size > workers_total_ ||
-        new_pool_size > workers_total_ - (steady_used_ - old_pool_size)) {
-        return false;
+    if (steady_used_ < old_pool_size) {
+        throw std::logic_error("invalid steady worker count");
     }
     // The overlap peak: the new pool warms (surge), then the old pool
-    // drains (surge) — the surge budget must fit the larger side.
+    // drains (surge) — the surge budget must fit the larger side, including
+    // any post-swap surge delta already promised by concurrent shrink reserves.
     const std::uint64_t overlap_peak = std::max(new_pool_size, old_pool_size);
-    if (surge_used_ > surge_workers_ || overlap_peak > surge_workers_ - surge_used_) {
+    const std::uint64_t surge_committed = surge_used_ + pending_surge_growth_;
+    if (surge_committed > surge_workers_ || overlap_peak > surge_workers_ - surge_committed) {
         return false;
     }
+    const std::uint64_t surge_growth =
+        (old_pool_size > new_pool_size) ? (old_pool_size - new_pool_size) : 0;
+    // Steady state after the swap must also honor active elastic slots and
+    // other pending replacement growth.
+    std::uint64_t growth = 0;
+    if (new_pool_size >= old_pool_size) {
+        growth = new_pool_size - old_pool_size;
+        if (growth > available_steady_or_elastic_locked()) {
+            return false;
+        }
+    } else {
+        const std::uint64_t base_steady = steady_used_ - old_pool_size;
+        if (base_steady > workers_total_ || pending_steady_growth_ > workers_total_ - base_steady ||
+            elastic_used_ > workers_total_ - base_steady - pending_steady_growth_ ||
+            new_pool_size > workers_total_ - base_steady - pending_steady_growth_ - elastic_used_) {
+            return false;
+        }
+    }
     // The new pool warms under surge from the reserve moment; concurrent
-    // reserves see the held count.
+    // reserves and elastic acquisitions see the promised steady/surge growth.
     found->second.surge += new_pool_size;
     surge_used_ += new_pool_size;
+    found->second.replace_pending = true;
+    found->second.replace_growth = growth;
+    found->second.replace_surge_growth = surge_growth;
+    pending_steady_growth_ += growth;
+    pending_surge_growth_ += surge_growth;
     return true;
 }
 
@@ -74,6 +113,17 @@ void WorkerCapacityLedger::commit_replace(const std::string& application,
     if (entry.surge < new_pool_size || surge_used_ < new_pool_size ||
         entry.steady != old_pool_size || steady_used_ < old_pool_size) {
         throw std::logic_error("replacement capacity category mismatch");
+    }
+    if (entry.replace_pending) {
+        if (pending_steady_growth_ < entry.replace_growth ||
+            pending_surge_growth_ < entry.replace_surge_growth) {
+            throw std::logic_error("replacement growth mismatch");
+        }
+        pending_steady_growth_ -= entry.replace_growth;
+        pending_surge_growth_ -= entry.replace_surge_growth;
+        entry.replace_pending = false;
+        entry.replace_growth = 0;
+        entry.replace_surge_growth = 0;
     }
     // The new pool leaves surge for steady; the old pool enters surge
     // (draining). The held counts never change sum — only the category.
@@ -97,6 +147,17 @@ void WorkerCapacityLedger::abort_reserve(const std::string& application, std::ui
     if (replacement) {
         if (found->second.surge < pool_size || surge_used_ < pool_size)
             throw std::logic_error("surge reserve already released");
+        if (found->second.replace_pending) {
+            if (pending_steady_growth_ < found->second.replace_growth ||
+                pending_surge_growth_ < found->second.replace_surge_growth) {
+                throw std::logic_error("replacement growth mismatch");
+            }
+            pending_steady_growth_ -= found->second.replace_growth;
+            pending_surge_growth_ -= found->second.replace_surge_growth;
+            found->second.replace_pending = false;
+            found->second.replace_growth = 0;
+            found->second.replace_surge_growth = 0;
+        }
         found->second.surge -= pool_size;
         surge_used_ -= pool_size;
     } else {
@@ -158,18 +219,7 @@ void WorkerCapacityLedger::release_active(const std::string& application, std::u
 
 bool WorkerCapacityLedger::try_acquire_elastic(const std::string& application) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (steady_used_ >= workers_total_) {
-        return false;
-    }
-    std::uint64_t available = workers_total_ - steady_used_;
-    if (surge_used_ > surge_workers_) {
-        const auto excess = surge_used_ - surge_workers_;
-        if (excess >= available) {
-            return false;
-        }
-        available -= excess;
-    }
-    if (elastic_used_ >= available) {
+    if (available_steady_or_elastic_locked() < 1) {
         return false;
     }
     entries_[application].elastic += 1;

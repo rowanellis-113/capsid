@@ -44,6 +44,16 @@ if(BUILD_TESTING)
     if(NOT CAPSID_PYTHON3_EXECUTABLE)
         find_program(CAPSID_PYTHON3_EXECUTABLE NAMES python3 python REQUIRED)
     endif()
+    add_test(NAME managed_soak_driver_controls
+        COMMAND "${CAPSID_PYTHON3_EXECUTABLE}" -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_managed_soak_driver.py")
+    set_tests_properties(managed_soak_driver_controls PROPERTIES
+        LABELS "soak;negative-controls" TIMEOUT 30)
+    add_test(NAME txiki_upgrade_report_generator_controls
+        COMMAND "${CAPSID_PYTHON3_EXECUTABLE}" -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_generate_txiki_upgrade_report.py")
+    set_tests_properties(txiki_upgrade_report_generator_controls PROPERTIES
+        LABELS "build;provenance;negative-controls" TIMEOUT 30)
     add_test(NAME release_package_architecture_controls
         COMMAND "${CAPSID_PYTHON3_EXECUTABLE}" -B
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_release_package_architecture.py")
@@ -200,8 +210,12 @@ if(BUILD_TESTING)
             endif()
         endif()
         add_test(NAME host_config_model COMMAND test-host-config-model)
+        add_test(NAME host_config_model_min_ready_ceiling COMMAND test-host-config-model min_ready_ceiling)
+        foreach(memory_case IN ITEMS memory_inheritance_compatible memory_inheritance_conflict)
+            add_test(NAME host_config_model_${memory_case} COMMAND test-host-config-model ${memory_case})
+        endforeach()
 
-        # Binding v1 (docs/binding-technical-design.md §7.1): one target
+        # Binding v1 (docs/design/bindings-v1.md §7.1): one target
         if(Boost_FOUND)
             add_executable(test-host-client-disconnect tests/test_host_client_disconnect.cc)
             target_link_libraries(test-host-client-disconnect PRIVATE Boost::system capsid_sanitizers)
@@ -210,7 +224,7 @@ if(BUILD_TESTING)
             set_tests_properties(host_client_disconnect_probe PROPERTIES TIMEOUT 10 LABELS "host;http;lifecycle")
         endif()
 
-        # Binding v1 (docs/binding-technical-design.md §7.1): one target
+        # Binding v1 (docs/design/bindings-v1.md §7.1): one target
         # per contract layer so a schema edit never rebuilds the scanner.
         function(capsid_add_binding_test name source)
             add_executable(${name} ${source})
@@ -371,7 +385,7 @@ if(BUILD_TESTING)
         # primitives (openat/mkdirat/symlinkat/mkfifoat) and unix-domain
         # socket nodes throughout; the Windows open_beneath path is
         # exercised via the runtime compile-time contract and documented
-        # in docs/windows.md (SKIP by absence, never FAIL).
+        # in docs/guides/build-on-windows.md (SKIP by absence, never FAIL).
         if(NOT WIN32)
             add_executable(
                 test-host-artifact-safe-read
@@ -401,7 +415,7 @@ if(BUILD_TESTING)
         endif()
 
         # Secret files belong to the managed coordinator (POSIX-only,
-        # docs/windows.md); the driver's openat/mkfifoat fixtures skip by
+        # docs/guides/build-on-windows.md); the driver's openat/mkfifoat fixtures skip by
         # absence on Windows.
         if(NOT WIN32)
         add_executable(
@@ -633,7 +647,7 @@ if(BUILD_TESTING)
             # bounded asynchronous submission wrapper are separate from the
             # HTTP transport so operation progress remains independently
             # testable. (The managed coordinator is POSIX-only;
-            # docs/windows.md.)
+            # docs/guides/build-on-windows.md.)
             find_package(Threads REQUIRED)
             add_executable(
                 test-host-managed-admin-backend
@@ -735,6 +749,7 @@ if(BUILD_TESTING)
                         host_managed_executable_crash_loop_does_not_starve_other_app
                         host_managed_executable_active_health_recycles_unhealthy
                         host_managed_executable_active_health_healthy_stays
+                        host_managed_retired_stream_tenant_memory
                         host_managed_http_e2e_multi_app
                         host_managed_http_restart_recovers_route
                         host_managed_http_rejects_multiple_listeners)
@@ -754,6 +769,12 @@ if(BUILD_TESTING)
                     # mandatory root sandbox matrix must rerun this case;
                     # ordinary prerequisite skips alone never prove it passed.
                     PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;managed;sandbox")
+                add_test(NAME host_managed_tenant_hard_memory_cgroup
+                    COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/sandbox/run-tenant-memory-cgroup.sh"
+                        $<TARGET_FILE:test-host-managed-executable>
+                        $<TARGET_FILE:capsid-host> $<TARGET_FILE:capsid-worker>)
+                set_tests_properties(host_managed_tenant_hard_memory_cgroup PROPERTIES
+                    TIMEOUT 90 SKIP_RETURN_CODE 77 LABELS "host;managed;sandbox")
                 # The item-5a crash matrix drives repeated real worker
                 # replacements (SIGKILL + backoff + spawn/READY) and, in
                 # the boot test, a full restart; give the cycles headroom
@@ -1108,6 +1129,11 @@ if(BUILD_TESTING)
                 ledger_no_surge_refuses
                 ledger_retired_headroom
                 ledger_overflow_limits
+                ledger_fresh_after_elastic
+                ledger_replace_after_elastic
+                ledger_elastic_during_replace
+                ledger_concurrent_shrink_surge
+                ledger_mixed_resize_abort_and_drain
                 ledger_elastic_two_tier)
             add_test(
                 NAME "host_worker_capacity_ledger_${CAPSID_LEDGER_TEST_ID}"
@@ -1138,7 +1164,7 @@ if(BUILD_TESTING)
         endforeach()
 
         # The operation registry lives in the managed coordinator, which
-        # is not built on Windows (docs/windows.md); SKIP by absence.
+        # is not built on Windows (docs/guides/build-on-windows.md); SKIP by absence.
         if(NOT WIN32)
         add_executable(
             test-host-managed-registry
@@ -1183,7 +1209,7 @@ if(BUILD_TESTING)
         # cancel/reclaim convergence protocol against the real worker.
         add_executable(
             soak-memory-waves
-            soak/soak_memory_waves.cc)
+            tests/soak/soak_memory_waves.cc)
         target_include_directories(soak-memory-waves PRIVATE src)
         target_link_libraries(soak-memory-waves PRIVATE capsid_runtime)
         set_target_properties(soak-memory-waves PROPERTIES
@@ -1203,7 +1229,7 @@ if(BUILD_TESTING)
                 NAME soak_memory_waves_smoke
                 COMMAND soak-memory-waves
                     $<TARGET_FILE:capsid-worker>
-                    "${CMAKE_CURRENT_SOURCE_DIR}/soak/fixtures/soak-app.js"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/soak/fixtures/soak-app.js"
                     4
                     50)
             set_tests_properties(soak_memory_waves_smoke PROPERTIES TIMEOUT 120)
@@ -1225,7 +1251,7 @@ if(BUILD_TESTING)
             foreach(mode reclaimed retained)
                 add_test(NAME worker_memory_metrics_${mode}
                     COMMAND test-memory-metrics-reclaim $<TARGET_FILE:capsid-worker>
-                        "${CMAKE_CURRENT_SOURCE_DIR}/soak/fixtures/soak-app.js" "${mode}")
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/soak/fixtures/soak-app.js" "${mode}")
                 set_tests_properties(worker_memory_metrics_${mode} PROPERTIES
                     TIMEOUT 120 LABELS "worker;memory;lifecycle")
             endforeach()
@@ -1426,7 +1452,7 @@ if(BUILD_TESTING)
                 endif()
             endif()
             # Multi-shard scenarios run on every platform through the pool's
-            # shared acceptor (see docs/platform-support.md).
+            # shared acceptor (see docs/reference/platform-support.md).
             add_test(
                 NAME host_static_pool_server_shared_port_lifecycle
                 COMMAND test-host-static-pool-server lifecycle
@@ -3767,7 +3793,7 @@ if(BUILD_TESTING)
 
         add_executable(test-build-identity tests/test_build_identity.cc)
         file(READ
-            "${CMAKE_CURRENT_SOURCE_DIR}/docs/txiki-upgrade-baseline.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/docs/data/txiki-upgrade-baseline.json"
             CAPSID_TEST_BUILD_IDENTITY_JSON)
         string(JSON CAPSID_TEST_EXPECTED_QUICKJS_COMMIT
             ERROR_VARIABLE CAPSID_TEST_BUILD_IDENTITY_JSON_ERROR
@@ -5877,14 +5903,14 @@ if(BUILD_TESTING)
             COMMAND "${CAPSID_NODE_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/wpt/audit-metadata.mjs"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/wpt/manifest.json"
-                "${CMAKE_CURRENT_SOURCE_DIR}/docs/conformance.md"
+                "${CMAKE_CURRENT_SOURCE_DIR}/docs/reference/web-conformance.md"
         )
         add_test(
             NAME wpt_metadata_negative_controls
             COMMAND "${CAPSID_NODE_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/wpt/audit-metadata.test.mjs"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/wpt/manifest.json"
-                "${CMAKE_CURRENT_SOURCE_DIR}/docs/conformance.md"
+                "${CMAKE_CURRENT_SOURCE_DIR}/docs/reference/web-conformance.md"
         )
         add_test(
             NAME wpt_report_contract_controls
@@ -6151,7 +6177,7 @@ if(BUILD_TESTING)
             )
         else()
             # WPT is the ONLY source of evidence for the ECMA-429 conformance
-            # claims in docs/conformance.md.
+            # claims in docs/reference/web-conformance.md.
             # If it silently does not run, `ctest` reports all-green while the
             # conformance surface is entirely untested. Register a test that fails
             # loudly so that absence of coverage can never be mistaken for a pass.
@@ -6306,11 +6332,13 @@ if(BUILD_TESTING)
                 "hono/adapter/bun/serve-static"
         )
         add_test(
-            NAME worker_hono_excludes_node_builtin
+            NAME worker_framework_excludes_node_http
             COMMAND test-module-denial
                 $<TARGET_FILE:capsid-worker>
                 "node:http"
         )
+        set_tests_properties(worker_framework_excludes_node_http PROPERTIES TIMEOUT 20
+            LABELS "framework;hono;hono-excluded;itty-router;itty-router-excluded;h3-v2;h3-v2-excluded")
         add_test(
             NAME worker_hono_excludes_file_module
             COMMAND test-module-denial
@@ -6324,17 +6352,13 @@ if(BUILD_TESTING)
                 "https://example.test/hono-adapter.js"
         )
         add_test(
-            NAME worker_itty_router_excludes_node_http
-            COMMAND test-module-denial
-                $<TARGET_FILE:capsid-worker>
-                "node:http"
-        )
-        add_test(
-            NAME worker_itty_router_excludes_node_fs
+            NAME worker_framework_excludes_node_fs
             COMMAND test-module-denial
                 $<TARGET_FILE:capsid-worker>
                 "node:fs"
         )
+        set_tests_properties(worker_framework_excludes_node_fs PROPERTIES TIMEOUT 20
+            LABELS "framework;itty-router;itty-router-excluded;h3-v2;h3-v2-excluded")
         add_test(
             NAME worker_itty_router_excludes_node_adapter
             COMMAND test-module-denial
@@ -6384,18 +6408,6 @@ if(BUILD_TESTING)
                 "crossws/server"
         )
         add_test(
-            NAME worker_h3_v2_excludes_node_http
-            COMMAND test-module-denial
-                $<TARGET_FILE:capsid-worker>
-                "node:http"
-        )
-        add_test(
-            NAME worker_h3_v2_excludes_node_fs
-            COMMAND test-module-denial
-                $<TARGET_FILE:capsid-worker>
-                "node:fs"
-        )
-        add_test(
             NAME worker_h3_v2_excludes_external_module
             COMMAND test-module-denial
                 $<TARGET_FILE:capsid-worker>
@@ -6425,7 +6437,6 @@ if(BUILD_TESTING)
             worker_hono_excludes_cloudflare_adapter
             worker_hono_excludes_websocket_adapter
             worker_hono_excludes_static_file_adapter
-            worker_hono_excludes_node_builtin
             worker_hono_excludes_file_module
             worker_hono_excludes_remote_module
             PROPERTIES
@@ -6433,8 +6444,6 @@ if(BUILD_TESTING)
                 LABELS "framework;hono;hono-excluded"
         )
         set_tests_properties(
-            worker_itty_router_excludes_node_http
-            worker_itty_router_excludes_node_fs
             worker_itty_router_excludes_node_adapter
             worker_itty_router_excludes_bun_adapter
             worker_itty_router_excludes_websocket_adapter
@@ -6448,8 +6457,6 @@ if(BUILD_TESTING)
             worker_h3_v2_excludes_node_entry
             worker_h3_v2_excludes_srvx_listener
             worker_h3_v2_excludes_crossws_server
-            worker_h3_v2_excludes_node_http
-            worker_h3_v2_excludes_node_fs
             worker_h3_v2_excludes_external_module
             worker_h3_v2_excludes_file_module
             worker_h3_v2_excludes_remote_module
@@ -6601,12 +6608,8 @@ if(BUILD_TESTING)
         # plain `-lcapsid_host_core` link item in worker-only builds where
         # the CMake target does not exist.
         if(TARGET capsid_host_core)
-        # WP-04 PR-06 (spec §8.1/§8.4): the WorkerExecutor ownership
-        # contract — startup failure, factory/adopted lifecycle and
-        # exactly-once reap. RED gate for the extraction: the header does
-        # not exist until the executor is extracted from
-        # single_worker_server.cc, so this target fails to compile on the
-        # pre-extraction tree.
+        # WorkerExecutor ownership contract: startup failure, factory/adopted
+        # lifecycle, and exactly-once reap.
         add_executable(
             test-host-worker-executor
             tests/test_host_worker_executor.cc)
@@ -6952,6 +6955,9 @@ if(BUILD_TESTING)
         add_test(
             NAME host_managed_listener_contract
             COMMAND test-host-managed-listener $<TARGET_FILE:capsid-worker>)
+        add_test(NAME host_managed_listener_ipv6
+            COMMAND test-host-managed-listener $<TARGET_FILE:capsid-worker> ipv6)
+        set_tests_properties(host_managed_listener_ipv6 PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
         set_tests_properties(host_managed_listener_contract PROPERTIES
             TIMEOUT 90)
         endif()
@@ -6988,7 +6994,22 @@ if(BUILD_TESTING)
             foreach(CAPSID_ELASTIC_CASE IN ITEMS
                     scale_to_zero_burst_and_reclaim
                     active_stream_and_ws_protected
-                    two_tier_reaping_slot_transfer)
+                    cold_start_permit_refusal
+                    cold_start_retry_after_spawn_failure
+                    drain_during_worker_start
+                    drain_during_slot_admission
+                    ws_upgrade_pumps_parked_queue
+                    two_tier_reaping_slot_transfer
+                    dispatch_lease_blocks_eviction
+                    floor_recovery_after_scale_out_failure
+                    floor_recovery_after_admission_refusal
+                    floor_recovery_stops_at_quarantine
+                    exit_observer_during_floor_replacement
+                    leased_begin_after_exit
+                    direct_begin_after_exit
+                    health_recycle_returns_elastic_slot
+                    http_selection_skips_full_worker
+                    dispatch_handoff_blocks_eviction)
                 add_test(
                     NAME "host_elastic_pool_${CAPSID_ELASTIC_CASE}"
                     COMMAND test-host-elastic-pool $<TARGET_FILE:capsid-worker> "${CAPSID_ELASTIC_CASE}")
@@ -6997,6 +7018,10 @@ if(BUILD_TESTING)
                     PROPERTIES TIMEOUT 90 LABELS "host;managed;lifecycle")
             endforeach()
             if(NOT WIN32)
+                add_test(NAME host_elastic_pool_cold_cycles_release_descriptors
+                    COMMAND test-host-elastic-pool $<TARGET_FILE:capsid-worker> cold_cycles_release_descriptors)
+                set_tests_properties(host_elastic_pool_cold_cycles_release_descriptors
+                    PROPERTIES TIMEOUT 30 LABELS "host;managed;lifecycle")
                 add_test(
                     NAME host_elastic_pool_disk_backed_generation_tamper_fails
                     COMMAND test-host-elastic-pool $<TARGET_FILE:capsid-worker> disk_backed_generation_tamper_fails)
@@ -7038,6 +7063,18 @@ if(BUILD_TESTING)
             foreach(CAPSID_EVICTION_CASE IN ITEMS
                     phase1_overshare_protects_small_tenant
                     phase2_global_lru_and_min_residency
+                    watermark_protected_overshare
+                    watermark_within_share
+                    slot_protected_overshare
+                    slot_within_share
+                    deploy_with_protected_sibling
+                    deploy_at_tenant_memory_limit
+                    tenant_memory_recovers_without_global_budget
+                    shrink_to_floor_returns_elastic_slot
+                    overlapping_tenant_warmups
+                    draining_generation_counted_in_memory
+                    active_retiring_worker_counted_in_soft_watermark
+                    on_demand_watermark_counts_previous_victim
                     tenant_quota_swap_and_rejections)
                 add_test(
                     NAME "host_eviction_${CAPSID_EVICTION_CASE}"
@@ -7053,6 +7090,12 @@ if(BUILD_TESTING)
                 set_tests_properties(
                     host_eviction_admin_deploy_tenant_and_persistence
                     PROPERTIES TIMEOUT 90 LABELS "host;managed;lifecycle")
+                add_test(
+                    NAME host_eviction_real_cgroup_memory_current
+                    COMMAND test-host-eviction-coordinator $<TARGET_FILE:capsid-worker> real_cgroup_memory_current)
+                set_tests_properties(
+                    host_eviction_real_cgroup_memory_current
+                    PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77 LABELS "host;managed;lifecycle;sandbox")
             endif()
         endif()
         endif()  # Boost_FOUND — RoutingTable & ManagedListener contract tests

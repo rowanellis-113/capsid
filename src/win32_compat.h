@@ -187,7 +187,7 @@ inline int gettimeofday(struct timeval* tv, void* /*timezone*/) {
 
 // Process-identity checks are uid-based on POSIX; Windows has no uid
 // namespace for AF_UNIX peers and relies on the socket directory's NTFS
-// ACLs instead (see docs/windows.md).
+// ACLs instead (see docs/guides/build-on-windows.md).
 inline unsigned long long geteuid() { return 0ull; }
 
 // Non-blocking mode for a CRT fd backed by a socket handle.

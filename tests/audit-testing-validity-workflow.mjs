@@ -137,7 +137,7 @@ const requiredFragments = [
   'tools/generate-txiki-upgrade-report.py',
   '--privileged',
   '--cgroupns=private',
-  'scripts/run-delegated-sandbox-tests.sh',
+  'tests/sandbox/run-delegated-sandbox-tests.sh',
   'CAPSID_ENABLE_ASAN',
   'CAPSID_ENABLE_UBSAN',
   '-DCAPSID_BUILD_FUZZERS=ON',
@@ -827,7 +827,7 @@ const expectedUpgradeReportBody = [
   '--source-root . \\',
   '--build-dir build-validity \\',
   '--junit "${evidence}/ordinary-junit.xml" \\',
-  '--baseline docs/txiki-upgrade-baseline.json \\',
+  '--baseline docs/data/txiki-upgrade-baseline.json \\',
   '--node-executable "$(node -p \'process.execPath\')" \\',
   '--workerd-python "${CAPSID_WS_INTEROP_PYTHON}" \\',
   '--workerd-acceptance "${evidence}/compatibility-acceptance.json" \\',
@@ -882,7 +882,7 @@ const delegatedStep = releaseJob
   ?.split(/\r?\n      - name:/)[0];
 assert.ok(
   delegatedStep.includes('--entrypoint /bin/bash \\') &&
-    delegatedStep.includes('/repo/scripts/run-delegated-sandbox-tests.sh /build'),
+    delegatedStep.includes('/repo/tests/sandbox/run-delegated-sandbox-tests.sh /build'),
   'delegated container invokes the reviewed script through its shell',
 );
 const archiveStep = releaseJob

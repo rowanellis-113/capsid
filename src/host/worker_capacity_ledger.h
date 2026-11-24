@@ -12,9 +12,10 @@
 //   absolute ceiling:         workers_total + activation_surge_workers.
 //
 // Every live worker process is in EXACTLY one category:
-//   steady — serving (an active pool's workers),
-//   surge  — overlap (a replacement pool warming, or a replaced/retired
-//            pool draining).
+//   steady  — guaranteed serving slots (an active pool's minReady floor),
+//   elastic — dynamic on-demand slots above minReady (within workers_total),
+//   surge   — overlap (a replacement pool warming, or a replaced/retired
+//             pool draining).
 //
 // Deploy sequence (caller contract):
 //   reserve_fresh / reserve_replace BEFORE any spawn — the reserve is the
@@ -32,8 +33,8 @@
 // OVERLAP PEAK max(new, old) (the warm side, then the drain side).
 // commit_replace moves the new pool to steady and the old pool to surge.
 // Startup concurrency and worker count are independent limits (the
-// startups-concurrent gate lives in the listener; this ledger is only the
-// count).
+// StartupPermitCoordinator gate is owned by the managed Host and shared with
+// ManagedAdminBackend and GenerationPool; this ledger tracks only the counts).
 
 #ifndef CAPSID_HOST_WORKER_CAPACITY_LEDGER_H
 #define CAPSID_HOST_WORKER_CAPACITY_LEDGER_H
@@ -92,16 +93,22 @@ class WorkerCapacityLedger {
     std::uint64_t elastic_of(const std::string& application) const;
 
   private:
+    std::uint64_t available_steady_or_elastic_locked() const;
     struct Entry {
         bool active = false;
-        std::uint64_t steady = 0;  // serving committed workers
-        std::uint64_t surge = 0;   // overlap workers (warming/draining)
-        std::uint64_t elastic = 0; // elastic runtime workers above minReady
+        std::uint64_t steady = 0;               // serving committed workers
+        std::uint64_t surge = 0;                // overlap workers (warming/draining)
+        std::uint64_t elastic = 0;              // elastic runtime workers above minReady
+        bool replace_pending = false;           // in-flight replacement reservation
+        std::uint64_t replace_growth = 0;       // additional steady slots promised on commit
+        std::uint64_t replace_surge_growth = 0; // additional draining surge promised on shrink
     };
     std::map<std::string, Entry> entries_;
     std::uint64_t steady_used_ = 0;
     std::uint64_t surge_used_ = 0;
     std::uint64_t elastic_used_ = 0;
+    std::uint64_t pending_steady_growth_ = 0;
+    std::uint64_t pending_surge_growth_ = 0;
     const std::uint64_t workers_total_;
     const std::uint64_t surge_workers_;
     mutable std::mutex mutex_;

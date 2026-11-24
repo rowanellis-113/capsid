@@ -15,20 +15,24 @@ namespace capsid::host {
 // directory after the worker process has been reaped and cgroup.procs is empty.
 struct WorkerCgroupLease {
     std::string path;
+    std::string tenant_path;
 
     WorkerCgroupLease() = default;
-    explicit WorkerCgroupLease(std::string cgroup_path) : path(std::move(cgroup_path)) {}
+    explicit WorkerCgroupLease(std::string cgroup_path, std::string tenant_group = {})
+        : path(std::move(cgroup_path)), tenant_path(std::move(tenant_group)) {}
     ~WorkerCgroupLease();
 
     WorkerCgroupLease(const WorkerCgroupLease&) = delete;
     WorkerCgroupLease& operator=(const WorkerCgroupLease&) = delete;
-    WorkerCgroupLease(WorkerCgroupLease&& other) noexcept : path(std::move(other.path)) {
+    WorkerCgroupLease(WorkerCgroupLease&& other) noexcept
+        : path(std::move(other.path)), tenant_path(std::move(other.tenant_path)) {
         other.path.clear();
     }
     WorkerCgroupLease& operator=(WorkerCgroupLease&& other) noexcept {
         if (this != &other) {
             release();
             path = std::move(other.path);
+            tenant_path = std::move(other.tenant_path);
             other.path.clear();
         }
         return *this;
@@ -37,10 +41,11 @@ struct WorkerCgroupLease {
     void release();
 };
 
-// Creates a unique per-worker leaf directory (<cgroup_root>/worker-<pid>-<seq>)
-// on Linux. Returns nullptr with *error set on non-Linux or mkdir failure.
+// A nonzero tenant limit places the worker leaf below the tenant's shared memory.max.
 std::shared_ptr<WorkerCgroupLease> create_worker_cgroup(const std::string& cgroup_root,
-                                                        std::string* error);
+                                                        std::string* error,
+                                                        const std::string& tenant = {},
+                                                        std::uint64_t hard_memory_bytes = 0);
 
 // Maps host.json isolation.required feature strings to
 // CAPSID_SANDBOX_FEATURE_* bitflags. Returns false on unrecognized names.

@@ -143,9 +143,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CAPSID_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(CAPSID_CAPABILITY_MANIFEST
-    "${CMAKE_CURRENT_SOURCE_DIR}/docs/capability-manifest.json")
+    "${CMAKE_CURRENT_SOURCE_DIR}/docs/data/capability-manifest.json")
 set(CAPSID_LOCKED_IDENTITY_MANIFEST
-    "${CMAKE_CURRENT_SOURCE_DIR}/docs/txiki-upgrade-baseline.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/docs/data/txiki-upgrade-baseline.json"
     CACHE FILEPATH
     "Locked vendor/QuickJS manifest backing the bytecode-compatibility record")
 set_property(
@@ -317,7 +317,7 @@ include(cmake/build_tests.cmake)
 # --- Single generated build-identity source ---
 # One canonical record shared by capsid_runtime, capsid-worker and
 # capsid-bytecode-compile. Locked inputs come from
-# docs/txiki-upgrade-baseline.json; with CAPSID_BUILD_WORKER=ON the locked
+# docs/data/txiki-upgrade-baseline.json; with CAPSID_BUILD_WORKER=ON the locked
 # values are validated against the prepared overlay and any mismatch fails
 # the configure step.
 include(cmake/ComputeBuildIdentity.cmake)

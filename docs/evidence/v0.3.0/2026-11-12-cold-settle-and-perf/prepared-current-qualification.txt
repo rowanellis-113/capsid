@@ -1,47 +1,47 @@
-# v0.3.0 当前验收与兼容边界
+# v0.3.0 Current Qualification and Compatibility Boundaries
 
-更新时间：2026-11-12T13:47:52.639275+00:00。**v0.3.0 尚未完成全平台、完整资源及正式性能验收。** 本轮在父候选 `4e469b3` 上审校并准备冷启动测试采样前静置与 CI perf 前提修正。构建生成的身份文件和候选清单确定实际源码；本轮组件通过不代表新源码已完成完整组合。工作区 HEAD 仍为 `8028b88adff26cbc1abcb9a2fafce2ffc3d8090f`，未推送主分支、创建标签或发布。
+Update time: 2026-11-12T13:47:52.639275+00:00. **v0.3.0 is not yet completed with full platform coverage, complete resources, and formal performance qualification.** This round of work was reviewed on the parent candidate `4e469b3`, and preparations were made for cold start testing sampling, with corrections based on CI performance. The generated identity files and candidate list were determined to be the actual source code. The passing of this round does not mean that the new source code has completed the full integration. The workspace HEAD remains at `8028b88adff26cbc1abcb9a2fafce2ffc3d8090f`, with no push to the main branch, creation of tags, or release.
 
-## 全部要求及当前状态
+## All requirements and current status
 
-完整要求、状态和历史引用保存在[原始要求账本](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/requirements.json)和[更新前完整账本](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/goal-ledger-before.json)。下表保留 R1–R9；定向完成项仍须与最终组合对应。
+The complete requirements, status, and historical references are preserved in [Original requirement ledger](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/requirements.json) and [Full ledger before update](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/goal-ledger-before.json) The following table retains R1–R9; the targeted completion items must still correspond to the final combination.
 
-| 要求 | 范围 | 状态 |
+| Requirements | Scope | Status |
 |---|---|---|
-| R1 | 标准字节流部分/未对齐 EOF、零 EOF backing、高 minimum 取消及 36 个延迟组合 | 定向要求完成 |
-| R2 | BigInt limb 边界、转换顺序、分配限制、独立回归及上游来源 | 定向要求完成 |
-| R3 | 真实 native fetch body 参数、released/detached/invalid view、全部 view/构造路径、重试/数据/owner/credit/退出、并发/context/abort/intrinsics | 组合验收进行中 |
-| R4 | 真实非零 C ABI response-body 限额经 Upgrade，known/unknown 长度及 below/equal/above、Default/BYOB、取消与回收 | 定向要求完成 |
-| R5 | 普通 fetch 元数据及 tee/clone/values/pipe 分支、资源与 reader 取消归属图 | 组合验收进行中 |
-| R6 | DefaultReader 精确 chunk 序列/时序、额度控制、Linux rich-JSON invalid IPC frame 根因 | 组合验收进行中 |
-| R7 | 历史 15 个失败组合、真实跳过前提、原始失败与 WPT/profile 证据 | 组合验收进行中 |
-| R8 | 干净 Debug/Release/Linux LTO/CI、依赖 instrumentation、fuzz、持续运行、正式性能/密度及四视口 | 尚未完成 |
-| R9 | 完成 R1–R8、冻结完整候选并执行最终组合接受；发布仍需授权 | 尚未完成 |
+| R1 | Standard byte stream section/Unaligned EOF, zero EOF backing, high minimum cancellation, and 36 delay combinations | Directional requirements to be completed |
+| R2 | BigInt limb boundaries, conversion order, allocation restrictions, independent regression tests, and upstream sources | Directional requirements to be completed |
+| R3 | Real native fetch body parameters, released/detached/invalid views, all views/construction paths, retries/data/owner/credit/exit, concurrency/context/abort/intrinsics | Combined qualification is in progress. |
+| R4 | The real non-zero C ABI response-body limit has been adjusted after Upgrade. The known/unknown length and the conditions of below/equal/above, Default/BYOB, cancellation, and recycling have been modified. | Directional requirements to be completed |
+| R5 | Normal fetch metadata and tee/clone/values/pipe branches, resources, and reader disassociation graph | Combined qualification is in progress. |
+| R6 | DefaultReader Accurate Chunk Sequence/Timing, Quota Control, Linux Rich-JSON Invalid IPC Frame Root Cause | Combined qualification is in progress. |
+| R7 | History: 15 failed combinations, actual skipped premises, original failures, and WPT/profile evidence | Combined qualification is in progress. |
+| R8 | Clean Debug/Release/Linux LTO/CI, dependencies: instrumentation, fuzz, continuous running, formal performance/density, and four viewports. | Not yet completed |
+| R9 | Complete R1–R8, freeze the complete candidate, and perform final combination acceptance; publication still requires authorization. | Not yet completed |
 
-## 本轮已验证修正
+## This round has been verified and corrected.
 
-冷启动工具在公开 C ABI 回收直接 worker 后，再回收自身收养的后代，成功样本须在清理完成后输出。真实 fork/clone 包装器随后 exec 原生 worker，覆盖 SIGINT、SIGTERM、正常输出、错误响应和超时。原断言继续在外围夹具清理之前检查整树。GCC ASan、Clang ASan/UBSan、Release 各通过原 7 项及全部 10 个后代场景，旧实现各被 10 个断言拒绝；新增两项正常场景各自保留 30 秒测试预算。
+The cold-start tool reclaims its adopted offspring after reclaiming the direct worker through the public C ABI. Successful samples must be output after cleanup is completed. The actual fork/clone wrapper then execs the native worker, overriding SIGINT, SIGTERM, normal output, error responses, and timeouts. The original assertion continues to check the entire tree before cleanup is performed. GCC ASan, Clang ASan/UBSan, and Release all pass the original 7 scenarios and all 10 offspring scenarios. The old implementation is rejected by 10 assertions; two new normal scenarios each have a 30-second testing budget.
 
-Clang 空闲 PSS 的映射对照中，默认一秒静置期间总增量 764 KiB，其中 680 KiB 落在 FakeStack 映射。同一 worker 保留默认 instrumentation、静置 20 秒后取得两次相等正 PSS。因此只为 Clang ASan 功能测试配置 20 秒采样前静置；原 100 秒 CTest、两次完全相等、最多 8 次采样、采样间隔及取消期限保留。Clang 原 7 项实际 65.7 秒，两项正常后代各 21.4 秒。关闭 FakeStack 的诊断对照不计验收，生产 cold 默认参数和正式测量协议保持原值。
+In the Clang idle PSS mapping, the default quiescence period of one second results in a total increment of 764 KiB, with 680 KiB falling into the FakeStack mapping. The same worker maintains the default instrumentation settings and achieves two equal positive PSS values after a 20-second quiescence period. Therefore, only a 20-second sampling period is configured for Clang ASan function testing. The original 100-second period is retained for CTest, with two completely equal results, a maximum of 8 samplings, sampling intervals, and cancellation deadlines. The original 7 items for Clang took 65.7 seconds, with two normal descendants each taking 21.4 seconds. The diagnosis comparison without FakeStack is not considered for qualification purposes, and the default parameters for production cold mode and the formal measurement protocol remain unchanged.
 
-三种构建的 4 个 CTest 均通过。临时 CI 的后置收集器因 unittest 进度点与 JSON 行交错而失败；原失败记录保留，独立复核恢复全部 10 行及正负控制，没有重写原结果。[三个构建审计](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/cold-three-profile-review.json)和[原始内存映射对照](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/fake-stack-mapping-review.json)可复核。
+All three builds of the 4 CTests have passed. The temporary CI's post-collector failed due to an intersection of unittest progress points with JSON lines; the original failure record was retained, and an independent review restored all 10 lines and the positive and negative controls. The original result was not rewritten. [Three Build Audits](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/cold-three-profile-review.json) and [Original Memory Mapping Comparison](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/fake-stack-mapping-review.json) Reviewable.
 
-真实 Ubuntu runner 上安装并选择实际 perf，四个软件计数器探测通过；构建真实 Host/worker 后，原 A/B 证据控制在原 600 秒预算内输出 PASS。CI 复用该已执行的 helper，完整 sanitizer 矩阵另保存原始场景 sidecar，测试选择和单项时限不变。这不是产品性能点。[实际 perf 前提](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/actual-perf-prerequisite.json)、[控制输出](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/actual-perf-controls.stdout.log)和[真实程序摘要](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/actual-perf-identity-fixtures.sha256)保留。
+On the actual Ubuntu runner, the actual perf is installed and selected. Four software counters are detected to pass. After building the actual Host/worker, the original A/B evidence is controlled to output PASS within the original 600-second budget. The CI reuses this executed helper, and the complete sanitizer matrix is saved separately from the original scenario sidecar. The test selection and individual time limits remain unchanged. This is not a product performance metric. [Actual performance assumptions](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/actual-perf-prerequisite.json), [Control Output](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/actual-perf-controls.stdout.log) and [Real Program Summary](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/actual-perf-identity-fixtures.sha256) Keep it.
 
-## 完整结果与未通过项
+## Complete results and failed items
 
-下列完整结果属于父源码 `63a3cc1`，不替代本轮新组合：Linux Release/LTO 完整 ALL 通过；未过滤 1110 项为 1105 通过、0 跳过、5 项原 WPT 差异。同源严格 workerd 171 项全部通过并取得版本化兼容接受，原 5 项差异与 4 项超时保留，ordinarySuitePassed 和 standardsConformanceClaimed 仍为 false。[完整接受记录](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/parent-linux-compatibility-acceptance.json)保留输入绑定。
+The following complete results belong to the parent source code `63a3cc1` and do not replace the new combinations of this round: Linux Release/LTO - All items passed; Unfiltered 1110 - Items for 1105 passed, 0 skipped, 5 - Items originally WPT differences. The same-origin strict workerd 171 - All items passed and obtained versioned compatibility acceptance. The differences from 5 and the timeouts retained for 4 result in ordinarySuitePassed and standardsConformanceClaimed still being false. [Complete acceptance record](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/parent-linux-compatibility-acceptance.json) Keep the input binding.
 
-父源码 UBSan 为 1009 通过、0 失败、5 个原声明跳过；9 项 fuzz、7×10000=70000 次及 27 个相关编译单元已审计。Alpine 3.24 原 Docker 发布配方的 9 项原生/包消费测试通过，3 个归档程序独立解析 ELF 后均无解释器或共享库依赖；这不等于完整 musl 全量或参考接受。完整原始归档及 SHA256 仍在此前日期目录和工作区保存，[此前完整审校历史](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/qualification-before.md)逐字节归档。
+Parent source code UBSan 1009 Pass 0 Failure, 5 Explanation of reasons skipped. 9 Item fuzz, 7 × 10000 = 70000 Secondary and 27 One related compilation unit has been audited. Alpine 3.24 The original Docker release recipe 9 The item native/package consumption test passed 3 All archived programs independently parse ELF, and they have no interpreter or shared library dependencies. This does not equal a complete full version of musl or a reference acceptance. The complete original archive and SHA256 hash are still stored in the previous date directory and workspace [Previous complete review history](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/qualification-before.md) Byte-by-byte archiving.
 
-父源码 ASan 1015 项中 1008 通过、1 失败、6 跳过，失败为取消冷启动后的僵尸后代；本轮已独立修正，尚需新组合完整验证。TSan 1003 项中 994 通过、3 失败、6 跳过，失败为 native_fetch_large_gzip 的辅助状态观测及 managed 的 native-reader-lifecycle、reader-scope 完整采集/清理；[TSan 原始审计](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/parent-tsan-review.json)未改写。另一个保留原源码、依赖构建、测试与时限的任务正在补采三项完整 sidecar。
+Parent source code ASan 1015 items: 1008 passed, 1 failed, 6 skipped. The failure was due to zombie offspring after canceling the cold start. This round has been independently corrected, and further verification with a new combination is required. TSan 1003 items: 994 passed, 3 failed, 6 skipped. The failure was due to the auxiliary state observation of native_fetch_large_gzip, as well as the complete collection/cleanup of managed native-reader-lifecycle and reader-scope. [TSan Original Audit](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/parent-tsan-review.json) No rewriting. Another task that retains the original source code, dependencies, testing, and timeline is currently collecting three complete sidecars.
 
-Windows 原 workerd 134 项为 133 通过、1 失败、0 跳过，失败发生在 pinned workerd 的 codec-supp-fragment-crc-late 源 EOF 观测。同输入、同二进制的 3 次复查各 31 场景通过，未当作修复；[逐次记录](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/windows-same-input-replays.json)保留。macOS 父候选 fa40606 曾完成 758 项、747 通过、11 个原声明跳过；63a3cc1 的本轮构建通过，临时采集器误调用 Ninja 导致测试未启动，已另行修正采集方式，原生成器与测试预算保留，等待真实完整结果。
+Windows original workerd 134 has passed for 133, failed for 1, and was skipped for 0. The failure occurred at the EOF observation of the pinned workerd's codec-supp-fragment-crc-late source. The same input and binary results were observed for 3 and 31, and this was not considered a fix. [Serialization](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/windows-same-input-replays.json) The macOS parent candidate fa40606 has completed 758 tasks, with 747 passed and 11 original declarations skipped. The build for 63a3cc1 in this round was successful, but a temporary collector mistakenly called Ninja, causing the test not to start. The collection method has been corrected, and the original generator and test budget are retained, pending the actual complete results.
 
-## 剩余执行与正式协议
+## Remaining execution and formal agreement
 
-保留实际运行中的父源码完整 Clang ASan/UBSan 与随后 TSan 诊断，不把旧二进制结果归为新候选。必须先解决上述 TSan 和 Windows 原参考失败，并完成当前源码原生平台、依赖 instrumentation、资源回收、时序、ABI/旧接口、分配故障及 1800 秒持续运行，再取得最终组合接受。
+Maintaining the integrity of the parent source code during actual operation, including Clang ASan/UBSan and subsequent TSan diagnostics. Old binary results should not be attributed to new candidates. It is necessary to resolve the aforementioned TSan and Windows original reference failures, and complete the native platform, dependency instrumentation, resource recycling, timing, ABI/old interfaces, allocation failures, and 1800-second continuous operation for the final combination acceptance.
 
-正式测量仍需同一安静会话的候选、v0.2.2 和 pinned workerd 对照及全部原始输入/输出。QPS 保持 64 并发；cold 保留原尺寸、轮次和 warm 50；密度保留 2048 MiB、全部后代 PSS、两次相等正读数与退出证据。已批准按池规模扩大密度预热并发，逐 worker 验证冷至少 1 次、热至少 100 次后采样，生产调度不变。[父候选三条正式命令输入核对](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/parent-formal-input-plan.json)属于准备，正式性能点仍为 0。
+For official measurements, it is still necessary to use the same candidates for quiet sessions, v0.2.2, and pinned workerd. All original input/output data should also be utilized. The QPS remains at the level specified in 64. The cold phase is maintained at its original size, iteration count, and warm phase parameters as defined in 50. The density is kept at the level specified in 2048 MiB. All subsequent PSS values, as well as twice equal positive read counts and exit evidence, are also taken into consideration. It has been approved to increase the concurrency based on the pool size. After verifying each worker at least 1 times for the cold phase, and at least 100 times for the warm phase, sampling can proceed. The production scheduling remains unchanged. [Parent candidate three formal command input verification](evidence/v0.3.0/2026-11-12-cold-settle-and-perf/parent-formal-input-plan.json) It belongs to preparation, and the formal performance point is still 0.
 
-1280/960/820/600 四视口已有历史真实截图，正式数据载入后须再次验收。全部 R1–R9 完成并与同一个最终候选绑定后才能宣布版本完成；不自动发布。
+The 1280/960/820/600 four-viewports already have historical real-time screenshots. Formal data loading requires another qualification process. The version can only be declared complete after all R1–R9 have been completed and bound to the same final candidate. It will not be automatically released.

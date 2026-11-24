@@ -6,7 +6,7 @@
 //
 // Thread model:
 //   - the io thread (owned by this object) runs a Boost.Beast acceptor and
-//     every client session, exactly like SingleWorkerServer;
+//     every client session (shared by managed mode and LocalDevHost);
 //   - the worker-response path is the §9.2 event sink: the pool's pump
 //     thread (the sole drainer of every executor's event queue) forwards
 //     events through a WorkerEventMailbox, which posts them onto this io

@@ -1,4 +1,4 @@
-// Binding v1 host compile pipeline (docs/binding-technical-design.md §2/§6):
+// Binding v1 host compile pipeline (docs/design/bindings-v1.md §2/§6):
 // the typed App binding request, the Manifest ∩ App effective compile with
 // static subset proofs, and the immutable per-generation snapshot the
 // worker spawn path and the Generation Identity both consume.
@@ -109,8 +109,8 @@ BindingSnapshotParseResult parse_bindings_snapshot(const std::string& json);
 bool build_binding_descriptor(const EffectiveBinding& binding, capsid_binding_descriptor* out);
 
 // Loads an already-compiled immutable Binding set into one worker. This is
-// the single Host-side spawn primitive used by managed, single-worker and
-// static-pool modes: every Binding is queued after spawn and before the App
+// the single Host-side spawn primitive used by both managed mode and
+// LocalDevHost: every Binding is queued after spawn and before the App
 // bundle, and an empty set is a true no-op (no Binding Runtime is created).
 bool load_effective_bindings_into_worker(capsid_worker* worker,
                                          const std::vector<EffectiveBinding>& bindings,

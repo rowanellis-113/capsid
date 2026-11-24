@@ -2,7 +2,7 @@
 
 All three benchmark producers are implemented. The [performance charts](https://rowanellis-113.github.io/capsid/)
 display source-bound observations, not benchmarks of the published prerelease.
-See [current performance data](../docs/performance-benchmarks.md) for the latest
+See [current performance data](../docs/reference/benchmarks.md) for the latest
 accepted session and the preserved earlier measurements.
 
 The normative [SPEC.md](SPEC.md) defines the protocol; [perf-evidence.md](perf-evidence.md)
@@ -33,7 +33,7 @@ for an old/dirty build.
 
 ## Source and Platform Prerequisites
 
-Use the [source-build guide](../docs/building.md) and exact pinned Node, Bun,
+Use the [source-build guide](../docs/guides/build-from-source.md) and exact pinned Node, Bun,
 Deno and workerd inputs (`node-jitless` runs the same pinned `node` binary with
 `--jitless`; `bun-jitless` runs the same pinned `bun` binary with
 `BUN_JSC_useJIT=0`; `deno` runs with `--allow-net=127.0.0.1 --no-prompt --no-config`). Actual process/PSS/Go/protocol
@@ -70,7 +70,7 @@ python3 tests/test_perf_archive.py
 python3 bench/prepare-perf-site.py --repo . --output /path/to/new-site-output
 ```
 
-At least 8 GiB of scratch space is recommended. Complete archives retain raw
+At least 14 GiB of scratch space is recommended. Complete archives retain raw
 samples, failure/search probes, discarded cold runs, exact programs, process and
 response evidence, dependency identities and checksums. No part is redacted,
 normalized or resealed to turn a failed run into success.

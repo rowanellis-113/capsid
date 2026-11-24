@@ -14,16 +14,45 @@ namespace {
 struct EvictionCandidate {
     std::shared_ptr<GenerationPool> pool;
     std::string tenant;
-    std::uint64_t bytes = 0;
     std::uint64_t last_active_at_ms = 0;
 };
 
 struct FleetMemoryState {
     std::uint64_t total_bytes = 0;
     std::unordered_map<std::string, std::uint64_t> tenant_bytes;
-    std::unordered_map<std::string, std::size_t> tenant_live_workers;
     std::vector<EvictionCandidate> candidates;
 };
+
+// Both eviction paths use every resident tenant to decide whether global LRU is allowed.
+std::pair<const EvictionCandidate*, const char*>
+select_victim(const FleetMemoryState& state, std::uint64_t budget, const TenancyConfig& tenancy) {
+    if (state.candidates.empty()) {
+        return {nullptr, nullptr};
+    }
+    const auto fair_share = std::max<std::uint64_t>(1, budget / state.tenant_bytes.size());
+    std::unordered_map<std::string, double> overshare;
+    for (const auto& [tenant, used] : state.tenant_bytes) {
+        const auto share = std::max(fair_share, tenancy.quota_for(tenant).min_soft_memory_bytes);
+        if (used > share) {
+            overshare.emplace(tenant, static_cast<double>(used) / static_cast<double>(share));
+        }
+    }
+    const EvictionCandidate* best = nullptr;
+    double best_ratio = 0;
+    for (const auto& candidate : state.candidates) {
+        const auto it = overshare.find(candidate.tenant);
+        if (!overshare.empty() && it == overshare.end()) {
+            continue;
+        }
+        const double ratio = it == overshare.end() ? 0 : it->second;
+        if (!best || ratio > best_ratio ||
+            (ratio == best_ratio && candidate.last_active_at_ms < best->last_active_at_ms)) {
+            best = &candidate;
+            best_ratio = ratio;
+        }
+    }
+    return {best, overshare.empty() ? "global_lru" : "tenant_overshare"};
+}
 
 bool worker_past_residency(const GenerationPool::WorkerSlotSnapshot& w,
                            std::uint64_t min_residency_ms, std::uint64_t now_ms) {
@@ -49,6 +78,21 @@ std::uint64_t watermark_bytes(std::uint64_t limit_bytes, std::uint32_t percent) 
     return (limit_bytes / 100ULL) * percent;
 }
 
+std::uint64_t sat_add_u64(std::uint64_t a, std::uint64_t b) noexcept {
+    const std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
+    return (a > max - b) ? max : (a + b);
+}
+
+std::size_t count_evictable(const std::vector<GenerationPool::WorkerSlotSnapshot>& workers) {
+    std::size_t count = 0;
+    for (const auto& w : workers) {
+        if (w.evictable) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 } // namespace
 
 GlobalEvictionCoordinator::GlobalEvictionCoordinator(MemoryBudgetConfig memory,
@@ -57,7 +101,11 @@ GlobalEvictionCoordinator::GlobalEvictionCoordinator(MemoryBudgetConfig memory,
                                                      MemorySampler* sampler,
                                                      MetricsRegistry* metrics)
     : memory_(std::move(memory)), tenancy_(std::move(tenancy)), ledger_(ledger), sampler_(sampler),
-      metrics_(metrics) {}
+      metrics_(metrics) {
+    if (sampler_ != nullptr && memory_.check_interval_ms > 0) {
+        sampler_->set_max_age_ms(memory_.check_interval_ms);
+    }
+}
 
 GlobalEvictionCoordinator::~GlobalEvictionCoordinator() { stop_and_join(); }
 
@@ -68,7 +116,7 @@ void GlobalEvictionCoordinator::register_pool(const std::shared_ptr<GenerationPo
     std::lock_guard<std::mutex> lock(registry_mutex_);
     for (auto it = pools_.begin(); it != pools_.end();) {
         const auto existing = it->lock();
-        if (!existing || existing->state() != GenerationPool::State::kActive) {
+        if (!existing || existing->state() == GenerationPool::State::kDead) {
             it = pools_.erase(it);
             continue;
         }
@@ -95,98 +143,247 @@ void GlobalEvictionCoordinator::unregister_pool(const GenerationPool* pool) {
     }
 }
 
-TenantQuotaConfig GlobalEvictionCoordinator::resolve_tenant_quota(std::string_view tenant) const {
-    TenantQuotaConfig resolved = tenancy_.default_quota;
-    const auto found = tenancy_.overrides.find(std::string(tenant));
-    if (found != tenancy_.overrides.end()) {
-        if (found->second.max_workers != 0) {
-            resolved.max_workers = found->second.max_workers;
-        }
-        if (found->second.min_soft_memory_bytes != 0) {
-            resolved.min_soft_memory_bytes = found->second.min_soft_memory_bytes;
-        }
-        if (found->second.hard_memory_bytes != 0) {
-            resolved.hard_memory_bytes = found->second.hard_memory_bytes;
-        }
-    }
-    return resolved;
-}
-
 std::vector<std::shared_ptr<GenerationPool>>
-GlobalEvictionCoordinator::snapshot_active_pools() const {
-    std::vector<std::shared_ptr<GenerationPool>> active;
+GlobalEvictionCoordinator::snapshot_tracked_pools() const {
+    std::vector<std::shared_ptr<GenerationPool>> tracked;
     std::lock_guard<std::mutex> lock(registry_mutex_);
     for (auto it = pools_.begin(); it != pools_.end();) {
         auto pool = it->lock();
-        if (!pool || pool->state() != GenerationPool::State::kActive) {
+        if (!pool || pool->state() == GenerationPool::State::kDead) {
             it = pools_.erase(it);
             continue;
         }
-        active.push_back(std::move(pool));
+        tracked.push_back(std::move(pool));
         ++it;
     }
-    return active;
+    return tracked;
 }
 
-bool GlobalEvictionCoordinator::check_deploy_quota(std::string_view application,
-                                                   std::string_view tenant,
-                                                   std::uint32_t new_min_ready,
-                                                   std::string* error) {
-    const std::string effective_tenant(tenant.empty() ? application : tenant);
-    const TenantQuotaConfig quota = resolve_tenant_quota(effective_tenant);
-    if (quota.max_workers == 0) {
+bool GlobalEvictionCoordinator::has_tenant_memory_limits() const {
+    if (tenancy_.default_quota.hard_memory_bytes > 0) {
         return true;
     }
-    std::lock_guard<std::mutex> lock(eviction_mutex_);
-    const auto pools = snapshot_active_pools();
-    std::uint64_t other_committed = 0;
-    std::uint64_t other_live = 0;
-    std::vector<std::shared_ptr<GenerationPool>> tenant_pools;
-    for (const auto& pool : pools) {
-        if (pool->application_id() == application) {
-            continue;
-        }
-        if (pool->tenant_id() == effective_tenant) {
-            other_committed += pool->min_ready();
-            other_live += pool->active_or_spawning_workers();
-            tenant_pools.push_back(pool);
+    for (const auto& [tid, q] : tenancy_.overrides) {
+        (void)tid;
+        if (q.hard_memory_bytes > 0) {
+            return true;
         }
     }
-    if (other_committed + new_min_ready > quota.max_workers) {
-        if (metrics_ != nullptr) {
-            metrics_->count_pool_rejection(std::string(application), effective_tenant,
-                                           "tenant_max_workers");
+    return false;
+}
+
+bool GlobalEvictionCoordinator::check_or_reserve_deploy_quota_locked(
+    std::string_view application, std::string_view tenant, std::uint32_t new_min_ready,
+    std::uint32_t warm_workers, bool record_reservation, std::string* error) {
+    const std::string effective_tenant(tenant.empty() ? application : tenant);
+    const TenantQuotaConfig quota = tenancy_.quota_for(effective_tenant);
+    if (warm_workers == 0 && new_min_ready == 0) {
+        if (record_reservation) {
+            pending_deploys_[std::string(application)] =
+                PendingDeploy{effective_tenant, warm_workers, new_min_ready};
         }
-        if (error != nullptr) {
-            *error = "tenant maxWorkers quota exceeded";
-        }
-        return false;
+        return true;
     }
-    const std::uint64_t needed_slots = std::max<std::uint32_t>(1U, new_min_ready);
-    while (other_live + needed_slots > quota.max_workers) {
+    const bool force_sample = !monitor_active_.load(std::memory_order_acquire);
+
+    const auto collect = [&](const std::unordered_set<std::int64_t>& skip_pids,
+                             std::vector<std::shared_ptr<GenerationPool>>* tenant_active_pools,
+                             std::uint64_t* tenant_bytes, std::uint64_t* other_committed,
+                             std::uint64_t* other_live) {
+        tenant_active_pools->clear();
+        *tenant_bytes = 0;
+        *other_committed = 0;
+        *other_live = 0;
+        for (const auto& pool : snapshot_tracked_pools()) {
+            if (pool->tenant_id() != effective_tenant) {
+                continue;
+            }
+            const bool is_active = (pool->state() == GenerationPool::State::kActive);
+            if (is_active) {
+                tenant_active_pools->push_back(pool);
+                if (pool->application_id() != application) {
+                    *other_committed += pool->min_ready();
+                    *other_live += pool->active_or_spawning_workers();
+                }
+            }
+            if (sampler_ != nullptr) {
+                for (const auto& w : pool->snapshot_workers()) {
+                    if (w.pid > 0 && skip_pids.count(w.pid) != 0) {
+                        continue;
+                    }
+                    const std::uint64_t b =
+                        sampler_->sample_worker_bytes(w.pid, w.cgroup_path, force_sample);
+                    *tenant_bytes = sat_add_u64(*tenant_bytes, b);
+                }
+            }
+        }
+        for (const auto& [pending_app, pd] : pending_deploys_) {
+            if (pending_app != application && pd.tenant == effective_tenant) {
+                *other_committed += pd.min_ready;
+                *other_live += std::max<std::uint64_t>(pd.warm_workers, pd.min_ready);
+            }
+        }
+    };
+
+    const auto evict_oldest_idle_sibling =
+        [&](const std::vector<std::shared_ptr<GenerationPool>>& tenant_active_pools,
+            bool exclude_requester_app, std::int64_t* evicted_pid_out) -> bool {
+        const std::uint64_t now = steady_now_ms();
         std::shared_ptr<GenerationPool> best_pool;
         std::uint64_t best_active_at = std::numeric_limits<std::uint64_t>::max();
-        const std::uint64_t now = steady_now_ms();
-        for (const auto& pool : tenant_pools) {
+        for (const auto& pool : tenant_active_pools) {
+            if (exclude_requester_app && pool->application_id() == application) {
+                continue;
+            }
             const auto workers = pool->snapshot_workers();
-            if (workers.size() <= pool->min_ready()) {
+            if (count_evictable(workers) <= pool->min_ready()) {
                 continue;
             }
             for (const auto& w : workers) {
-                if (w.idle && worker_past_residency(w, memory_.min_residency_ms, now) &&
+                if (w.evictable && w.idle &&
+                    worker_past_residency(w, memory_.min_residency_ms, now) &&
                     w.last_active_at_ms < best_active_at) {
                     best_active_at = w.last_active_at_ms;
                     best_pool = pool;
                 }
             }
         }
-        if (!best_pool ||
-            !best_pool->evict_idle_worker(memory_.min_residency_ms, "tenant_quota_swap")) {
-            break;
+        return best_pool &&
+               best_pool->evict_idle_worker(memory_.min_residency_ms, "tenant_quota_swap",
+                                            /*require_elastic_held=*/false, evicted_pid_out);
+    };
+
+    if (quota.hard_memory_bytes > 0 && warm_workers > 0) {
+        std::unordered_set<std::int64_t> evicted_pids;
+        std::vector<std::shared_ptr<GenerationPool>> tenant_active_pools;
+        std::uint64_t tenant_bytes = 0;
+        std::uint64_t other_committed = 0;
+        std::uint64_t other_live = 0;
+        for (;;) {
+            collect(evicted_pids, &tenant_active_pools, &tenant_bytes, &other_committed,
+                    &other_live);
+            if (tenant_bytes < quota.hard_memory_bytes) {
+                break;
+            }
+            std::int64_t evicted_pid = 0;
+            if (!evict_oldest_idle_sibling(tenant_active_pools, /*exclude_requester_app=*/false,
+                                           &evicted_pid)) {
+                if (metrics_ != nullptr) {
+                    metrics_->count_pool_rejection(std::string(application), effective_tenant,
+                                                   "tenant_hard_memory");
+                }
+                if (error != nullptr) {
+                    *error = "tenant hardMemory quota exceeded";
+                }
+                return false;
+            }
+            if (evicted_pid > 0) {
+                evicted_pids.insert(evicted_pid);
+            }
         }
-        --other_live;
+    }
+
+    if (quota.max_workers > 0) {
+        std::unordered_set<std::int64_t> empty_skip;
+        std::vector<std::shared_ptr<GenerationPool>> tenant_active_pools;
+        std::uint64_t tenant_bytes = 0;
+        std::uint64_t other_committed = 0;
+        std::uint64_t other_live = 0;
+        collect(empty_skip, &tenant_active_pools, &tenant_bytes, &other_committed, &other_live);
+        if (other_committed + new_min_ready > quota.max_workers) {
+            if (metrics_ != nullptr) {
+                metrics_->count_pool_rejection(std::string(application), effective_tenant,
+                                               "tenant_max_workers");
+            }
+            if (error != nullptr) {
+                *error = "tenant maxWorkers quota exceeded";
+            }
+            return false;
+        }
+        const std::uint64_t needed_slots = std::max<std::uint64_t>(warm_workers, new_min_ready);
+        while (other_live + needed_slots > quota.max_workers) {
+            std::int64_t evicted_pid = 0;
+            if (!evict_oldest_idle_sibling(tenant_active_pools, /*exclude_requester_app=*/true,
+                                           &evicted_pid)) {
+                break;
+            }
+            --other_live;
+        }
+        if (other_live + needed_slots > quota.max_workers) {
+            if (metrics_ != nullptr) {
+                metrics_->count_pool_rejection(std::string(application), effective_tenant,
+                                               "tenant_max_workers");
+            }
+            if (error != nullptr) {
+                *error = "tenant maxWorkers quota exceeded";
+            }
+            return false;
+        }
+    }
+
+    if (record_reservation) {
+        pending_deploys_[std::string(application)] =
+            PendingDeploy{effective_tenant, warm_workers, new_min_ready};
     }
     return true;
+}
+
+bool GlobalEvictionCoordinator::check_deploy_quota(std::string_view application,
+                                                   std::string_view tenant,
+                                                   std::uint32_t new_min_ready,
+                                                   std::string* error) {
+    std::lock_guard<std::mutex> lock(eviction_mutex_);
+    return check_or_reserve_deploy_quota_locked(application, tenant, new_min_ready,
+                                                std::max<std::uint32_t>(1U, new_min_ready),
+                                                /*record_reservation=*/false, error);
+}
+
+bool GlobalEvictionCoordinator::reserve_deploy_quota(std::string_view application,
+                                                     std::string_view tenant,
+                                                     std::uint32_t new_min_ready,
+                                                     std::uint32_t warm_workers,
+                                                     std::string* error) {
+    std::lock_guard<std::mutex> lock(eviction_mutex_);
+    return check_or_reserve_deploy_quota_locked(application, tenant, new_min_ready, warm_workers,
+                                                /*record_reservation=*/true, error);
+}
+
+void GlobalEvictionCoordinator::release_deploy_quota(std::string_view application) {
+    std::lock_guard<std::mutex> lock(eviction_mutex_);
+    pending_deploys_.erase(std::string(application));
+}
+
+bool GlobalEvictionCoordinator::evict_one_elastic_locked() {
+    const auto pools = snapshot_tracked_pools();
+    const std::uint64_t now = steady_now_ms();
+    FleetMemoryState state;
+    for (const auto& pool : pools) {
+        const auto workers = pool->snapshot_workers();
+        const std::string pool_tenant(pool->tenant_id());
+        const bool can_evict_pool = pool->state() == GenerationPool::State::kActive &&
+                                    count_evictable(workers) > pool->min_ready();
+        for (const auto& w : workers) {
+            const std::uint64_t b = sampler_ != nullptr
+                                        ? sampler_->sample_worker_bytes(w.pid, w.cgroup_path, false)
+                                        : 0;
+            state.tenant_bytes[pool_tenant] = sat_add_u64(state.tenant_bytes[pool_tenant], b);
+            state.total_bytes = sat_add_u64(state.total_bytes, b);
+            if (can_evict_pool && w.evictable && w.idle &&
+                worker_past_residency(w, memory_.min_residency_ms, now)) {
+                state.candidates.push_back(
+                    EvictionCandidate{pool, pool_tenant, w.last_active_at_ms});
+            }
+        }
+    }
+    const auto budget =
+        memory_.configured && memory_.limit_bytes ? memory_.limit_bytes : state.total_bytes;
+    const auto [victim, reason] = select_victim(state, budget, tenancy_);
+    return victim && victim->pool->evict_idle_worker(memory_.min_residency_ms, reason);
+}
+
+bool GlobalEvictionCoordinator::reclaim_one_idle_elastic() {
+    std::lock_guard<std::mutex> lock(eviction_mutex_);
+    return evict_one_elastic_locked();
 }
 
 bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* requester,
@@ -200,15 +397,17 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
     std::lock_guard<std::mutex> lock(eviction_mutex_);
     const std::string app(requester->application_id());
     const std::string tenant(requester->tenant_id());
-    const TenantQuotaConfig quota = resolve_tenant_quota(tenant);
+    const TenantQuotaConfig quota = tenancy_.quota_for(tenant);
+    const bool force_sample = !monitor_active_.load(std::memory_order_acquire);
 
     const auto collect_tenant_state =
-        [&](std::vector<std::shared_ptr<GenerationPool>>* tenant_pools,
+        [&](const std::unordered_set<std::int64_t>& skip_pids,
+            std::vector<std::shared_ptr<GenerationPool>>* tenant_pools,
             std::size_t* tenant_active_workers, std::uint64_t* tenant_bytes) {
             tenant_pools->clear();
             *tenant_active_workers = 0;
             *tenant_bytes = 0;
-            const auto pools = snapshot_active_pools();
+            const auto pools = snapshot_tracked_pools();
             bool saw_requester = false;
             for (const auto& pool : pools) {
                 if (pool.get() == requester) {
@@ -217,11 +416,19 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
                 if (pool->tenant_id() != tenant) {
                     continue;
                 }
-                tenant_pools->push_back(pool);
-                *tenant_active_workers += pool->active_or_spawning_workers();
+                const bool is_active = (pool->state() == GenerationPool::State::kActive);
+                if (is_active) {
+                    tenant_pools->push_back(pool);
+                    *tenant_active_workers += pool->active_or_spawning_workers();
+                }
                 if (sampler_ != nullptr) {
                     for (const auto& w : pool->snapshot_workers()) {
-                        *tenant_bytes += sampler_->sample_worker_bytes(w.pid, w.cgroup_path, false);
+                        if (w.pid > 0 && skip_pids.count(w.pid) != 0) {
+                            continue;
+                        }
+                        *tenant_bytes = sat_add_u64(
+                            *tenant_bytes,
+                            sampler_->sample_worker_bytes(w.pid, w.cgroup_path, force_sample));
                     }
                 }
             }
@@ -229,24 +436,41 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
                 *tenant_active_workers += requester->active_or_spawning_workers();
                 if (sampler_ != nullptr) {
                     for (const auto& w : requester->snapshot_workers()) {
-                        *tenant_bytes += sampler_->sample_worker_bytes(w.pid, w.cgroup_path, false);
+                        if (w.pid > 0 && skip_pids.count(w.pid) != 0) {
+                            continue;
+                        }
+                        *tenant_bytes = sat_add_u64(
+                            *tenant_bytes,
+                            sampler_->sample_worker_bytes(w.pid, w.cgroup_path, force_sample));
                     }
+                }
+            }
+            for (const auto& [pending_app, pd] : pending_deploys_) {
+                (void)pending_app;
+                if (pd.tenant == tenant) {
+                    *tenant_active_workers +=
+                        std::max<std::uint64_t>(pd.warm_workers, pd.min_ready);
                 }
             }
         };
 
     const auto try_evict_within_tenant =
-        [&](const std::vector<std::shared_ptr<GenerationPool>>& tenant_pools) -> bool {
+        [&](const std::vector<std::shared_ptr<GenerationPool>>& tenant_pools,
+            std::int64_t* evicted_pid_out) -> bool {
         const std::uint64_t now = steady_now_ms();
         std::shared_ptr<GenerationPool> best_pool;
         std::uint64_t best_active_at = std::numeric_limits<std::uint64_t>::max();
         for (const auto& pool : tenant_pools) {
+            if (pool->state() != GenerationPool::State::kActive) {
+                continue;
+            }
             const auto workers = pool->snapshot_workers();
-            if (workers.size() <= pool->min_ready()) {
+            if (count_evictable(workers) <= pool->min_ready()) {
                 continue;
             }
             for (const auto& w : workers) {
-                if (w.idle && worker_past_residency(w, memory_.min_residency_ms, now) &&
+                if (w.evictable && w.idle &&
+                    worker_past_residency(w, memory_.min_residency_ms, now) &&
                     w.last_active_at_ms < best_active_at) {
                     best_active_at = w.last_active_at_ms;
                     best_pool = pool;
@@ -254,24 +478,30 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
             }
         }
         return best_pool &&
-               best_pool->evict_idle_worker(memory_.min_residency_ms, "tenant_quota_swap");
+               best_pool->evict_idle_worker(memory_.min_residency_ms, "tenant_quota_swap",
+                                            /*require_elastic_held=*/false, evicted_pid_out);
     };
 
     // 1. Tenant hardMemory quota check (with synchronous sibling idle swap).
     if (quota.hard_memory_bytes > 0) {
+        std::unordered_set<std::int64_t> evicted_pids;
         std::vector<std::shared_ptr<GenerationPool>> tenant_pools;
         std::size_t tenant_workers = 0;
         std::uint64_t tenant_bytes = 0;
         for (;;) {
-            collect_tenant_state(&tenant_pools, &tenant_workers, &tenant_bytes);
+            collect_tenant_state(evicted_pids, &tenant_pools, &tenant_workers, &tenant_bytes);
             if (tenant_bytes < quota.hard_memory_bytes) {
                 break;
             }
-            if (!try_evict_within_tenant(tenant_pools)) {
+            std::int64_t evicted_pid = 0;
+            if (!try_evict_within_tenant(tenant_pools, &evicted_pid)) {
                 if (rejection_reason != nullptr) {
                     *rejection_reason = "tenant_hard_memory";
                 }
                 return false;
+            }
+            if (evicted_pid > 0) {
+                evicted_pids.insert(evicted_pid);
             }
         }
     }
@@ -279,15 +509,16 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
     // 2. Tenant maxWorkers quota check (note requester->active_or_spawning_workers() already
     // includes +1 for the pending spawn slot claimed in request_scale_out).
     if (quota.max_workers > 0) {
+        std::unordered_set<std::int64_t> empty_skip;
         std::vector<std::shared_ptr<GenerationPool>> tenant_pools;
         std::size_t tenant_workers = 0;
         std::uint64_t tenant_bytes = 0;
         for (;;) {
-            collect_tenant_state(&tenant_pools, &tenant_workers, &tenant_bytes);
+            collect_tenant_state(empty_skip, &tenant_pools, &tenant_workers, &tenant_bytes);
             if (tenant_workers <= quota.max_workers) {
                 break;
             }
-            if (!try_evict_within_tenant(tenant_pools)) {
+            if (!try_evict_within_tenant(tenant_pools, nullptr)) {
                 if (rejection_reason != nullptr) {
                     *rejection_reason = "tenant_max_workers";
                 }
@@ -299,12 +530,13 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
     // 3. Global memory budget check (run watermark eviction if >= high watermark, refuse if
     // still >= limit_bytes).
     if (memory_.configured && memory_.limit_bytes > 0) {
-        (void)run_eviction_cycle_locked(/*refresh_samples=*/false, /*require_elastic_held=*/false);
+        (void)run_eviction_cycle_locked(force_sample);
         std::uint64_t total_bytes = 0;
         if (sampler_ != nullptr) {
-            for (const auto& pool : snapshot_active_pools()) {
+            for (const auto& pool : snapshot_tracked_pools()) {
                 for (const auto& w : pool->snapshot_workers()) {
-                    total_bytes += sampler_->sample_worker_bytes(w.pid, w.cgroup_path, false);
+                    total_bytes = sat_add_u64(total_bytes, sampler_->sample_worker_bytes(
+                                                               w.pid, w.cgroup_path, force_sample));
                 }
             }
         }
@@ -316,89 +548,11 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
         }
     }
 
-    // 4. Global elastic worker-slot ledger check (evict an elastic idle worker on contention).
+    // 4. Global elastic worker-slot ledger check (evict an idle worker above
+    // minReady on contention).
     if (ledger_ != nullptr && !ledger_->try_acquire_elastic(app)) {
-        // Attempt two-phase eviction (tenant_overshare, then global_lru) over elastic_held
-        // idle workers so an elastic ledger slot becomes available synchronously.
-        const auto evict_one_elastic = [&]() -> bool {
-            const auto pools = snapshot_active_pools();
-            const std::uint64_t now = steady_now_ms();
-            std::unordered_map<std::string, std::uint64_t> tenant_bytes;
-            std::unordered_map<std::string, std::size_t> tenant_live;
-            std::vector<EvictionCandidate> candidates;
-            std::uint64_t total_bytes = 0;
-            for (const auto& pool : pools) {
-                const auto workers = pool->snapshot_workers();
-                const std::string pool_tenant(pool->tenant_id());
-                tenant_live[pool_tenant] += workers.size();
-                const bool can_evict_pool = workers.size() > pool->min_ready();
-                for (const auto& w : workers) {
-                    const std::uint64_t b =
-                        sampler_ != nullptr
-                            ? sampler_->sample_worker_bytes(w.pid, w.cgroup_path, false)
-                            : 0;
-                    tenant_bytes[pool_tenant] += b;
-                    total_bytes += b;
-                    if (can_evict_pool && w.idle && w.elastic_held &&
-                        worker_past_residency(w, memory_.min_residency_ms, now)) {
-                        candidates.push_back(
-                            EvictionCandidate{pool, pool_tenant, b, w.last_active_at_ms});
-                    }
-                }
-            }
-            if (candidates.empty()) {
-                return false;
-            }
-            std::size_t active_tenants = 0;
-            for (const auto& [tid, live] : tenant_live) {
-                (void)tid;
-                if (live > 0) {
-                    ++active_tenants;
-                }
-            }
-            const std::uint64_t budget =
-                (memory_.configured && memory_.limit_bytes > 0) ? memory_.limit_bytes : total_bytes;
-            const std::uint64_t fair_share =
-                active_tenants > 0 ? std::max<std::uint64_t>(1ULL, budget / active_tenants) : 1ULL;
-
-            std::string chosen_reason = "global_lru";
-            const EvictionCandidate* chosen = nullptr;
-            if (budget > 0) {
-                double max_ratio = 1.0;
-                for (const auto& c : candidates) {
-                    const TenantQuotaConfig q = resolve_tenant_quota(c.tenant);
-                    const std::uint64_t soft_share =
-                        std::max<std::uint64_t>(fair_share, q.min_soft_memory_bytes);
-                    const std::uint64_t used = tenant_bytes[c.tenant];
-                    if (used <= soft_share) {
-                        continue;
-                    }
-                    const double ratio =
-                        static_cast<double>(used) /
-                        static_cast<double>(std::max<std::uint64_t>(1ULL, soft_share));
-                    if (ratio > max_ratio ||
-                        (ratio == max_ratio &&
-                         (chosen == nullptr || c.last_active_at_ms < chosen->last_active_at_ms))) {
-                        max_ratio = ratio;
-                        chosen = &c;
-                        chosen_reason = "tenant_overshare";
-                    }
-                }
-            }
-            if (chosen == nullptr) {
-                for (const auto& c : candidates) {
-                    if (chosen == nullptr || c.last_active_at_ms < chosen->last_active_at_ms) {
-                        chosen = &c;
-                    }
-                }
-            }
-            return chosen != nullptr &&
-                   chosen->pool->evict_idle_worker(memory_.min_residency_ms, chosen_reason,
-                                                   /*require_elastic_held=*/true);
-        };
-
         for (;;) {
-            if (!evict_one_elastic()) {
+            if (!evict_one_elastic_locked()) {
                 break;
             }
             if (ledger_->try_acquire_elastic(app)) {
@@ -416,11 +570,10 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
 
 std::size_t GlobalEvictionCoordinator::run_eviction_cycle(bool refresh_samples) {
     std::lock_guard<std::mutex> lock(eviction_mutex_);
-    return run_eviction_cycle_locked(refresh_samples, /*require_elastic_held=*/false);
+    return run_eviction_cycle_locked(refresh_samples);
 }
 
-std::size_t GlobalEvictionCoordinator::run_eviction_cycle_locked(bool refresh_samples,
-                                                                 bool require_elastic_held) {
+std::size_t GlobalEvictionCoordinator::run_eviction_cycle_locked(bool refresh_samples) {
     if (!memory_.configured || memory_.limit_bytes == 0 || sampler_ == nullptr) {
         return 0;
     }
@@ -429,29 +582,43 @@ std::size_t GlobalEvictionCoordinator::run_eviction_cycle_locked(bool refresh_sa
     const std::uint64_t low_bytes =
         watermark_bytes(memory_.limit_bytes, memory_.low_watermark_percent);
 
+    if (refresh_samples) {
+        recently_evicted_pids_.clear();
+    }
     const auto gather_state = [&](bool force_refresh) -> FleetMemoryState {
         FleetMemoryState state;
-        const auto pools = snapshot_active_pools();
+        const auto pools = snapshot_tracked_pools();
         const std::uint64_t now = steady_now_ms();
         std::unordered_set<std::int64_t> live_pids;
         for (const auto& pool : pools) {
             const auto workers = pool->snapshot_workers();
             const std::string tenant(pool->tenant_id());
-            state.tenant_live_workers[tenant] += workers.size();
-            const bool pool_above_min = workers.size() > pool->min_ready();
+            const bool pool_can_evict = pool->state() == GenerationPool::State::kActive &&
+                                        count_evictable(workers) > pool->min_ready();
             for (const auto& w : workers) {
                 if (w.pid > 0) {
                     live_pids.insert(w.pid);
                 }
+                // An async victim still belongs to its tenant until the process exits.
                 const std::uint64_t bytes =
                     sampler_->sample_worker_bytes(w.pid, w.cgroup_path, force_refresh);
-                state.total_bytes += bytes;
-                state.tenant_bytes[tenant] += bytes;
-                if (pool_above_min && w.idle && (!require_elastic_held || w.elastic_held) &&
+                state.tenant_bytes[tenant] = sat_add_u64(state.tenant_bytes[tenant], bytes);
+                if (w.pid > 0 && recently_evicted_pids_.count(w.pid) != 0) {
+                    continue; // Its reclaim is already credited toward the host's low watermark.
+                }
+                state.total_bytes = sat_add_u64(state.total_bytes, bytes);
+                if (pool_can_evict && w.evictable && w.idle &&
                     worker_past_residency(w, memory_.min_residency_ms, now)) {
                     state.candidates.push_back(
-                        EvictionCandidate{pool, tenant, bytes, w.last_active_at_ms});
+                        EvictionCandidate{pool, tenant, w.last_active_at_ms});
                 }
+            }
+        }
+        for (auto it = recently_evicted_pids_.begin(); it != recently_evicted_pids_.end();) {
+            if (live_pids.count(*it) == 0) {
+                it = recently_evicted_pids_.erase(it);
+            } else {
+                ++it;
             }
         }
         sampler_->prune_pids(live_pids);
@@ -465,67 +632,23 @@ std::size_t GlobalEvictionCoordinator::run_eviction_cycle_locked(bool refresh_sa
 
     std::size_t evicted_count = 0;
     while (state.total_bytes > low_bytes && !state.candidates.empty()) {
-        std::size_t active_tenants = 0;
-        for (const auto& [tid, live] : state.tenant_live_workers) {
-            (void)tid;
-            if (live > 0) {
-                ++active_tenants;
-            }
-        }
-        const std::uint64_t fair_share =
-            active_tenants > 0 ? std::max<std::uint64_t>(1ULL, memory_.limit_bytes / active_tenants)
-                               : memory_.limit_bytes;
-
-        // Phase 1: tenant_overshare — select the overshared tenant with the largest
-        // (tenant_bytes / soft_share) ratio that still has an evictable idle worker, and
-        // evict its oldest-active idle worker.
-        std::string phase1_tenant;
-        double max_ratio = 1.0;
-        for (const auto& c : state.candidates) {
-            const TenantQuotaConfig q = resolve_tenant_quota(c.tenant);
-            const std::uint64_t soft_share =
-                std::max<std::uint64_t>(fair_share, q.min_soft_memory_bytes);
-            const std::uint64_t used = state.tenant_bytes[c.tenant];
-            if (used <= soft_share) {
-                continue;
-            }
-            const double ratio = static_cast<double>(used) /
-                                 static_cast<double>(std::max<std::uint64_t>(1ULL, soft_share));
-            if (phase1_tenant.empty() || ratio > max_ratio) {
-                max_ratio = ratio;
-                phase1_tenant = c.tenant;
-            }
-        }
-
-        const EvictionCandidate* victim = nullptr;
-        std::string reason;
-        if (!phase1_tenant.empty()) {
-            reason = "tenant_overshare";
-            for (const auto& c : state.candidates) {
-                if (c.tenant != phase1_tenant) {
-                    continue;
-                }
-                if (victim == nullptr || c.last_active_at_ms < victim->last_active_at_ms) {
-                    victim = &c;
-                }
-            }
-        } else {
-            // Phase 2: global_lru — all tenants with evictable workers are within soft share;
-            // fall back to global oldest last_active_at_ms across remaining idle workers.
-            reason = "global_lru";
-            for (const auto& c : state.candidates) {
-                if (victim == nullptr || c.last_active_at_ms < victim->last_active_at_ms) {
-                    victim = &c;
-                }
-            }
-        }
-
+        const auto [victim, reason] = select_victim(state, memory_.limit_bytes, tenancy_);
         if (victim == nullptr) {
             break;
         }
-        if (!victim->pool->evict_idle_worker(memory_.min_residency_ms, reason,
-                                             require_elastic_held)) {
-            break;
+        std::int64_t evicted_pid = 0;
+        if (!victim->pool->evict_idle_worker(memory_.min_residency_ms, reason, false,
+                                             &evicted_pid)) {
+            GenerationPool* failed_pool = victim->pool.get();
+            state.candidates.erase(std::remove_if(state.candidates.begin(), state.candidates.end(),
+                                                  [failed_pool](const EvictionCandidate& c) {
+                                                      return c.pool.get() == failed_pool;
+                                                  }),
+                                   state.candidates.end());
+            continue;
+        }
+        if (evicted_pid > 0) {
+            recently_evicted_pids_.insert(evicted_pid);
         }
         ++evicted_count;
         // Re-evaluate from sampler cache (zero extra procfs syscalls) so per-pool minReady
@@ -537,7 +660,9 @@ std::size_t GlobalEvictionCoordinator::run_eviction_cycle_locked(bool refresh_sa
 }
 
 void GlobalEvictionCoordinator::start() {
-    if (!memory_.configured || memory_.limit_bytes == 0 || memory_.check_interval_ms == 0) {
+    const bool monitor_global = memory_.configured && memory_.limit_bytes > 0;
+    const bool monitor_tenant = has_tenant_memory_limits();
+    if ((!monitor_global && !monitor_tenant) || memory_.check_interval_ms == 0) {
         return;
     }
     std::lock_guard<std::mutex> lock(monitor_mutex_);
@@ -546,7 +671,8 @@ void GlobalEvictionCoordinator::start() {
     }
     monitor_stop_ = false;
     monitor_running_ = true;
-    monitor_thread_ = std::thread([this] {
+    monitor_active_.store(true, std::memory_order_release);
+    monitor_thread_ = std::thread([this, monitor_global] {
         std::unique_lock<std::mutex> lock(monitor_mutex_);
         while (!monitor_stop_) {
             monitor_cv_.wait_for(lock, std::chrono::milliseconds(memory_.check_interval_ms),
@@ -555,7 +681,22 @@ void GlobalEvictionCoordinator::start() {
                 break;
             }
             lock.unlock();
-            (void)run_eviction_cycle(/*refresh_samples=*/true);
+            if (monitor_global) {
+                (void)run_eviction_cycle(/*refresh_samples=*/true);
+            } else if (sampler_ != nullptr) {
+                std::lock_guard<std::mutex> evict_lock(eviction_mutex_);
+                std::unordered_set<std::int64_t> live_pids;
+                for (const auto& pool : snapshot_tracked_pools()) {
+                    for (const auto& w : pool->snapshot_workers()) {
+                        if (w.pid > 0) {
+                            live_pids.insert(w.pid);
+                        }
+                        (void)sampler_->sample_worker_bytes(w.pid, w.cgroup_path,
+                                                            /*force_refresh=*/true);
+                    }
+                }
+                sampler_->prune_pids(live_pids);
+            }
             lock.lock();
         }
     });
@@ -565,6 +706,7 @@ void GlobalEvictionCoordinator::stop_and_join() {
     std::thread to_join;
     {
         std::lock_guard<std::mutex> lock(monitor_mutex_);
+        monitor_active_.store(false, std::memory_order_release);
         if (!monitor_running_) {
             return;
         }

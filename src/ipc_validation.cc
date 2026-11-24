@@ -20,7 +20,7 @@ bool reject(std::string* error, const char* message) {
 
 bool contains_nul(const std::string& value) { return value.find('\0') != std::string::npos; }
 
-// --- Binding v1 wire grammars (docs/binding-technical-design.md §2/§4) ---
+// --- Binding v1 wire grammars (docs/design/bindings-v1.md §2/§4) ---
 
 // Defined below; the binding blob parser precedes them in this file.
 bool read_string16(const uint8_t** cursor, const uint8_t* end, std::string* value);

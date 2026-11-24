@@ -13,7 +13,7 @@ namespace protocol {
 
 static const uint32_t kMagic = 0x43545257u;
 static const uint16_t kVersion = 3;
-// FetchRPC v4 (docs/fetchrpc-v4.md): adds duplex channels and Upgrade
+// FetchRPC v4 (docs/reference/fetchrpc-v4.md): adds duplex channels and Upgrade
 // negotiation on top of the v3 vocabulary. A connection speaks exactly
 // one version; the parser pins its expectation at construction and
 // rejects every other version deterministically.
@@ -294,7 +294,7 @@ enum FrameType {
     // Binding v1 (§6): descriptor + source blob chunks between HELLO and
     // LOAD_BUNDLE. Chunking mirrors kLoadBundle (start/end flags).
     kLoadBinding = 18,
-    // ---- FetchRPC v4 duplex channels (docs/fetchrpc-v4.md §3) ----
+    // ---- FetchRPC v4 duplex channels (docs/reference/fetchrpc-v4.md §3) ----
     // Host-assigned u32 channel ids; independent per-direction byte
     // credits; ownership fixed at open drives cleanup.
     kChannelOpen = 19,

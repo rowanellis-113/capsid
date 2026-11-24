@@ -26,13 +26,14 @@ namespace capsid::host {
 class StructuredLog;
 class MetricsRegistry;
 
-// M1D managed host coordinator. One active App, one worker per generation,
-// one path listener. The deploy pipeline follows the frozen commit
-// sequence: safe-read the version, select the artifact (source / trusted
-// bytecode / compatibility fallback / fail closed), compile the policy and
-// secrets, stage, fdatasync, COMPLETE, rename to the generation, fsync,
-// write the immutable version mapping, spawn the worker, load, wait for
-// READY, persist active.json, fsync, publish routing, drain the old worker.
+// Managed host coordinator for one App's deployment, recovery, and rollout
+// pipeline (supporting multi-worker elastic GenerationPools behind managed
+// listeners). The deploy pipeline follows the commit sequence: safe-read the
+// version, select the artifact (source / trusted bytecode / compatibility
+// fallback / fail closed), compile the policy and secrets, stage, fdatasync,
+// COMPLETE, rename to the generation, fsync, write the immutable version
+// mapping, spawn and warm workers, wait for READY, persist active.json,
+// fsync, publish routing, and drain the old generation.
 
 // Declared BEFORE ManagedHostOptions: the §9.3 transaction callback fields
 // use it in their std::function signatures, and std::function instantiated
@@ -64,15 +65,16 @@ struct DeployOutcome {
     std::string tenant;
     ActiveStateRecoveryAction recovery_action = ActiveStateRecoveryAction::kNone;
     EffectiveConfig effective;
+    // Elastic slots pre-acquired for a minReady=0 warm worker prior to adoption.
+    std::uint32_t pre_acquired_elastic = 0;
     // Binding v1 §6: the committed immutable Binding snapshot; worker
     // replacement reloads from this, never from a re-read of bindingsRoot.
     std::vector<capsid::host::EffectiveBinding> bindings;
 };
 
 struct ManagedHostOptions {
-    // GLM T08: channel limits from host.json (presence requests the
-    // channel capability set on the worker wire; compiled into the
-    // generation identity by the coordinator).
+    // Channel limits from host.json (compiled into the generation identity
+    // by the coordinator; when configured, adds HALF_CLOSE and forwards limits).
     host::ChannelsConfig channels;
     // Pre-opened directory descriptors (safe-read boundary).
     int applications_root_fd = -1;
@@ -91,6 +93,8 @@ struct ManagedHostOptions {
     capsid::host::BindingRegistrySnapshot binding_registry;
     bool binding_registry_loaded = false;
     HostPolicy host_policy;
+    // Immutable Host tenancy policy shared by deploy, recovery and worker factories.
+    const TenancyConfig* tenancy = nullptr;
     // Trusted Ed25519 keys for bytecode attestation verification.
     std::vector<capsid::host::TrustedBytecodeKey> trusted_keys;
     // The runtime compatibility ID the worker must report at READY.
@@ -129,14 +133,22 @@ struct ManagedHostOptions {
     // count before ANY spawn and settles the reserve on the transaction
     // commit; null disables the gate.
     WorkerCapacityLedger* ledger = nullptr;
+    // Optional synchronous elastic reclamation hook invoked when the ledger
+    // cannot immediately fit a deploy or its minReady=0 probe worker.
+    std::function<bool()> reclaim_elastic_slot;
     // M2 item 7: the process-wide structured log and metrics registry
     // (design §12). Null disables event logging/metrics on this path.
     StructuredLog* log = nullptr;
     MetricsRegistry* metrics = nullptr;
-    // Stage 3: optional tenant quota pre-deploy check (runs before ledger reserve
-    // in both deploy and recovery). Return false to reject the deploy/recover.
+    // Stage 3: optional tenant quota pre-deploy check/reservation (runs before
+    // ledger reserve in both deploy and recovery). Return false to reject the
+    // deploy/recover; release_tenant_deploy clears any held pending reservation.
     std::function<bool(const std::string& tenant, std::uint32_t min_ready, std::string* error)>
         check_tenant_deploy;
+    std::function<bool(const std::string& tenant, std::uint32_t min_ready,
+                       std::uint32_t warm_workers, std::string* error)>
+        reserve_tenant_deploy;
+    std::function<void()> release_tenant_deploy;
 };
 
 enum class OperationState {

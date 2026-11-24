@@ -27,6 +27,7 @@
 #endif
 
 #if defined(__linux__)
+#include "cgroup_io.h"
 #include <linux/magic.h>
 #include <linux/nsfs.h>
 #include <sched.h>
@@ -596,6 +597,10 @@ capsid_result send_hello(capsid_worker* worker, const capsid_worker_config& conf
 }
 
 #if defined(__linux__)
+using capsid::cgroup_read_at;
+using capsid::cgroup_write_at;
+using capsid::cgroup_value_matches;
+
 struct CgroupSetting {
     std::string name;
     std::string desired;
@@ -605,63 +610,6 @@ struct CgroupSetting {
     CgroupSetting(const char* setting_name, const std::string& setting_value)
         : name(setting_name), desired(setting_value), applied(false) {}
 };
-
-bool cgroup_read_at(int directory, const char* name, std::string* value) {
-    const int descriptor = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0) {
-        return false;
-    }
-    char buffer[256];
-    size_t size = 0;
-    while (size < sizeof(buffer)) {
-        const ssize_t count = read(descriptor, buffer + size, sizeof(buffer) - size);
-        if (count < 0 && errno == EINTR) {
-            continue;
-        }
-        if (count < 0) {
-            close(descriptor);
-            return false;
-        }
-        if (count == 0) {
-            break;
-        }
-        size += static_cast<size_t>(count);
-    }
-    close(descriptor);
-    if (size == sizeof(buffer)) {
-        errno = EOVERFLOW;
-        return false;
-    }
-    size_t begin = 0;
-    while (begin < size && (buffer[begin] == ' ' || buffer[begin] == '\t' ||
-                            buffer[begin] == '\r' || buffer[begin] == '\n')) {
-        ++begin;
-    }
-    while (size > begin && (buffer[size - 1] == ' ' || buffer[size - 1] == '\t' ||
-                            buffer[size - 1] == '\r' || buffer[size - 1] == '\n')) {
-        --size;
-    }
-    value->assign(buffer + begin, buffer + size);
-    return true;
-}
-
-bool cgroup_write_at(int directory, const char* name, const std::string& value) {
-    const int descriptor = openat(directory, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0) {
-        return false;
-    }
-    ssize_t count;
-    do {
-        count = write(descriptor, value.data(), value.size());
-    } while (count < 0 && errno == EINTR);
-    const int write_error = errno;
-    close(descriptor);
-    if (count != static_cast<ssize_t>(value.size())) {
-        errno = count < 0 ? write_error : EIO;
-        return false;
-    }
-    return true;
-}
 
 std::string cgroup_limit_value(uint64_t value) {
     return value == CAPSID_RESOURCE_UNLIMITED ? std::string("max") : std::to_string(value);
@@ -690,37 +638,6 @@ void rollback_cgroup_settings(int directory, std::vector<CgroupSetting>* setting
             cgroup_write_at(directory, it->name.c_str(), it->original);
         }
     }
-}
-
-bool cgroup_value_matches(const std::string& name, const std::string& desired,
-                          const std::string& actual) {
-    if (actual == desired) {
-        return true;
-    }
-    if (name != "memory.max" && name != "memory.high" && name != "memory.swap.max") {
-        return false;
-    }
-    if (desired == "max" || actual == "max" || desired.empty() || actual.empty()) {
-        return false;
-    }
-    char* desired_end = nullptr;
-    char* actual_end = nullptr;
-    errno = 0;
-    const unsigned long long desired_val = std::strtoull(desired.c_str(), &desired_end, 10);
-    if (errno != 0 || desired_end == desired.c_str() || *desired_end != '\0') {
-        return false;
-    }
-    const unsigned long long actual_val = std::strtoull(actual.c_str(), &actual_end, 10);
-    if (errno != 0 || actual_end == actual.c_str() || *actual_end != '\0') {
-        return false;
-    }
-    if (actual_val == 0 || actual_val > desired_val) {
-        return false;
-    }
-    const long page_size = sysconf(_SC_PAGESIZE);
-    const unsigned long long page_bytes =
-        page_size > 0 ? static_cast<unsigned long long>(page_size) : 4096ULL;
-    return (desired_val - actual_val) < page_bytes;
 }
 
 bool configure_and_attach_cgroup_v2(pid_t pid, const char* path,
@@ -2832,7 +2749,7 @@ capsid_result capsid_worker_load_bundle(capsid_worker* worker, const uint8_t* bu
 
 namespace {
 
-// Binding v1 API-side sanity checks (docs/binding-technical-design.md §6).
+// Binding v1 API-side sanity checks (docs/design/bindings-v1.md §6).
 // The worker's LOAD_BINDING decoder is the wire authority; this layer only
 // rejects structurally hopeless descriptors before any bytes are queued.
 

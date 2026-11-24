@@ -120,19 +120,16 @@ bool parse_attestation_json(std::string_view json, ParsedClaims* claims,
         if (index == 8) {
             set_error(*error, ErrorCode::kUnknownField, "/" + escape_pointer_component(key),
                       "unknown attestation field");
-            json_decref(root);
             return false;
         }
         json_t* value = json_object_iter_value(iter);
         if (!json_is_string(value)) {
             set_error(*error, ErrorCode::kInvalidValue, "/" + escape_pointer_component(key),
                       "attestation claim must be a string");
-            json_decref(root);
             return false;
         }
         values[index] = json_string_value(value);
     }
-    json_decref(root);
 
     for (std::size_t index = 0; index < 8; ++index) {
         if (values[index].empty()) {

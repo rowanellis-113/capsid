@@ -7,7 +7,7 @@ name: Release
 #     on separate native CPU runners; archive names cannot collide;
 #   - darwin-arm64 and darwin-x86_64: separate native macOS builds
 #     (Apple ships no static libSystem; these are not universal archives);
-#   - windows-x86_64: MSVC static-CRT ZIP (see docs/windows.md).
+#   - windows-x86_64: MSVC static-CRT ZIP (see docs/guides/build-on-windows.md).
 # The same commit's full validity workflow must pass before packaging
 # or publication. Both validation and packaging use the triggering SHA.
 

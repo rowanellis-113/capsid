@@ -49,12 +49,16 @@ WorkerEventSource::WorkerEventSource() {
 #endif
 }
 
-WorkerEventSource::~WorkerEventSource() {
+WorkerEventSource::~WorkerEventSource() { close_wake_pipe(); }
+
+void WorkerEventSource::close_wake_pipe() {
     if (wake_pipe_[0] != -1) {
         ::close(wake_pipe_[0]);
+        wake_pipe_[0] = -1;
     }
     if (wake_pipe_[1] != -1) {
         ::close(wake_pipe_[1]);
+        wake_pipe_[1] = -1;
     }
 }
 
@@ -64,6 +68,9 @@ void WorkerEventSource::set_worker(capsid_worker* worker) {
 }
 
 void WorkerEventSource::wake() {
+    if (wake_pipe_[1] == -1) {
+        return;
+    }
     const char byte = 0;
 #if defined(_WIN32)
     // The wake channel is a loopback socketpair on Windows; the CRT's

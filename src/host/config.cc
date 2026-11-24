@@ -463,7 +463,7 @@ constexpr std::array kApplicationMembers{
 constexpr Schema kApplicationSchema{Schema::Kind::kObject,
                                     std::span<const Member>(kApplicationMembers)};
 
-// --- Binding v1 schemas (docs/binding-technical-design.md §2) -----------
+// --- Binding v1 schemas (docs/design/bindings-v1.md §2) -----------
 
 constexpr Schema kNetTargetStringSchema{
     .kind = Schema::Kind::kString,
@@ -500,15 +500,6 @@ constexpr std::array kBindingFsMembers{
 constexpr Schema kBindingFsSchema{Schema::Kind::kObject,
                                   std::span<const Member>(kBindingFsMembers)};
 
-constexpr std::array kBindingPermissionsMembers{
-    Member{"net", &kBindingNetSchema, false},
-    Member{"fs", &kBindingFsSchema, false},
-    Member{"env", &kBindingEnvArraySchema, false},
-    Member{"stdio", &kStringArraySchema, false},
-};
-constexpr Schema kBindingPermissionsSchema{Schema::Kind::kObject,
-                                           std::span<const Member>(kBindingPermissionsMembers)};
-
 constexpr std::array kBindingSecretMembers{
     Member{"valueFrom", &kSecretKeyIdSchema, true},
 };
@@ -520,20 +511,7 @@ constexpr Schema kBindingSecretsSchema{
     .grammar = "secret-key",
 };
 
-constexpr std::array kBindingEntryMembers{
-    Member{"permissions", &kBindingPermissionsSchema, false},
-    Member{"config", &kOpaqueObjectSchema, false},
-    Member{"secrets", &kBindingSecretsSchema, false},
-};
-constexpr Schema kBindingEntrySchema{Schema::Kind::kObject,
-                                     std::span<const Member>(kBindingEntryMembers)};
-constexpr Schema kBindingsSchema{
-    .kind = Schema::Kind::kDynamicMap,
-    .dynamic_value_schema = &kBindingEntrySchema,
-    .grammar = "binding-id",
-};
-
-// --- Config v2 orthogonal schemas (docs/config-v2-design.md §§2-4) ------
+// --- Config v2 orthogonal schemas (docs/design/config-v2.md §§2-4) ------
 
 constexpr Schema kNonEmptyStringSchema{
     .kind = Schema::Kind::kString,

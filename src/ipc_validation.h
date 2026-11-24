@@ -126,7 +126,7 @@ struct WorkerRequestHead {
 bool decode_worker_request_head(const protocol::Frame& frame, uint32_t max_header_bytes,
                                 WorkerRequestHead* output, std::string* error);
 
-// --- Binding v1 READY proof (docs/binding-technical-design.md §4.3) ------
+// --- Binding v1 READY proof (docs/design/bindings-v1.md §4.3) ------
 
 // The READY v3 proof carried after the 71-byte compatibility id. Workers
 // with at least one binding extend the payload; zero-binding workers keep

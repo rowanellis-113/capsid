@@ -5,7 +5,7 @@
     "prettier": "3.8.3",
     "ruff": "0.17.5"
   },
-  "sourceRoots": ["src", "include", "js", "tests", "tools", "bench", "soak", "examples", "scripts"],
+  "sourceRoots": ["src", "include", "js", "tests", "tools", "bench", "examples"],
   "excludePrefixes": [
     "vendor/",
     "patches/",

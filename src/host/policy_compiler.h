@@ -43,7 +43,9 @@ struct HostPolicy {
     // other Host maximums, 0 is NOT unlimited: a bounded pool is required,
     // so 0 means no worker capacity at all and rejects every App.
     std::uint32_t max_workers = 1;
-    std::uint32_t max_pool_workers = 0;        // 0 = no per-app cap beyond max_workers
+    std::uint32_t max_pool_workers = 0; // 0 = no per-app cap beyond max_workers
+    bool has_max_min_ready = false;     // true when maximums.pool caps minReady
+    std::uint32_t max_min_ready = 0;
     std::uint32_t min_ready = 1;               // legacy; not a ceiling (see compile_policy)
     std::uint64_t max_requests_per_worker = 0; // 0 = unlimited
     // request.timeout is finite. Zero here means no Host override/ceiling;
@@ -241,8 +243,8 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
 // capsid_worker_config consumes. Every owning vector is fully populated
 // before any pointer into it is taken, so the structs stay valid as long
 // as the set lives; apply() wires them into a worker config at the last
-// moment. Shared by the managed coordinator (spawn_loaded_worker) and the
-// local-capsid.json data planes (single-worker / static-pool).
+// moment. Shared by the managed coordinator (spawn_loaded_worker) and
+// LocalDevHost.
 struct RuntimePolicy {
     std::vector<std::string> module_names;
     // Pointer table into module_names for the capability descriptor

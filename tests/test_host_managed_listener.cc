@@ -604,8 +604,8 @@ void test_post_echo_and_ceiling(const std::string& worker_path) {
 // WP-09 §13.6: response credit across the managed listener. The worker
 // starts each request with a 256 KiB response window (initial_window); a
 // body larger than that only arrives if the listener returns credit on
-// body frames (early window) and write completions, exactly as the M1A
-// single_worker_server contract (§8.1). Without the return path the
+// body frames (early window) and write completions per the FetchRPC
+// response-credit contract. Without the return path the
 // transfer stalls forever at initial_window bytes — this pins it.
 void test_big_response_credit(const std::string& worker_path) {
     std::shared_ptr<GenerationPool> pool = make_pool(worker_path, "app-big", kBundleBig, 5000);
@@ -871,7 +871,7 @@ void test_cors_wildcard_credentials(const std::string& worker_path) {
     std::cout << "PASS: wildcard CORS never carries credentials" << std::endl;
 }
 
-void test_ipv6_and_single_routing(const std::string& worker_path) {
+void test_single_routing(const std::string& worker_path) {
     std::shared_ptr<GenerationPool> pool_a = make_pool(worker_path, "app-a", kBundleA, 2000);
     std::shared_ptr<RoutingTable> routing = std::make_shared<RoutingTable>();
     routing->publish(RoutingSnapshot::build({{"app-a", pool_a}}));
@@ -898,32 +898,61 @@ void test_ipv6_and_single_routing(const std::string& worker_path) {
         listener.wait(&error);
     }
 
-    // Bracketed IPv6 listener bind ([::1]:0), skipping gracefully only if IPv6 loopback is absent.
-    {
-        ManagedListenerOptions options;
-        options.config.name = "single-v6";
-        options.config.tcp = "[::1]:0";
-        options.config.routing.mode = "single";
-        options.config.routing.single_app = "app-a";
-        options.routing = routing;
-        ManagedListener listener(options);
-        std::string error;
-        if (listener.start(&error)) {
-            const SocketHandle fd = connect_listener_v6(listener.bound_port());
-            const HttpResponse reply = http_exchange(fd, "GET /v6 HTTP/1.1\r\n"
-                                                         "Host: [::1]\r\n"
-                                                         "Connection: close\r\n\r\n");
-            require(reply.status == 200 && reply.body == "hello-app-a",
-                    "IPv6 single-mode listener failed roundtrip");
+    pool_a->stop_and_join();
+}
+
+bool ipv6_loopback_available() {
+    const SocketHandle fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd != kInvalidSocket) {
+        sockaddr_in6 address{};
+        address.sin6_family = AF_INET6;
+        address.sin6_addr = in6addr_loopback;
+        if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
             close_socket_handle(fd);
-            listener.request_stop();
-            listener.wait(&error);
-            std::cout << "PASS: IPv6 [::1]:0 and single-app routing" << std::endl;
-        } else {
-            std::cout << "SKIP: IPv6 loopback unavailable (" << error << ")" << std::endl;
+            return true;
         }
     }
+#if defined(_WIN32)
+    const int code = WSAGetLastError();
+    const bool unavailable =
+        code == WSAEAFNOSUPPORT || code == WSAEPROTONOSUPPORT || code == WSAEADDRNOTAVAIL;
+#else
+    const int code = errno;
+    const bool unavailable =
+        code == EAFNOSUPPORT || code == EPROTONOSUPPORT || code == EADDRNOTAVAIL;
+#endif
+    if (fd != kInvalidSocket)
+        close_socket_handle(fd);
+    if (!unavailable)
+        fail("IPv6 loopback probe failed with socket error " + std::to_string(code));
+    return false;
+}
 
+void test_ipv6_listener(const std::string& worker_path) {
+    std::shared_ptr<GenerationPool> pool_a = make_pool(worker_path, "app-a", kBundleA, 2000);
+    std::shared_ptr<RoutingTable> routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"app-a", pool_a}}));
+
+    ManagedListenerOptions options;
+    options.config.name = "single-v6";
+    options.config.tcp = "[::1]:0";
+    options.config.routing.mode = "single";
+    options.config.routing.single_app = "app-a";
+    options.routing = routing;
+    ManagedListener listener(options);
+    std::string error;
+    if (!listener.start(&error))
+        fail("IPv6 listener failed after successful loopback bind: " + error);
+    const SocketHandle fd = connect_listener_v6(listener.bound_port());
+    const HttpResponse reply = http_exchange(fd, "GET /v6 HTTP/1.1\r\n"
+                                                 "Host: [::1]\r\n"
+                                                 "Connection: close\r\n\r\n");
+    require(reply.status == 200 && reply.body == "hello-app-a",
+            "IPv6 single-mode listener failed roundtrip");
+    close_socket_handle(fd);
+    listener.request_stop();
+    listener.wait(&error);
+    std::cout << "PASS: IPv6 [::1]:0 and single-app routing" << std::endl;
     pool_a->stop_and_join();
 }
 
@@ -1144,13 +1173,21 @@ void test_e2_sse_permit(const std::string& worker_path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
+    if (argc != 2 && (argc != 3 || std::string(argv[2]) != "ipv6")) {
         fail("expected capsid-worker path");
     }
 #if defined(_WIN32)
     require(capsid::win32::ensure_winsock(), "cannot initialize Winsock");
 #endif
     const std::string worker_path = argv[1];
+    if (argc == 3) {
+        if (!ipv6_loopback_available()) {
+            std::cout << "SKIP: IPv6 loopback unavailable" << std::endl;
+            return 77;
+        }
+        test_ipv6_listener(worker_path);
+        return 0;
+    }
     test_routes_two_apps(worker_path);
     test_404_503_504(worker_path);
     test_post_echo_and_ceiling(worker_path);
@@ -1158,7 +1195,7 @@ int main(int argc, char** argv) {
     test_trusted_header_gate(worker_path);
     test_cors_preflight(worker_path);
     test_cors_wildcard_credentials(worker_path);
-    test_ipv6_and_single_routing(worker_path);
+    test_single_routing(worker_path);
     test_custom_routing_header(worker_path);
     test_e1_admission_queue(worker_path);
     test_e2_sse_permit(worker_path);

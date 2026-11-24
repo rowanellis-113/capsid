@@ -1,4 +1,4 @@
-// bindingsRoot security scan (docs/binding-technical-design.md §2.1).
+// bindingsRoot security scan (docs/design/bindings-v1.md §2.1).
 //
 // The Host scans bindingsRoot once at startup and forms an immutable
 // snapshot. The scan rejects symbolic links, hard links, FIFOs, sockets,

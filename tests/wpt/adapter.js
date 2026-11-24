@@ -1,5 +1,6 @@
 const results = [];
 const pending = new Set();
+let promiseQueue = Promise.resolve();
 let sealed = false;
 let implicitTest = null;
 let resolveCompletion;
@@ -38,19 +39,29 @@ const maybeComplete = () => {
 };
 
 class HarnessTest {
-    constructor(name, asynchronous) {
+    constructor(name, asynchronous, promiseTest = false) {
         this.name = name || 'Untitled test';
-        this.asynchronous = asynchronous;
+        this.promiseTest = promiseTest;
         this.completed = false;
         this.cleanups = [];
-        this.timeout = asynchronous
-            ? setTimeout(() => {
-                this.finish('TIMEOUT', 'test timed out', 'TimeoutError', 'timeout');
-            }, 10000)
-            : undefined;
         if (asynchronous) {
             pending.add(this);
+            if (promiseTest) {
+                this.finished = new Promise(resolve => { this.resolveFinished = resolve; });
+            } else {
+                this.startTimeout();
+            }
         }
+    }
+
+    startTimeout() {
+        this.timeout = setTimeout(() => {
+            if (this.completed) {
+                this.publish('TIMEOUT', 'cleanup timed out', 'TimeoutError', 'cleanup');
+            } else {
+                this.finish('TIMEOUT', 'test timed out', 'TimeoutError', 'timeout');
+            }
+        }, 10000);
     }
 
     step(callback, thisValue, args = []) {
@@ -114,23 +125,43 @@ class HarnessTest {
 
     finish(status, message, errorName = null, phase = 'test') {
         this.completed = true;
-        if (this.timeout !== undefined) {
-            clearTimeout(this.timeout);
-        }
-        for (const cleanup of this.cleanups.reverse()) {
+        const waits = [];
+        const cleanupFailed = error => {
+            status = 'FAIL';
+            phase = 'cleanup';
+            errorName = error?.name ?? 'Error';
+            const summary = error?.message ?? String(error);
+            const detail = error?.stack ? `${summary}\n${error.stack}` : summary;
+            message += `${message ? '\n' : ''}cleanup failed: ${detail}`;
+        };
+        for (const cleanup of this.cleanups) {
             try {
-                cleanup();
+                const value = cleanup();
+                if (value === undefined) continue;
+                if (this.promiseTest && value && typeof value.then === 'function') {
+                    waits.push(Promise.resolve(value).catch(cleanupFailed));
+                } else {
+                    throw new TypeError('invalid cleanup return value');
+                }
             } catch (error) {
-                status = 'FAIL';
-                phase = 'cleanup';
-                errorName = error?.name ?? 'Error';
-                const summary = error?.message ?? String(error);
-                const detail = error?.stack ? `${summary}\n${error.stack}` : summary;
-                message += `${message ? '\n' : ''}cleanup failed: ${detail}`;
+                cleanupFailed(error);
             }
         }
+        const publish = () => this.publish(status, message, errorName, phase);
+        if (waits.length && phase !== 'timeout') {
+            Promise.all(waits).then(publish);
+        } else {
+            publish();
+        }
+    }
+
+    publish(status, message, errorName, phase) {
+        if (this.published) return;
+        this.published = true;
+        clearTimeout(this.timeout);
         results.push({ name: this.name, status, message, errorName, phase });
         pending.delete(this);
+        this.resolveFinished?.();
         maybeComplete();
     }
 }
@@ -164,18 +195,20 @@ globalThis.async_test = (callback, name) => {
 };
 
 globalThis.promise_test = (callback, name) => {
-    const testCase = new HarnessTest(name, true);
-    let promise;
-    try {
-        promise = callback.call(testCase, testCase);
-    } catch (error) {
-        testCase.fail(error);
-        return testCase;
-    }
-    Promise.resolve(promise).then(
-        () => testCase.done(),
-        error => testCase.fail(error),
-    );
+    const testCase = new HarnessTest(name, true, true);
+    promiseQueue = promiseQueue.then(() => {
+        testCase.startTimeout();
+        try {
+            const promise = callback.call(testCase, testCase);
+            if (!promise || typeof promise.then !== 'function') {
+                throw new AssertionError('promise_test callback must return a thenable');
+            }
+            Promise.resolve(promise).then(() => testCase.done(), error => testCase.fail(error));
+        } catch (error) {
+            testCase.fail(error);
+        }
+        return testCase.finished;
+    });
     return testCase;
 };
 
@@ -404,22 +437,32 @@ globalThis.assert_throws_dom =
     };
 
 globalThis.assert_throws_quotaexceedederror =
-    (callback, _requested, _quota, description) => {
+    (...args) => {
+        const explicit = args[0]?.name === 'QuotaExceededError';
+        const constructor = explicit ? args.shift() : globalThis.QuotaExceededError;
+        const [callback, requested, quota, description] = args;
+        const check = (ok, detail) => {
+            if (!ok) throw new AssertionError(assertionMessage(description, detail));
+        };
+        check(args.length <= 4, 'unexpected extra argument');
         let error;
         try {
             callback();
         } catch (caught) {
+            if (caught instanceof AssertionError) throw caught;
             error = caught;
         }
-        if (!(error instanceof DOMException) ||
-            error.name !== 'QuotaExceededError' ||
-            error.code !== 22) {
-            throw new AssertionError(assertionMessage(
-                description,
-                `expected QuotaExceededError, got ` +
-                    `${error?.name ?? 'no exception'}`,
-            ));
+        check(error !== null && typeof error === 'object', 'expected a thrown exception object');
+        check(error.name === 'QuotaExceededError' && error.code == 22, 'incorrect exception name or code');
+        for (const [key, expected] of Object.entries({ requested, quota })) {
+            if (typeof expected === 'function') {
+                check(expected(error[key]), 'failed predicate for ' + key);
+            } else {
+                check(expected === null || typeof expected === 'number', 'invalid expectation for ' + key);
+                check(key in error && error[key] == expected, 'incorrect or missing ' + key);
+            }
         }
+        check(error.constructor === constructor, 'wrong QuotaExceededError constructor');
     };
 
 globalThis.promise_rejects_js =

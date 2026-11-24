@@ -222,7 +222,7 @@ void WorkerSupervisor::rearm_probe(const std::shared_ptr<GenerationPool>& pool,
     }
 #if !defined(_WIN32)
     // managed_read_health_check lives in the managed coordinator, which
-    // is not built on Windows (see docs/windows.md); managed_options is
+    // is not built on Windows (see docs/guides/build-on-windows.md); managed_options is
     // never wired there, so the default (unconfigured) probe applies.
     else if (options_.managed_options != nullptr) {
         health_check_ = managed_read_health_check(options_.managed_options, anchored_generation_);

@@ -1,71 +1,71 @@
 # Performance: Evidence Rules and Current State
 
 <!-- capsid-current-qualification-20261110 -->
-本页后续历轮内容保留原记录身份。当前兼容边界、冻结输入、原始失败和封板开放项见[当前验收与边界](v0.3.0-current-qualification.md)。当前源码版本为 0.3.0 候选，v0.3.0 尚未封板或发布。
+The original records of the identity will be retained for the subsequent content on this page. The current compatible boundaries, frozen inputs, original failures, and items with locked openings can be found in [Current Qualification and Boundaries](v0.3.0-current-qualification.md) The current source code version is candidate 0.3.0, and v0.3.0 has not been officially sealed or released yet.
 
-部分历史产物已按用户授权清理；[证据索引](evidence/v0.3.0/2026-11-10/index.json)及[可用性审计](evidence/v0.3.0/2026-11-10/historical-evidence-availability.json)说明时点与范围。旧章节的“当前”“仍保留”不表示本轮重新验证了已删除文件。
+Some historical artifacts have been cleaned up with user authorization;[Evidence Index](evidence/v0.3.0/2026-11-10/index.json) and [Usability Audit](evidence/v0.3.0/2026-11-10/historical-evidence-availability.json) Indicate the timing and scope. The terms "current" and "still retained" in the old sections do not indicate that the deleted files have been re-verified in this round.
 <!-- /capsid-current-qualification-20261110 -->
 
 
 <!-- capsid-review-phase-93 -->
 <a id="capsid-review-phase-93"></a>
 
-## 第 93 轮（2026-10-20）：五栈 QPS 控制器与归档已接通
+## Round 93 (2026-10-20): The Five Stack QPS Controller and Archiving are connected
 
-当前 QPS 公开入口已替换旧 shell，默认五轮/managed/strict，覆盖五栈三 workload、独占端口、PHP 双根与 Go 客户端拥有权、先 trickle 后另起 loaded、精确就绪/响应、递归稳定 PSS、清理和封存自校验。正式模式要求干净构建/会话元数据；短 `--observation` 无发布 envelope。下方旧的“QPS 生产器仍未接通”属于历史状态。
+The current QPS public interface has been replaced with the old shell. By default, it operates in five rounds/managed/strict mode, covering five stacks, three workloads, exclusive ports, PHP dual roots, and Go client ownership. It processes tasks in a trickle-first, then another load mode, ensuring precise readiness/response, recursive stability of PSS, and automatic cleanup and sealing of self-checking. The official mode requires clean build/session metadata; the short `--observation` flag is used without a publishing envelope. The old message "QPS producer still not connected" represents a historical state.
 
-最终工具选择集 Windows 普通/ASan **14/14、14/14**（Python 101：70 通过/31 平台跳过），Linux **18/18**（120/120）；没有本轮完整产品重编或 sanitizer 资格。真实五栈 15 单元短观测、2,191 份封存文件与测量中 SIGINT/SIGTERM **10/10** 通过；共享 cold/density 实际小观测也通过。旧验证器 10 个失败及首次 Linux PSS 不稳定失败均保留，最终 Linux 单独复核/顺序回归未放宽协议。
+Final Tool Selection Set: Windows Normal/ASan **14/14, 14/14** (Python 101: 70 passed/31 skipped on platform), Linux **18/18** (120/120); No full product reengineering or sanitizer qualification for this round. True Five Stack 15 units with short observations, 2,191 sealed files, and SIGINT/SIGTERM **10/10** passed during measurement; shared cold/density actual short observations also passed. Old verifiers had 10 failures and the first Linux PSS instability failure were retained; final Linux individual review/sequential regression did not relax the protocol.
 
-完整 0.3.0 强兼容、T15/T16/T17 仍未整体关闭。干净 Release/LTO/ALL/包与消费者、完整 gate/矩阵、同一安静会话正式三车道/2 GiB 密度/四视口、原生 body/压力/soak、Windows 默认 Debug 编码流根因和其他平台/依赖 sanitizer 仍待完成。历史 **1762/1733/6/23** 未重跑；版本仍 0.2.2、4508 输入，运行时/Host 153 输入未变，无 Root 提交/推送/发布。
+Complete 0.3.0 strong compatibility, T15/T16/T17 still not fully closed. Clean Release/LTO/ALL/package and consumer, complete gate/matrix, same quiet session formal three-lane/2 GiB density/quad viewport, native body/pressure/soak, Windows default Debug encoding stream root reasons and other platforms/dependencies sanitizer still pending completion. Historical **1762/1733/6/23** not rerun; version still 0.2.2, 4508 input, runtime/Host 153 input unchanged, no Root commit/push/release.
 
-实现、真实与合成测试边界、保留的失败、证据入口和接棒任务见[本轮完整交接](v0.3.0-next-ai-handoff.md#capsid-review-phase-93)。最终审计：`upgrade47-final-audit.json`；Linux 最终结果用 `upgrade47q-linux.json`，不能将失败的 `upgrade47m-linux.json` 重标为成功。
+Implementation, real and synthetic test boundaries, retained failures, evidence entry points, and handoff tasks can be found in [This round of full handover](v0.3.0-next-ai-handoff.md#capsid-review-phase-93) Final Audit: `upgrade47-final-audit.json`; Linux final results are stored as `upgrade47q-linux.json`. The failed `upgrade47m-linux.json` should not be reclassified as a successful result.
 
 <!-- capsid-review-phase-92 -->
 <a id="capsid-review-phase-92"></a>
 
-## 第 92 轮状态（2026-10-20）：QPS 负载正确性/原始证据修复，完整生产器继续
+## Round 92 Status (2026-10-20): QPS load correctness/original evidence fixes, full producer continues
 
-修复真实 Go 负载工具的流正文抽查漏检、错误/超时分类与错误成功 verdict、失败退出码和无效参数；新增完整正文身份及 attempted/checked/completed 计数，正式校验要求 `exact-bytes-v2` 与 30000 ms 截止时间。旧实际工具三组红例和旧验证器 28 个失败断言均保留。最终 CTest 为 Windows **13/13**、Windows ASan **13/13**、Linux **16/16**；新增规则 8 组、Linux 实际 HTTP 8 组、合同增补 2 组。
+Fixing issues in the flow text of the real Go load tool, including missed checks, errors/timings out classified as errors with successful verdicts, failure exit codes, and invalid parameters. Added complete text identities along with counts of attempted/checked/completed operations. Formal verification requirements include `exact-bytes-v2` and a 30000 ms deadline. The old actual tool's three sets of red examples and 28 failed assertions from the old verifier are retained. The final CTest results are Windows **13/13**, Windows ASan **13/13**, and Linux **16/16**. New rules are added in 8 groups, with 8 groups of actual Linux HTTP tests and 2 groups of contract supplements.
 
-一次真实工具的 64/64、5+15 秒轮只面对独占正确性夹具；另跑可信字节码 cold 两次启动/102 响应/38 文件小观测。均不作为正式性能点。`src/js/include` 153 份输入未变，版本仍 0.2.2；旧 QPS shell 仍未接通完整五栈生产器。完整强兼容、干净 ALL/全量矩阵、body/stream 压力、正式三车道/2 GiB/四视口及完整依赖 sanitizer/其他平台仍待完成，历史全量结果不更新。
+A real tool's 64/64, 5+15 seconds round only faced with exclusive correctness fixtures; additionally, credible bytecode was run twice for startup/102 responses/38 small file observations. Neither is considered a formal performance metric. `src/js/include` had 153 unchanged inputs, with the version still at 0.2.2; the old QPS shell still does not have a fully functional five-stack producer. Complete strong compatibility, clean ALL/complete matrix, body/stream pressure, formal three-lane/2 GiB/quad viewport, and complete dependency sanitizer/other platforms are still pending completion, and historical complete results are not updated.
 
-范围、平台边界、二进制/原始失败与下一步见 [第 92 轮交接](v0.3.0-next-ai-handoff.md#capsid-review-phase-92)。最终审计：`build-v030-dev/evidence/native-asan-qualification-20261018/upgrade46-final-audit.json`。没有 Root 提交、推送或发布。
+Scope, platform boundaries, binary/raw failures, and the next steps are as follows: [Round 92 Handoff](v0.3.0-next-ai-handoff.md#capsid-review-phase-92) Final Audit: `build-v030-dev/evidence/native-asan-qualification-20261018/upgrade46-final-audit.json`. No Root commits, pushes, or releases have been performed.
 
 <!-- capsid-review-phase-91 -->
 <a id="capsid-review-phase-91"></a>
-## 第 91 轮状态（2026-10-20）：编译器发布兼容修复，完整目标继续
+## Round 91 Status (2026-10-20): Compiler releases compatible fixes, full targets continue
 
-编译器补齐不支持 `RENAME_NOREPLACE` 的 Linux 文件系统后备路径与明确系统错误诊断；新增归属跟踪，避免在创建失败后删除既有临时文件。新增 8 组真实编译器回归与 7 组 C++ 操作模型，最终 CTest 为 Windows **12/12**、Windows ASan **12/12**、Linux **14/14**；挂载盘另跑 **8/8**。Windows 的符号链接组及原有 Linux 专属组继续明确跳过。源/字节码三尺寸实跑 **12 次启动、612 次响应校验、123 份封存文件**，仅作功能观测。
+The compiler does not support completion `RENAME_NOREPLACE` The Linux file system backup path and clear system error diagnosis. Added attribution tracking to avoid deleting existing temporary files after creation fails. New Addition 8 Group Real Compiler Regression and 7 Group C++ operation model, final CTest for Windows **12/12**, Windows ASan **12/12**, Linux **14/14**. The mount disk runs separately **8/8**. The symbolic link groups in Windows and the original Linux-exclusive groups are explicitly skipped. Source/Bytecode Three-Dimensional Real-Time Running **12 Secondary startup, 612 Sub-response verification, 123 A sealed document**, For functional observation only.
 
-首轮 C++11 编译失败、Linux 链接缺依赖、旧编译器真实红例均保留。`src/js/include` 153 份实现输入未变；版本仍 0.2.2。完整 0.3.0 强兼容、QPS、干净 ALL/全量矩阵、正式三车道/2 GiB 与四视口复核仍未完成。历史 1762 项全量结果不作更新；没有新性能点、Root 提交、推送或发布。
+The first round of C++11 compilation failed, Linux linking had dependencies missing, and the real red examples from the old compiler were retained. The 153 implementations in `src/js/include` remain unchanged; the version is still 0.2.2. The complete 0.3.0 version is highly compatible, with QPS, a clean ALL/complete matrix, and formal three-way/2 GiB and four-view review are still pending. The historical 1762 complete results have not been updated; there are no new performance points, Root submissions, pushes, or releases.
 
-完整范围、平台跳过、原始证据与下一步见 [第 91 轮交接](v0.3.0-next-ai-handoff.md#capsid-review-phase-91)。审计入口：`build-v030-dev/evidence/native-asan-qualification-20261018/upgrade45-final-audit.json`。
+Full scope, platform skipping, original evidence and next steps are as follows: [Round 91 of Handoff](v0.3.0-next-ai-handoff.md#capsid-review-phase-91) Audit entry: `build-v030-dev/evidence/native-asan-qualification-20261018/upgrade45-final-audit.json`.
 
 <!-- capsid-review-phase-90 -->
 <a id="capsid-review-phase-90"></a>
-## 第 90 轮状态（2026-10-20）：cold 控制器/归档接通，完整目标继续
+## Round 90 Status (2026-10-20): Cold controller/archiving enabled, full target continues
 
-冷启动公开入口已统一 C-ABI 源码/字节码、Node/Deno/workerd 的进程与端口拥有权、精确响应、固定成员/稳定递归 PSS、独占夹具/原生临时编译、CPU 绑定恢复、丢弃轮与测量轮归档及真实校验器。旧验证器漏检丢弃/进程/warm 证据的 15 个实际红例已修正，原始失败与修前源码保留。正式模式要求完整协议和实际干净构建/会话元数据；观测模式不能发布。
+The cold start of the public entrance has unified the C-ABI source code/bytecode, the process and port ownership of Node/Deno/workerd, precise response, fixed members/stable recursive PSS, exclusive fixtures/native temporary compilation, CPU-bound recovery, discard rounds and measurement round archives, as well as real verifiers. The 15 actual red examples that were missed by the old verifier for discard/process/warm evidence have been corrected. The original failures and the source code before correction are retained. The formal mode requires a complete protocol and actual clean build/session metadata; the observation mode cannot be published.
 
-最终工具 CTest：Windows 普通 8/8、Windows ASan 8/8、Linux 10/10（`upgrade44h-*`）。新增 Python 组 21，Linux 全通过，Windows 新增为 10 通过/11 个 Linux 专属跳过；Windows 全部脚本共 67 组、46 通过/21 跳过。Linux 共 74 Python 组及既有 10 C++ 模型通过。本轮没有产品编译或新增原生 sanitizer/泄漏验收。
+Final tools CTest: Windows standard 8/8, Windows ASan 8/8, Linux 10/10 (`upgrade44h-*`). Added Python group 21, all Linux tests passed, Windows tests now 10 passed/11 skipped for Linux; total of 67 groups of Windows scripts, 46 passed/21 skipped. Linux has 74 Python groups and existing 10 C++ models passed. No product compilation or new native sanitizer/leak qualification tests in this round.
 
-最终真实 cold smoke 覆盖五路径/三尺寸、30 次启动和 1530 次响应，318 份文件核验（`upgrade44i-*`）；只有一测量轮，不能代替正式五轮。四类真实 SUT 的 SIGINT/SIGTERM 共 8 次清理通过（`upgrade44j-*`）；密度入口回归 12 探针/4 小池单元、174 文件核验（`upgrade44k-*`）。合成完整档案只在临时仓库测试，未写入 data.js。站点按新 HTTP 协议展示 warm 值，旧点仍是未验证历史观测，视觉四视口复核未完成。
+The final real cold smoke coverage covered five paths/three dimensions, with 30 startup attempts and 1530 responses, verifying 318 files (`upgrade44i-*`). There was only one measurement round, which could not replace the official five rounds. For the four types of real SUTs, a total of 8 cleanup passes were achieved for SIGINT/SIGTERM (`upgrade44j-*`). The density entrance regression involved 12 probes/4 pool units, with 174 files verified (`upgrade44k-*`). The synthetic complete archive was only tested in the temporary repository and was not written to data.js. The site displays warm values according to the new HTTP protocol, while the old points remain unverified historical observations. The visual four-view review is not yet completed.
 
-**完整 Linux/Windows 0.3.0 强兼容仍未完成。** QPS 合同、编译器挂载文件系统/错误诊断、实际同会话三车道与 2 GiB 密度、更广 body/资源压力、默认 Windows Debug 栈失败、新 ALL/Release/LTO/包/全量矩阵及平台和动态验证仍需继续。4495 输入、版本 0.2.2、58 补丁，Root HEAD 和 `src/js/include` 153 份实现输入不变；没有提交/推送/发布。
+**The full Linux/Windows 0.3.0 strong compatibility has not yet been completed.** QPS contracts, compiler-mounted file systems/error diagnosis, actual three-lane sessions with 2 GiB density, broader body/resource pressure, default Windows Debug stack failures, new ALL/Release/LTO/packages/full matrix, and platform and dynamic verification still need further development. 4495 inputs, version 0.2.2, 58 patches, Root HEAD and `src/js/include` with 153 implementation inputs remain unchanged; no submissions/pushes/releases have been made.
 
-完整实现、证据与后续顺序见 [第 90 轮接棒说明](v0.3.0-next-ai-handoff.md#capsid-review-phase-90)；审计入口 `build-v030-dev/evidence/native-asan-qualification-20261018/upgrade44-final-audit.json`。
+For the complete implementation, evidence, and subsequent sequence, please refer to [Round 90 Handoff Instructions](v0.3.0-next-ai-handoff.md#capsid-review-phase-90). Audit Entrance `build-v030-dev/evidence/native-asan-qualification-20261018/upgrade44-final-audit.json`.
 
 <!-- capsid-review-phase-89 -->
 <a id="capsid-review-phase-89"></a>
-## 第 89 轮状态（2026-10-20）：cold 探针已修，整车道与强兼容目标未完成
+## Round 89 Status (2026-10-20): The cold probe has been fixed, and the entire lane with strongly compatible targets is not yet completed.
 
-冷启动 C-ABI 工具已改用公开 worker PID，严格核对状态/请求 ID/完整正文，warm 失败、超时、进程退出/被回收/PID 替换及不可读/零/不稳定 PSS 都失败。worker 子孙树在首次响应后、warm 前固定；冷启动计时在 warm/PSS 之前结束；中断会通过 C-ABI 销毁回收 worker。旧错误成功行和中断遗留的真实红例已保存（`upgrade43d-*`），独立零 tick 解析红例也已修正并纳入最终模型。
+The cold start C-ABI tool has been modified to use public worker PID, strictly verifying the status/request ID/complete text. Failures include warm failures, timeouts, process exit/recovery, PID replacement, and unreadable/zero/instable PSS. The worker's subtree is fixed after the first response before warm; the cold start timer ends before warm/PSS. Interruption will cause the worker to be destroyed and recovered through C-ABI. Old error success lines and real counterexamples left behind by interruptions have been preserved (`upgrade43d-*`), and independent zero-tick analysis of counterexamples has also been corrected and incorporated into the final model.
 
-最终实际工具 CTest：Windows 普通 6/6、Windows ASan 6/6、Linux 8/8（`upgrade43k-*`）；新增 10 组跨平台 C++ 模型与 7 组 Linux 真实进程回归。另对 10k/100k/1m 的源码/可信字节码实际做 6 次 strict smoke、306 次响应核验并封存，见 `upgrade43p-real-smoke.json`。这些不是正式 cold lane 或新的 workerd 性能比较。新编译测量/模型目标及 Linux bytecode compiler；既有 host/worker、运行时库和 `src/js/include` 153 份实现输入未变，没有新整产品/泄漏/不筛选矩阵验收。
+Final actual tool CTest: Windows standard 6/6, Windows ASan 6/6, Linux 8/8 (`upgrade43k-*`); added 10 cross-platform C++ models and 7 Linux real process regression tests. Additionally, 6 strict smoke tests and 306 response verification tests were conducted on source code/traffic bytes of 10k/100k/1m, with results archived in `upgrade43p-real-smoke.json`. These are not formal cold lane or new workerd performance comparisons. New compiled measurements/models and Linux bytecode compiler; the existing host/worker, runtime libraries, and 153 implementations in `src/js/include` remained unchanged, with no new product/leakage/unfiltered matrix qualifications.
 
-**完整目标仍在进行。** cold shell 控制层尚需统一拥有权/端口/档案契约，QPS 也未接通；真实同会话三车道和 2 GiB 密度、站点视口、更广 body/资源压力兼容、默认 Windows Debug 栈失败、新 ALL/Release/LTO/包与原计划平台和动态验证仍未完成。4489 输入、版本 0.2.2、58 补丁、Root HEAD 不变；没有提交/推送/发布，也没有生成新性能点。旧矩阵与跳过数保持历史性质。
+**The complete goal is still in progress.** Cold shell: The control layer still needs to have unified ownership, ports, and file contracts. The QPS has not been connected yet. The real three-lane session and 2 GiB density, site viewport, compatibility with broader body/resource pressures, default Windows Debug stack failure, new ALL/Release/LTO /The package and the original plan for platform and dynamic verification are still not completed./. 4489 Input, Version 0.2.2, 58 Patches, Root HEAD remain unchanged. No submission/push/release was made, and no new performance points were generated. The old matrix and the number of skips maintain their historical nature.
 
-完整修复、证据和下一步见 [第 89 轮接棒说明](v0.3.0-next-ai-handoff.md#capsid-review-phase-89)；审计入口 `build-v030-dev/evidence/native-asan-qualification-20261018/upgrade43-final-audit.json`。
+Full fixes, evidence, and next steps are available. [Explanation of the 89th Handoff](v0.3.0-next-ai-handoff.md#capsid-review-phase-89). Audit Entrance `build-v030-dev/evidence/native-asan-qualification-20261018/upgrade43-final-audit.json`.
 
 
 This document retains historical samples. The measurement protocol and

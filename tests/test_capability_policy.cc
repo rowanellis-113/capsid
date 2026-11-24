@@ -583,7 +583,7 @@ void test_malformed_rules() {
 }
 
 // Binding v1 §7.3: per-binding policies and origin isolation
-// (docs/binding-technical-design.md §3.1-§3.3). The binding policy set is
+// (docs/design/bindings-v1.md §3.1-§3.3). The binding policy set is
 // compiled from wire descriptors and is fully separate from the User
 // policy: a Binding grant can never widen what the User can do, an
 // unknown Binding ID fails closed, and Native Handles carry an

@@ -46,7 +46,7 @@ struct PublicRequestHeaderView {
     std::string_view value;
 };
 
-// RFC 6455 §4.2.1 / docs/fetchrpc-v4.md §2: the host owns the WebSocket
+// RFC 6455 §4.2.1 / docs/reference/fetchrpc-v4.md §2: the host owns the WebSocket
 // handshake gates. A request presents itself as a WebSocket upgrade when
 // an Upgrade field includes the `websocket` token (case-insensitive).
 // Every required handshake field is then checked, including Connection.

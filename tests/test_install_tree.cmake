@@ -51,6 +51,11 @@ set(CAPSID_MANIFEST
     "include/capsid/runtime.h"
     "include/capsid/runtime.hpp"
     "lib/cmake/Capsid/CapsidTargets.cmake"
+    "share/doc/capsid/README.md"
+    "share/doc/capsid/docs/README.md"
+    "share/doc/capsid/docs/guides/run-application.md"
+    "share/doc/capsid/docs/reference/embedding-api.md"
+    "share/doc/capsid/docs/design/runtime-architecture.md"
     "share/licenses/capsid/LICENSE"
     "share/capsid/build-info.txt"
     "share/capsid/SBOM.spdx.json")
@@ -72,17 +77,6 @@ file(GLOB CAPSID_RUNTIME_LIBS
     "${CAPSID_PREFIX}/lib/*capsid_runtime.*")
 if(NOT CAPSID_RUNTIME_LIBS)
     list(APPEND missing "lib/*capsid_runtime.*")
-endif()
-
-# Support documentation must be a non-empty directory.
-set(CAPSID_DOC_DIR "${CAPSID_PREFIX}/share/doc/capsid")
-if(NOT IS_DIRECTORY "${CAPSID_DOC_DIR}")
-    list(APPEND missing "share/doc/capsid/")
-else()
-    file(GLOB_RECURSE CAPSID_DOC_FILES "${CAPSID_DOC_DIR}/*")
-    if(NOT CAPSID_DOC_FILES)
-        list(APPEND missing "share/doc/capsid/ (empty)")
-    endif()
 endif()
 
 if(missing)

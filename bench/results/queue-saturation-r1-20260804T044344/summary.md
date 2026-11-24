@@ -1,3 +1,3 @@
-# queue-saturation 返修批次 benchmark（commit cb75807）
+# queue-saturation repair benchmark (commit cb75807)
 
-三轮交错 A/B（warmup 2s, duration 5s），hono fixture，host 单 worker。
+Three interleaved A/B rounds used the Hono fixture and a single-worker Host. Each round warmed up for 2 seconds and measured for 5 seconds.

@@ -1,0 +1,57 @@
+# Hono compatibility
+
+> Source/profile reviewed 2026-11-18. This is the pinned 0.3.0-beta scope, not a
+> promise for every Hono release. See [current status](../release-status.md).
+
+## Status
+
+Capsid Runtime validates pinned **Hono 4.12.32** as an ordinary bundle. The exact version and integrity are pinned by `examples/hono-reference/package.json` and the lockfile; this conclusion does not automatically cover other 4.x or future versions.
+
+All three entry bundles must be single-file ESM with zero external imports and must pass the build audit. The runtime adds no Hono global, platform adapter, or framework-specific branch.
+
+## Build and verification
+
+```sh
+# First prepare all locked dependency trees and configure build-dev as in the source build guide.
+cmake --build build-dev --target capsid-worker test-hono-worker-driver test-module-denial
+ctest --test-dir build-dev --no-tests=error -L hono --output-on-failure
+```
+
+Use the complete [source-build prerequisites](../../guides/build-from-source.md), not just one
+framework's npm tree: the test configuration also declares the other locked
+framework fixtures. Windows uses npm.cmd and the native toolchain in that guide.
+
+The differential suite contains 68 deterministic vectors, 11 of which have independent absolute assertions. The reference side calls unmodified Hono, while the runtime side runs through a real `capsid-worker`, FetchRPC, and the same application logic.
+
+## Verified
+
+- `app.fetch()`, default `{ fetch }`, and named `fetch` entries;
+- method/path routing, params/query, 404/405, base path;
+- middleware order, context, header/cookie, exception handling;
+- JSON/text/HTML/binary/streaming responses;
+- request body, FormData, AbortSignal;
+- concurrency isolation, handler/body/response-stream cancellation;
+- async timeout, sync CPU timeout, and worker reuse;
+- txiki.js direct `fetch()` controlled by the normal egress policy;
+- Node/Deno/Bun/txiki/platform globals remain absent.
+
+Responses compare status, normalized headers, and exact body bytes; only well-defined non-semantic fields such as dynamic `Date` are normalized. Stream transport chunk boundaries are not part of Web Streams semantics, so the total length and content are compared rather than the underlying chunk counts.
+
+## Support boundaries
+
+Applications can bundle the Web-standard Hono Core paths above into an ESM and export Capsid Runtime's normal fetch contract. The host remains responsible for HTTP/TLS, worker pool, timeout, network, and sandbox policy.
+
+Explicit exclusions:
+
+- `@hono/node-server`, Node built-ins, and Node/Bun/Deno/Cloudflare adapters;
+- framework-specific server/Upgrade adapters outside this pinned Core matrix;
+- static-file adapter that depends on the filesystem;
+- Cloudflare bindings, `ExecutionContext`, cache, Durable Object;
+- context storage/`AsyncLocalStorage`;
+- external, remote, and `file:` module loading.
+
+Corresponding negative tests use the `hono-excluded` label. Product capability changes do not automatically expand this pinned-version compatibility statement.
+
+## Upgrade process
+
+Rebuild all audited Hono bundles and rerun the middleware and streaming vectors. Follow the [shared upgrade procedure](README.md#upgrade-process).

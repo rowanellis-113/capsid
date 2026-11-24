@@ -191,6 +191,16 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
             result.error = "default pool minReady exceeds maxWorkers";
             return result;
         }
+        if (host.has_max_min_ready && host.has_default_min_ready &&
+            host.default_min_ready > host.max_min_ready) {
+            result.error = "default pool minReady exceeds the Host maximum";
+            return result;
+        }
+        if (host.has_max_min_ready && !host.has_default_min_ready && host.default_workers != 0 &&
+            host.default_workers > host.max_min_ready) {
+            result.error = "default pool minReady exceeds the Host maximum";
+            return result;
+        }
 
         const bool has_app_elastic =
             app.has_min_ready || app.has_max_workers || app.has_idle_timeout;
@@ -209,6 +219,10 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
                 result.error = "pool exceeds the Host maximum";
                 return result;
             }
+            if (host.has_max_min_ready && app.workers > host.max_min_ready) {
+                result.error = "pool minReady exceeds the Host maximum";
+                return result;
+            }
             if (host.max_workers == 0 || app.workers > host.max_workers) {
                 result.error = "pool exceeds the Host worker ceiling";
                 return result;
@@ -216,7 +230,7 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
             result.effective.workers = app.workers;
             result.effective.min_ready = app.workers;
             result.effective.idle_timeout_ms = 0;
-        } else if (has_app_elastic || has_host_elastic) {
+        } else if (has_app_elastic || has_host_elastic || host.has_max_min_ready) {
             if (app.has_workers && has_app_elastic) {
                 result.error = "pool.workers cannot be combined with elastic pool fields";
                 return result;
@@ -253,6 +267,13 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
                 const std::uint32_t fallback_min =
                     host.default_workers != 0 ? host.default_workers : 1U;
                 effective_min = std::min<std::uint32_t>(fallback_min, effective_max);
+                if (host.has_max_min_ready) {
+                    effective_min = std::min<std::uint32_t>(effective_min, host.max_min_ready);
+                }
+            }
+            if (host.has_max_min_ready && effective_min > host.max_min_ready) {
+                result.error = "pool minReady exceeds the Host maximum";
+                return result;
             }
             if (effective_min > effective_max) {
                 result.error = "pool minReady exceeds maxWorkers";
@@ -284,6 +305,10 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
                 effective_workers = host.default_workers;
             } else if (host.max_pool_workers != 0 && effective_workers > host.max_pool_workers) {
                 effective_workers = host.max_pool_workers;
+            }
+            if (host.has_max_min_ready && effective_workers > host.max_min_ready) {
+                result.error = "pool minReady exceeds the Host maximum";
+                return result;
             }
             if (host.max_workers == 0 || effective_workers > host.max_workers) {
                 result.error = "pool exceeds the Host worker ceiling";
@@ -652,8 +677,9 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
         app.memory_bytes != 0 ? app.memory_bytes : host.default_worker_memory_bytes;
     result.effective.process_address_bytes = app.process_address_bytes;
     result.effective.memory_bytes =
-        std::max(base_memory,
-                 std::max(result.effective.js_heap_bytes, result.effective.process_address_bytes));
+        base_memory != 0
+            ? base_memory
+            : std::max(result.effective.js_heap_bytes, result.effective.process_address_bytes);
     if (host.max_worker_memory_bytes != 0 &&
         result.effective.memory_bytes > host.max_worker_memory_bytes) {
         result.error = "worker memory exceeds the Host maximum";
@@ -666,10 +692,9 @@ PolicyCompileResult compile_policy(const HostPolicy& host, const AppRequest& app
     // process_memory_limit < js_heap_limit, and the managed boundary
     // applies the same rule before staging so an invalid worker
     // configuration can never start.
-    const std::uint64_t process_ceiling =
-        std::min(result.effective.process_address_bytes, result.effective.memory_bytes);
-    if (result.effective.js_heap_bytes > 0 && process_ceiling > 0 &&
-        process_ceiling < result.effective.js_heap_bytes) {
+    if (result.effective.js_heap_bytes > result.effective.memory_bytes ||
+        (result.effective.process_address_bytes != 0 &&
+         result.effective.js_heap_bytes > result.effective.process_address_bytes)) {
         result.error = "process memory ceiling below the JS heap limit";
         return result;
     }

@@ -23,16 +23,26 @@
 #else
 #include <unistd.h>
 #endif
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/syscall.h>
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE 2U
+#endif
+#endif
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <span>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -343,6 +353,209 @@ void run_failure_scenario(
     std::cout << "ok " << name << std::endl;
 }
 
+void run_reparse_app_dir_rejected(const char* worker_path) {
+    const std::filesystem::path base = std::filesystem::temp_directory_path();
+    const std::filesystem::path real_dir =
+        base / ("capsid-local-real-" + std::to_string(capsid::win32::getpid()));
+    const std::filesystem::path link_dir =
+        base / ("capsid-local-link-" + std::to_string(capsid::win32::getpid()));
+    std::error_code ec;
+    std::filesystem::remove(link_dir, ec);
+    std::filesystem::remove_all(real_dir, ec);
+    require(std::filesystem::create_directories(real_dir, ec), "cannot create real app_dir");
+    write_json_file(
+        (real_dir / "capsid.json").string(),
+        R"json({"apiVersion":"capsid/app-v2","permissions":{},"pool":{"workers":1}})json");
+    write_json_file((real_dir / "bundle.mjs").string(), kPlainWorkerSource);
+
+#if defined(_WIN32)
+    std::filesystem::path native_link = link_dir;
+    std::filesystem::path native_real = real_dir;
+    native_link.make_preferred();
+    native_real.make_preferred();
+    const std::string cmd = "cmd /c mklink /J \"" + native_link.string() + "\" \"" +
+                            native_real.string() + "\" >NUL 2>&1";
+    require(std::system(cmd.c_str()) == 0, "cannot create app_dir directory junction");
+#else
+    require(symlink(real_dir.string().c_str(), link_dir.string().c_str()) == 0,
+            "cannot create app_dir symlink");
+#endif
+
+    int ready[2];
+    require(capsid::win32::create_socket_pair(ready), "cannot create READY pipe");
+    capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
+    options.app_dir = link_dir.string();
+    options.capsid_json_path.clear();
+    options.capsid_json_required = true;
+    capsid::host::LocalDevHost server(std::move(options));
+    std::string error;
+    const bool started = server.start(&error);
+    server.request_stop();
+    std::string wait_error;
+    require(server.wait(&wait_error), "reparse-rejected: wait failed: " + wait_error);
+    close(ready[0]);
+    close(ready[1]);
+    std::filesystem::remove(link_dir, ec);
+    std::filesystem::remove_all(real_dir, ec);
+    require(!started, "app_dir symlink/junction unexpectedly started");
+    require(error.find("is not a directory") != std::string::npos,
+            "unexpected reparse error: " + error);
+    std::cout << "ok app-dir-reparse-rejected" << std::endl;
+}
+
+void run_concurrent_dir_swap_atomic(const char* worker_path) {
+#if defined(_WIN32)
+    const std::filesystem::path swap_root =
+        std::filesystem::temp_directory_path() /
+        ("capsid-local-swap-" + std::to_string(capsid::win32::getpid()));
+#else
+    const std::filesystem::path swap_root =
+        std::filesystem::path("/tmp") /
+        ("capsid-local-swap-" + std::to_string(capsid::win32::getpid()));
+#endif
+    std::error_code ec;
+    std::filesystem::remove_all(swap_root, ec);
+    const std::filesystem::path dir_a = swap_root / "dir_a";
+    const std::filesystem::path dir_b = swap_root / "dir_b";
+    require(std::filesystem::create_directories(dir_a, ec) &&
+                std::filesystem::create_directories(dir_b, ec),
+            "cannot create swap test directories");
+
+    write_json_file(
+        (dir_a / "capsid.json").string(),
+        R"json({"apiVersion":"capsid/app-v2","permissions":{"modules":["capsid:env"],"env":{"CAPSID_PAIR":{"value":"A"}}},"pool":{"workers":1}})json");
+    write_json_file((dir_a / "bundle.mjs").string(),
+                    "import { env } from 'capsid:env';"
+                    "export default { fetch() {"
+                    "  const v = env.get('CAPSID_PAIR');"
+                    "  return new Response(v === 'A' ? 'pair-ok' : ('SPLIT-A:' + v));"
+                    "} };");
+    write_json_file(
+        (dir_b / "capsid.json").string(),
+        R"json({"apiVersion":"capsid/app-v2","permissions":{"modules":["capsid:env"],"env":{"CAPSID_PAIR":{"value":"B"}}},"pool":{"workers":1}})json");
+    write_json_file((dir_b / "bundle.mjs").string(),
+                    "import { env } from 'capsid:env';"
+                    "export default { fetch() {"
+                    "  const v = env.get('CAPSID_PAIR');"
+                    "  return new Response(v === 'B' ? 'pair-ok' : ('SPLIT-B:' + v));"
+                    "} };");
+
+#if defined(__linux__)
+    const std::string dir_a_str = dir_a.string();
+    const std::string dir_b_str = dir_b.string();
+    const long probe = syscall(SYS_renameat2, AT_FDCWD, dir_a_str.c_str(), AT_FDCWD,
+                               dir_b_str.c_str(), RENAME_EXCHANGE);
+    require(probe == 0, "RENAME_EXCHANGE unsupported on /tmp test directory");
+
+    std::atomic<bool> stop_swapping{false};
+    std::thread swapper([&] {
+        while (!stop_swapping.load(std::memory_order_relaxed)) {
+            (void)syscall(SYS_renameat2, AT_FDCWD, dir_a_str.c_str(), AT_FDCWD, dir_b_str.c_str(),
+                          RENAME_EXCHANGE);
+        }
+    });
+
+    for (int i = 0; i < 6; ++i) {
+        int ready[2];
+        require(capsid::win32::create_socket_pair(ready), "cannot create READY pipe");
+        capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
+        options.app_dir = dir_a_str;
+        options.capsid_json_path.clear();
+        options.capsid_json_required = true;
+        capsid::host::LocalDevHost server(std::move(options));
+        std::string error;
+        const bool started = server.start(&error);
+        require(started,
+                "concurrent-dir-swap iteration " + std::to_string(i) + " failed: " + error);
+        close(ready[1]);
+        const std::uint16_t port = ready_port(read_ready_line(ready[0]));
+        close(ready[0]);
+        const std::string body = get_body(port, "/@capsid/orders/pair");
+        server.request_stop();
+        require(server.wait(&error), "concurrent-dir-swap wait failed: " + error);
+        require(body == "pair-ok", "split-brain capsid.json vs bundle.mjs detected: " + body);
+    }
+    stop_swapping.store(true, std::memory_order_relaxed);
+    swapper.join();
+#else
+    const std::filesystem::path dir_swap = swap_root / "dir_swap";
+    std::atomic<bool> stop_swapping{false};
+    unsigned completed_moves = 0;
+    std::thread mover([&] {
+        while (!stop_swapping.load(std::memory_order_relaxed)) {
+            std::error_code rename_ec;
+            std::filesystem::rename(dir_a, dir_swap, rename_ec);
+            if (!rename_ec) {
+                std::filesystem::rename(dir_swap, dir_a, rename_ec);
+                if (!rename_ec)
+                    ++completed_moves;
+            }
+        }
+    });
+    unsigned successful_reads = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    for (int i = 0; i < 6 || (successful_reads == 0 && std::chrono::steady_clock::now() < deadline);
+         ++i) {
+        int ready[2];
+        require(capsid::win32::create_socket_pair(ready), "cannot create READY pipe");
+        capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
+        options.app_dir = dir_a.string();
+        options.capsid_json_path.clear();
+        options.capsid_json_required = true;
+        capsid::host::LocalDevHost server(std::move(options));
+        std::string error;
+        const bool started = server.start(&error);
+        if (started) {
+            ++successful_reads;
+            close(ready[1]);
+            const std::uint16_t port = ready_port(read_ready_line(ready[0]));
+            close(ready[0]);
+            const std::string body = get_body(port, "/@capsid/orders/pair");
+            server.request_stop();
+            require(server.wait(&error), "concurrent-dir-swap wait failed: " + error);
+            require(body == "pair-ok", "split-brain capsid.json vs bundle.mjs detected: " + body);
+        } else {
+            server.request_stop();
+            std::string wait_error;
+            require(server.wait(&wait_error), "concurrent-dir-swap wait failed: " + wait_error);
+            close(ready[0]);
+            close(ready[1]);
+            require(error == "cannot open " + dir_a.string() ||
+                        error == "cannot find " + (dir_a / "capsid.json").string(),
+                    "unexpected concurrent swap failure: " + error);
+        }
+    }
+    stop_swapping.store(true, std::memory_order_relaxed);
+    mover.join();
+    require(completed_moves > 0, "mover completed no rename cycles");
+    require(successful_reads > 0, "no successful reads while the mover was active");
+    if (!std::filesystem::exists(dir_a, ec) && std::filesystem::exists(dir_swap, ec)) {
+        std::filesystem::rename(dir_swap, dir_a, ec);
+    }
+    {
+        int ready[2];
+        require(capsid::win32::create_socket_pair(ready), "cannot create READY pipe");
+        capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
+        options.app_dir = dir_a.string();
+        options.capsid_json_path.clear();
+        options.capsid_json_required = true;
+        capsid::host::LocalDevHost server(std::move(options));
+        std::string error;
+        require(server.start(&error), "post-swap start failed: " + error);
+        close(ready[1]);
+        const std::uint16_t port = ready_port(read_ready_line(ready[0]));
+        close(ready[0]);
+        const std::string body = get_body(port, "/@capsid/orders/pair");
+        server.request_stop();
+        require(server.wait(&error), "post-swap wait failed: " + error);
+        require(body == "pair-ok", "post-swap mismatch: " + body);
+    }
+#endif
+
+    std::filesystem::remove_all(swap_root, ec);
+    std::cout << "ok app-dir-concurrent-swap-atomic" << std::endl;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -453,6 +666,12 @@ int main(int argc, char** argv) {
         argv[1], "binding-secret-rejected",
         R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"secrets":{"password":{"valueFrom":"echo-password"}}}}})json",
         false, "binding secrets are unavailable in local mode", echo_registry);
+
+    // 14. Symlink / NTFS directory junction app_dir is rejected (P2 #12).
+    run_reparse_app_dir_rejected(argv[1]);
+
+    // 15. Concurrent app_dir swap/rename between capsid.json and entry read stays anchored (P2 #12).
+    run_concurrent_dir_swap_atomic(argv[1]);
 
     std::cout << "PASS" << std::endl;
     return 0;

@@ -36,7 +36,7 @@ bool valid_type_versioned(uint16_t type, uint16_t version) {
     return valid_type(type);
 }
 
-// Hello v4 payload validation (docs/fetchrpc-v4.md §1.2, amended): the
+// Hello v4 payload validation (docs/reference/fetchrpc-v4.md §1.2, amended): the
 // v3 startup-config payload (variable length) plus an 8-byte
 // capability tail; only the tail is validated here - known capability
 // bits only, reserved word zero.
@@ -83,7 +83,7 @@ bool valid_flags(uint16_t type, uint32_t flags) {
     return flags == 0;
 }
 
-// v4 flag rules (docs/fetchrpc-v4.md §2-3): Upgrade flags ride the
+// v4 flag rules (docs/reference/fetchrpc-v4.md §2-3): Upgrade flags ride the
 // existing head frames, channel frames carry their own namespace.
 bool valid_flags_versioned(uint16_t type, uint32_t flags, uint16_t version) {
     if (version != kVersionV4) {
@@ -342,7 +342,7 @@ bool read_u64(const uint8_t** cursor, const uint8_t* end, uint64_t* value) {
     return true;
 }
 
-// ---- A2 amendment (v4.1): docs/fetchrpc-v4.md sections 1.2.1, 3.2, 3.6 ----
+// ---- A2 amendment (v4.1): docs/reference/fetchrpc-v4.md sections 1.2.1, 3.2, 3.6 ----
 
 bool capabilities_satisfy_closure(uint32_t capabilities) {
     if ((capabilities & ~kCapabilitiesKnownMask) != 0) {

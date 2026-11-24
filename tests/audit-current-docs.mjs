@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -39,11 +40,31 @@ const documentPaths = [
   .map((value) => value.split(path.sep).join('/'))
   .sort();
 
+const coverage = JSON.parse(
+  await readFile(path.join(root, 'docs/data/documentation-coverage.json'), 'utf8'),
+);
+assert.equal(coverage.schema, 1);
+
+// The readable English editions occupy their original paths. A published release
+// retains the exact captures, including the line endings used by the evidence logs.
+const capturedBytes = new Map();
+const captureRevision = '845ae5dee5833c1bed1c2630cfb65e6ed76af7d7'; // v0.3.1-beta.1
+for (const entry of coverage.documents.filter((doc) => doc.kind === 'historical-translation')) {
+  assert.match(entry.path, /^docs\/(?:evidence\/v0\.3\.0|history\/archives)\//);
+  const original = execFileSync(
+    'git',
+    ['-C', root, 'cat-file', 'blob', `${captureRevision}:${entry.path}`],
+    { maxBuffer: 4 * 1024 * 1024 },
+  );
+  assert.equal(createHash('sha256').update(original).digest('hex'), entry.sourceSha256, entry.path);
+  capturedBytes.set(entry.path, original);
+}
+
 const documents = new Map();
 let archivedSnapshots = 0;
 for (const relativePath of documentPaths) {
   const bytes = await readFile(path.join(root, relativePath));
-  if (await archivedQualification(root, relativePath, bytes)) {
+  if (await archivedQualification(root, relativePath, capturedBytes.get(relativePath) ?? bytes)) {
     archivedSnapshots += 1;
     continue;
   }
@@ -58,31 +79,41 @@ for (const relativePath of documentPaths) {
 // Mixed current-reference/journal pages were migrated without rewriting the
 // captured source. Keep the original frozen contract checks against exact bytes,
 // while current pages describe the delivered release rather than old M1 status.
+const archivedPages = coverage.documents.filter((entry) => entry.archivedSource);
+const pageForArchive = new Map(archivedPages.map((entry) => [entry.archivedSource, entry.path]));
+assert.equal(pageForArchive.size, archivedPages.length, 'each archived source has one entry page');
 const sourceSnapshots = new Map();
 const migration = JSON.parse(
   await readFile(path.join(root, 'docs/history/archives/2026-11-17/index.json'), 'utf8'),
 );
 assert.equal(migration.schema, 1, 'known historical-document migration schema');
 for (const snapshot of migration.snapshots) {
+  assert.equal(
+    snapshot.originalPath,
+    `docs/${path.posix.basename(snapshot.path, '.txt')}`,
+    'an archived journal retains its original source identity',
+  );
+  const page = pageForArchive.get(snapshot.path);
   const target = path.resolve(root, snapshot.path);
   assert.ok(
     target.startsWith(path.join(root, 'docs/history/archives/2026-11-17') + path.sep),
     'historical source stays in its inventoried archive',
   );
   assert.ok(
-    documents.has(snapshot.originalPath) && !sourceSnapshots.has(snapshot.originalPath),
+    documents.has(page) && !sourceSnapshots.has(page),
     'one historical source per maintained entry page',
   );
-  const bytes = await readFile(target);
+  const bytes = capturedBytes.get(snapshot.path) ?? (await readFile(target));
   assert.equal(bytes.length, snapshot.bytes, 'historical source length is exact');
   assert.equal(
     createHash('sha256').update(bytes).digest('hex'),
     snapshot.sha256,
     'historical source bytes were not rewritten',
   );
-  sourceSnapshots.set(snapshot.originalPath, bytes.toString('utf8').replace(/\r\n/g, '\n'));
+  sourceSnapshots.set(page, bytes.toString('utf8').replace(/\r\n/g, '\n'));
 }
 assert.equal(sourceSnapshots.size, 6, 'all six mixed journals retain captured source');
+assert.equal(sourceSnapshots.size, pageForArchive.size, 'all inventoried archives were verified');
 
 function localLinks(relativePath, content) {
   const links = [];
@@ -124,6 +155,22 @@ for (const [relativePath, content] of documents) {
 // permits a small hierarchy (for example the framework index) without allowing
 // an unindexed orphan document to accumulate.
 const docsPaths = [...documents.keys()].filter((value) => value.startsWith('docs/'));
+const docsEntries = await readdir(path.join(root, 'docs'), { withFileTypes: true });
+assert.deepEqual(
+  docsEntries
+    .filter((entry) => !entry.name.startsWith('.'))
+    .map((entry) => entry.name)
+    .sort(),
+  ['README.md', 'data', 'design', 'evidence', 'guides', 'history', 'reference'],
+  'file documentation under its subject directory and keep only the index at the top level',
+);
+for (const name of docsPaths.filter((p) => /^docs\/(guides|reference|design)\//.test(p))) {
+  assert.match(
+    name,
+    /^docs\/(?:[a-z0-9]+(?:-[a-z0-9]+)*\/)+(?:README|[a-z0-9]+(?:-[a-z0-9]+)*)\.md$/,
+    'use lowercase hyphenated subject names, or README.md for an index',
+  );
+}
 const reachable = new Set(['docs/README.md']);
 const pending = ['docs/README.md'];
 while (pending.length > 0) {
@@ -148,17 +195,17 @@ assert.deepEqual(
 );
 
 const capabilityManifest = JSON.parse(
-  await readFile(path.join(root, 'docs/capability-manifest.json'), 'utf8'),
+  await readFile(path.join(root, 'docs/data/capability-manifest.json'), 'utf8'),
 );
 const readme = documents.get('README.md');
 const contributing = documents.get('CONTRIBUTING.md');
 const securityPolicy = documents.get('SECURITY.md');
-const architecture = documents.get('docs/architecture.md');
-const hostDesign = documents.get('docs/host-technical-design-review.md');
-const performanceGuide = documents.get('docs/performance-benchmarks.md');
-const testingGuide = documents.get('docs/testing.md');
-const capabilityPolicy = documents.get('docs/capability-policy.md');
-const modulePermissions = documents.get('docs/module-permissions.md');
+const architecture = documents.get('docs/design/runtime-architecture.md');
+const hostDesign = documents.get('docs/design/host-architecture.md');
+const performanceGuide = documents.get('docs/reference/benchmarks.md');
+const testingGuide = documents.get('docs/guides/run-tests.md');
+const capabilityPolicy = documents.get('docs/reference/capability-policy.md');
+const modulePermissions = documents.get('docs/reference/module-permissions.md');
 for (const moduleName of capabilityManifest.modules.built_and_available) {
   assert.ok(
     readme.includes(`\`${moduleName}\``),
@@ -213,7 +260,7 @@ assert.ok(
 );
 assert.ok(
   architecture.includes('Elysia 1.4.29'),
-  'docs/architecture.md omits the currently validated Elysia version',
+  'docs/design/runtime-architecture.md omits the currently validated Elysia version',
 );
 for (const staleClaim of [
   'The current tree has no benchmark runner',
@@ -221,13 +268,13 @@ for (const staleClaim of [
 ]) {
   assert.ok(
     !hostDesign.includes(staleClaim),
-    `docs/host-technical-design-review.md contains stale current-state claim: ${staleClaim}`,
+    `docs/design/host-architecture.md contains stale current-state claim: ${staleClaim}`,
   );
 }
 
 for (const [documentName, content, requiredFragments] of [
   [
-    'docs/architecture.md',
+    'docs/design/runtime-architecture.md',
     architecture,
     [
       'Platform support splits into two independent commitments: native development and production isolation.',
@@ -237,7 +284,7 @@ for (const [documentName, content, requiredFragments] of [
     ],
   ],
   [
-    'docs/host-technical-design-review.md',
+    'docs/design/host-architecture.md',
     hostDesign,
     [
       'not part of the M1 release gate; M1A',
@@ -253,8 +300,8 @@ for (const [documentName, content, requiredFragments] of [
     ],
   ],
   [
-    'docs/testing.md',
-    documents.get('docs/testing.md'),
+    'docs/guides/run-tests.md',
+    documents.get('docs/guides/run-tests.md'),
     [
       'TSan (M1C gate)',
       'must pass before M1C acceptance',
@@ -265,7 +312,7 @@ for (const [documentName, content, requiredFragments] of [
     ],
   ],
   [
-    'docs/performance-benchmarks.md',
+    'docs/reference/benchmarks.md',
     performanceGuide,
     [
       'the first round does not wait for request body, streaming, cancel, or timeout to be implemented',
@@ -273,7 +320,7 @@ for (const [documentName, content, requiredFragments] of [
     ],
   ],
   [
-    'docs/testing.md',
+    'docs/guides/run-tests.md',
     testingGuide,
     [
       'Windows native-dev uses the `windows-latest` hosted runner',
@@ -325,7 +372,7 @@ for (const staleFragment of [
 }
 
 const currentStatus = JSON.parse(
-  await readFile(path.join(root, 'docs/current-status.json'), 'utf8'),
+  await readFile(path.join(root, 'docs/data/current-status.json'), 'utf8'),
 );
 const profileV2 = JSON.parse(
   await readFile(path.join(root, 'tests/wpt/workerd-default-profile-v2.json'), 'utf8'),
@@ -390,13 +437,13 @@ assert.equal(
   false,
   'the dev/v0.3.1 measurement is not relabeled as a published release asset benchmark',
 );
-assert.ok(documents.get('docs/conformance.md').includes('workerd-default-profile-v2.json'));
-assert.ok(documents.get('docs/host-integration.md').includes('capsid_worker_channel_confirm'));
-
-const coverage = JSON.parse(
-  await readFile(path.join(root, 'docs/documentation-coverage.json'), 'utf8'),
+assert.ok(
+  documents.get('docs/reference/web-conformance.md').includes('workerd-default-profile-v2.json'),
 );
-assert.equal(coverage.schema, 1);
+assert.ok(
+  documents.get('docs/reference/embedding-api.md').includes('capsid_worker_channel_confirm'),
+);
+
 const coveredDocs = coverage.documents.filter(
   (value) => value.path.startsWith('docs/') && value.path.endsWith('.md'),
 );
@@ -410,6 +457,7 @@ for (const document of coverage.documents) {
     [
       'current-reference',
       'historical-plan-or-journal',
+      'historical-translation',
       'immutable-evidence',
       'release-history',
     ].includes(document.kind),
@@ -430,6 +478,15 @@ for (const document of coverage.documents) {
     `${document.path}: coverage data is stale`,
   );
 }
+const actualKindCounts = {};
+for (const document of coverage.documents) {
+  actualKindCounts[document.kind] = (actualKindCounts[document.kind] ?? 0) + 1;
+}
+assert.deepEqual(
+  coverage.counts,
+  actualKindCounts,
+  'documentation-coverage.json counts must match per-kind document totals',
+);
 
 console.log(
   `current docs: ${documents.size} documents, ${archivedSnapshots} archived snapshots hash-checked, ` +

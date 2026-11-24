@@ -24,8 +24,7 @@ using capsid::host::ChannelLedger;
 using capsid::host::ServiceChannelBudget;
 
 void test_separate_counters_and_upgrade_commit() {
-    // Red item: 零 HTTP inflight 仍有活跃 WS — the counters are
-    // separate and observable after an upgrade commits.
+    // A committed upgrade leaves an active WebSocket after HTTP inflight drops to zero.
     ChannelLedger::Limits limits;
     limits.max_http_inflight = 4;
     limits.max_channels = 4;
@@ -54,7 +53,7 @@ void test_separate_counters_and_upgrade_commit() {
 }
 
 void test_failed_reservation_restores_capacity() {
-    // Red item: 失败预留恢复容量
+    // A refused reservation leaves the available capacity intact.
     ChannelLedger::Limits limits;
     limits.max_channels = 1;
     limits.max_pending_dials = 1;
@@ -86,7 +85,7 @@ void test_failed_reservation_restores_capacity() {
 }
 
 void test_retire_gating() {
-    // Red item: retire 后不再接新 channel；既有通道继续可见
+    // Retirement blocks new channels and keeps existing channels visible until they drain.
     ChannelLedger::Limits limits;
     limits.max_channels = 4;
     ChannelLedger ledger(limits);
@@ -104,7 +103,7 @@ void test_retire_gating() {
 }
 
 void test_service_aggregate() {
-    // listener 与整服务都有 aggregate budget
+    // Channel and dial budgets apply per listener and across the whole service.
     ServiceChannelBudget service;
     service.set_channel_ceiling(2);
     service.set_dial_ceiling(1);
@@ -130,8 +129,7 @@ void test_service_aggregate() {
 }
 
 void test_generation_identity_sensitivity() {
-    // Red item: 相同 bundle 不同 limits 的 generation — protocol
-    // limits take part in the identity
+    // Changing protocol limits changes the generation identity even for the same bundle.
     capsid::protocol::ChannelLimits defaults;
     capsid::protocol::ChannelLimits bigger;
     bigger.max_channels = 256;

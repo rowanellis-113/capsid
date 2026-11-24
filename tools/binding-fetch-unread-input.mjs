@@ -89,7 +89,7 @@ export const unreadBindingInputPaths = Object.freeze({
   contract: 'tools/binding-fetch-unread-contract.mjs',
   helper: 'tests/test_binding_fetch_retained.cc',
   exitObserver: 'tests/graceful_worker_exit.h',
-  policy: 'docs/binding-technical-design.md',
+  policy: 'docs/design/bindings-v1.md',
   rpcPolicy: 'src/binding_rpc.h',
   rpcBackend: 'src/binding_rpc.cc',
 });

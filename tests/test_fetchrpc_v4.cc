@@ -1,6 +1,6 @@
 // FetchRPC v4 conformance harness (contract stage + A2 amendment v4.1).
 //
-// Contract: docs/fetchrpc-v4.md (FROZEN 2026-10-11 + A2 2026-10-12).
+// Contract: docs/reference/fetchrpc-v4.md (FROZEN 2026-10-11 + A2 2026-10-12).
 // Golden vectors: tests/fixtures/fetchrpc-v4/vectors.json
 // (schema_version 2, frozen with the contract).
 //

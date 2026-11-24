@@ -1,13 +1,9 @@
-// WP-05 §9.1: typed Host configuration model. The schema boundary
-// (validate_config_json) stays the authority; this model is the typed
-// projection of every accepted host.json field. A field the schema accepts
-// but this parse cannot map is a startup error — never a silent ignore.
-//
-// PR-08 scope: the model + the parse; listeners/recovery/capacity-extra are
-// carried typed and consumed by the later data-plane PRs (09/10). The
-// semantic gates that protect the coordinator stay here: admin.mode must be
-// exactly 0600, isolation.mode must be "strict", capacity.workersTotal must
-// be positive and within the Host limit.
+// Typed Host configuration model. The schema boundary (validate_config_json)
+// stays the authority; this model is the typed projection of every accepted
+// host.json field. A field the schema accepts but this parse cannot map is a
+// startup error — never a silent ignore. Semantic gates that protect the
+// coordinator stay here: admin.mode must be 0600, isolation.mode must be
+// "strict", and capacity.workersTotal must be positive and within bounds.
 
 #ifndef CAPSID_HOST_HOST_CONFIG_MODEL_H
 #define CAPSID_HOST_HOST_CONFIG_MODEL_H
@@ -25,7 +21,7 @@
 
 namespace capsid::host {
 
-// ---- listener model (§9.2; wired into the data plane by PR-09) ---------
+// ---- listener model -----------------------------------------------------
 
 struct ListenerRoutingConfig {
     std::string mode;       // "path" | "subdomain" | "header" | "single"
@@ -62,7 +58,8 @@ struct ListenerCorsConfig {
     std::vector<std::string> allowed_methods;
     // Lowercase header names the preflight may declare.
     std::vector<std::string> allowed_headers;
-    // Access-Control-Max-Age seconds; 0 = omit the header.
+    // Access-Control-Max-Age duration in milliseconds (rounded up to whole
+    // seconds when emitted); 0 = omit the header.
     std::uint64_t max_age_ms = 0;
 };
 
@@ -144,6 +141,8 @@ struct TenancyConfig {
     bool configured = false;
     TenantQuotaConfig default_quota;
     std::map<std::string, TenantQuotaConfig> overrides;
+
+    TenantQuotaConfig quota_for(const std::string& tenant) const;
 };
 
 // §9.4: workersTotal is the steady-state budget; the remaining capacity
@@ -166,10 +165,11 @@ struct CapacityConfig {
     MemoryBudgetConfig memory;
 };
 
-// GLM T08: host-level channel limits (FetchRPC v4 A2). Zero selects
-// the deployment default; nonzero values must satisfy the frozen A2
-// bounds (protocol::validate_channel_limits) at parse time. The
-// section's presence requests channel capabilities on the wire.
+// Host-level channel limits (FetchRPC v4 A2). Zero selects the deployment
+// default; nonzero values must satisfy the frozen A2 bounds
+// (protocol::validate_channel_limits) at parse time. When configured,
+// ProtocolLaunch::from() adds CAPSID_PROTOCOL_CAP_HALF_CLOSE and forwards
+// these channel limits on the worker wire.
 struct ChannelsConfig {
     bool configured = false;
     std::uint32_t max_channels = 0;
@@ -229,8 +229,8 @@ struct ParsedHostConfig {
     TierConfig maximums;
     CapacityConfig capacity;
     TenancyConfig tenancy;
-    // GLM T08: channel limits compiled into the generation snapshot;
-    // presence requests channel capabilities on the worker wire.
+    // Channel limits compiled into the generation snapshot; when configured,
+    // ProtocolLaunch::from() adds HALF_CLOSE and forwards these limits.
     ChannelsConfig channels;
     RecoveryConfig recovery;
 };

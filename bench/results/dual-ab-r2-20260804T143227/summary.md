@@ -1,14 +1,16 @@
-# 双 A/B 验收证据（返修批次，fresh 构建）
+# Two A/B comparisons for the repair batch (fresh build)
 
-## A/B 1: a148005 vs current —— 性能悬崖修复
-- bytes65537@64c: a148005 177 QPS（3 errors，挂死）→ current 1035 QPS（零错误）—— 5.8x
-## A/B 2: 3f7e8b2 vs current —— 返修无回退
-- bytes64k@64c: 1071 vs 1070（0%）
-- bytes65537@64c: 1063 vs 1035（-2.6%）
-- json@64c: 1638 vs 1642（+0.2%）
-- json16k@64c: 1129 vs 1132（+0.3%）—— 无回退
+## A/B 1. Throughput cliff at a 65,537-byte response
 
-结论：悬崖修复确认；返修批次（phase/OutboundBuffer/测试强化）无回退；
-1K/16K 档相对修复前基线（1594/1134）亦无回退。每侧 manifest（commit、
-二进制 SHA、loadgen/bundle SHA、参数）、profile（CPU ticks/RSS）与原始
-样本（samples.*.jsonl）均保留在本目录。
+At 64 connections, `bytes65537` went from 177 QPS at `a148005` (three errors and a hang) to 1,035 QPS with zero errors in the current build, a 5.8× increase.
+
+## A/B 2. Regression check against `3f7e8b2`
+
+| Fixture at 64 connections | `3f7e8b2` (QPS) | Current build (QPS) | Change |
+| --- | ---: | ---: | ---: |
+| bytes64k | 1,071 | 1,070 | 0% |
+| bytes65537 | 1,063 | 1,035 | −2.6% |
+| json | 1,638 | 1,642 | +0.2% |
+| json16k | 1,129 | 1,132 | +0.3% |
+
+The repair removed the throughput cliff. The phase changes, OutboundBuffer changes and stronger tests showed no regression in this comparison. The 1K and 16K results also held up against the pre-repair baselines of 1,594 and 1,134 QPS. This directory retains the manifests for both sides (commit, binary, load generator and bundle hashes, and parameters), CPU tick and RSS profiles, and raw `samples.*.jsonl` files.

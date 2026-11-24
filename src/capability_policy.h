@@ -81,7 +81,7 @@ const char* permission_resource_kind(capsid_permission_name permission);
 const char* permission_state_name(capsid_permission_state state);
 const char* capability_manifest_hash();
 
-// --- Binding v1 origin model (docs/binding-technical-design.md §3.1) -----
+// --- Binding v1 origin model (docs/design/bindings-v1.md §3.1) -----
 //
 // Native operations run under exactly one origin: the User Runtime or one
 // Binding Runtime. Origin comes from the JSContext/opaque carrying the

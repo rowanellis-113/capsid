@@ -1,4 +1,4 @@
-// LocalDevHost implementation (docs/config-v2-design.md §5).
+// LocalDevHost implementation (docs/design/config-v2.md §5).
 // Composes GenerationPool + ManagedListener + RoutingTable on all platforms.
 
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
@@ -137,6 +137,348 @@ template <typename Stat> bool same_file_identity(const Stat& before, const Stat&
            CAPSID_DEV_CTIME_NSEC(before) == CAPSID_DEV_CTIME_NSEC(after);
 }
 
+bool valid_local_entry_name(const std::string& entry) {
+    if (entry.empty() || entry.size() > 255 || entry == "." || entry == ".." ||
+        entry.find('/') != std::string::npos || entry.find('\\') != std::string::npos ||
+        entry.find(':') != std::string::npos || entry.find('\0') != std::string::npos) {
+        return false;
+    }
+    return entry.find("..") == std::string::npos;
+}
+
+// Anchors the resolved app directory handle across both the capsid.json and
+// bundle reads so swapping the parent directory in between cannot split the
+// trust boundary of config vs code.
+class ScopedLocalDir {
+  public:
+    ScopedLocalDir() = default;
+    ~ScopedLocalDir() { close(); }
+
+    ScopedLocalDir(const ScopedLocalDir&) = delete;
+    ScopedLocalDir& operator=(const ScopedLocalDir&) = delete;
+
+    ReadOutcome open_dir(const std::string& path, std::string* error) {
+        close();
+        if (path.empty() || path.find('\0') != std::string::npos) {
+            *error = "invalid directory path";
+            return ReadOutcome::kFailed;
+        }
+#if defined(_WIN32)
+        const int wide_size =
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
+        if (wide_size <= 0) {
+            *error = "cannot encode " + path;
+            return ReadOutcome::kFailed;
+        }
+        std::wstring wide_path(static_cast<std::size_t>(wide_size - 1), L'\0');
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, &wide_path[0],
+                                wide_size) <= 0) {
+            *error = "cannot encode " + path;
+            return ReadOutcome::kFailed;
+        }
+        // Omit FILE_SHARE_DELETE to pin the directory against rename/delete while reading.
+        HANDLE handle =
+            CreateFileW(wide_path.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const DWORD saved = GetLastError();
+            if (saved == ERROR_FILE_NOT_FOUND || saved == ERROR_PATH_NOT_FOUND ||
+                saved == ERROR_DIRECTORY) {
+                return ReadOutcome::kMissing;
+            }
+            *error = "cannot open " + path;
+            return ReadOutcome::kFailed;
+        }
+        FILE_ATTRIBUTE_TAG_INFO attr = {};
+        if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &attr, sizeof(attr))) {
+            CloseHandle(handle);
+            *error = "cannot inspect " + path;
+            return ReadOutcome::kFailed;
+        }
+        if ((attr.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (attr.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            CloseHandle(handle);
+            *error = path + " is not a directory";
+            return ReadOutcome::kFailed;
+        }
+        BY_HANDLE_FILE_INFORMATION info = {};
+        if (!GetFileInformationByHandle(handle, &info)) {
+            CloseHandle(handle);
+            *error = "cannot inspect " + path;
+            return ReadOutcome::kFailed;
+        }
+        const DWORD needed = GetFinalPathNameByHandleW(handle, nullptr, 0, VOLUME_NAME_DOS);
+        if (needed == 0) {
+            CloseHandle(handle);
+            *error = "cannot resolve " + path;
+            return ReadOutcome::kFailed;
+        }
+        std::wstring resolved(needed, L'\0');
+        const DWORD actual =
+            GetFinalPathNameByHandleW(handle, &resolved[0], needed, VOLUME_NAME_DOS);
+        if (actual == 0 || actual >= needed) {
+            CloseHandle(handle);
+            *error = "cannot resolve " + path;
+            return ReadOutcome::kFailed;
+        }
+        resolved.resize(actual);
+        handle_ = handle;
+        final_path_ = std::move(resolved);
+        volume_serial_ = info.dwVolumeSerialNumber;
+        index_high_ = info.nFileIndexHigh;
+        index_low_ = info.nFileIndexLow;
+        return ReadOutcome::kOk;
+#else
+        std::string open_path = path;
+        while (open_path.size() > 1 && open_path.back() == '/') {
+            open_path.pop_back();
+        }
+        const int fd = open(open_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (fd < 0) {
+            if (errno == ENOENT || errno == ENOTDIR) {
+                return ReadOutcome::kMissing;
+            }
+            *error = (errno == ELOOP) ? path + " is not a directory" : "cannot open " + path;
+            return ReadOutcome::kFailed;
+        }
+        struct stat st = {};
+        if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            ::close(fd);
+            *error = path + " is not a directory";
+            return ReadOutcome::kFailed;
+        }
+        if (st.st_uid != geteuid() && st.st_uid != 0) {
+            ::close(fd);
+            *error = path + " is not owned by the current user";
+            return ReadOutcome::kFailed;
+        }
+        fd_ = fd;
+        return ReadOutcome::kOk;
+#endif
+    }
+
+    void close() {
+#if defined(_WIN32)
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+        final_path_.clear();
+        volume_serial_ = 0;
+        index_high_ = 0;
+        index_low_ = 0;
+#else
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+#endif
+    }
+
+    bool is_open() const {
+#if defined(_WIN32)
+        return handle_ != INVALID_HANDLE_VALUE;
+#else
+        return fd_ >= 0;
+#endif
+    }
+
+#if defined(_WIN32)
+    const std::wstring& final_path() const { return final_path_; }
+    DWORD volume_serial() const { return volume_serial_; }
+    DWORD index_high() const { return index_high_; }
+    DWORD index_low() const { return index_low_; }
+#else
+    int fd() const { return fd_; }
+#endif
+
+  private:
+#if defined(_WIN32)
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    std::wstring final_path_;
+    DWORD volume_serial_ = 0;
+    DWORD index_high_ = 0;
+    DWORD index_low_ = 0;
+#else
+    int fd_ = -1;
+#endif
+};
+
+ReadOutcome read_open_fd_safe(int fd, const std::string& label, std::size_t max_bytes,
+                              const char* cap_label, std::vector<std::uint8_t>* out,
+                              std::string* error) {
+#if defined(_WIN32)
+    struct _stat64 before = {};
+    const bool stat_ok = _fstat64(fd, &before) == 0;
+    const bool regular = stat_ok && (before.st_mode & _S_IFREG) != 0;
+#else
+    struct stat before = {};
+    const bool stat_ok = fstat(fd, &before) == 0;
+    const bool regular = stat_ok && S_ISREG(before.st_mode);
+    const bool owned = stat_ok && (before.st_uid == geteuid() || before.st_uid == 0);
+#endif
+    if (!stat_ok) {
+        close(fd);
+        *error = "cannot stat " + label;
+        return ReadOutcome::kFailed;
+    }
+    if (!regular) {
+        close(fd);
+        *error = label + " is not a regular file";
+        return ReadOutcome::kFailed;
+    }
+#if !defined(_WIN32)
+    if (!owned) {
+        close(fd);
+        *error = label + " is not owned by the current user";
+        return ReadOutcome::kFailed;
+    }
+#endif
+    if (before.st_size < 0 || static_cast<std::uint64_t>(before.st_size) > max_bytes) {
+        close(fd);
+        *error = label + " exceeds the " + cap_label;
+        return ReadOutcome::kFailed;
+    }
+
+    out->resize(static_cast<std::size_t>(before.st_size));
+    std::size_t offset = 0;
+    while (offset < out->size()) {
+#if defined(_WIN32)
+        const std::size_t chunk = std::min<std::size_t>(out->size() - offset, 16U * 1024U * 1024U);
+        const ssize_t count = read(fd, out->data() + offset, static_cast<unsigned int>(chunk));
+#else
+        const ssize_t count = read(fd, out->data() + offset, out->size() - offset);
+#endif
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            *error = "cannot read " + label;
+            return ReadOutcome::kFailed;
+        }
+        if (count == 0) {
+            break;
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+    if (offset != out->size()) {
+        close(fd);
+        *error = label + " changed while being read";
+        return ReadOutcome::kFailed;
+    }
+
+#if defined(_WIN32)
+    struct _stat64 after = {};
+    const bool recheck_ok = _fstat64(fd, &after) == 0;
+#else
+    struct stat after = {};
+    const bool recheck_ok = fstat(fd, &after) == 0;
+#endif
+    close(fd);
+    if (!recheck_ok || !same_file_identity(before, after)) {
+        *error = label + " changed while being read";
+        return ReadOutcome::kFailed;
+    }
+    return ReadOutcome::kOk;
+}
+
+ReadOutcome read_dir_file_safe(const ScopedLocalDir& dir, const std::string& child_name,
+                               const std::string& display_label, std::size_t max_bytes,
+                               const char* cap_label, std::vector<std::uint8_t>* out,
+                               std::string* error) {
+    if (!valid_local_entry_name(child_name)) {
+        *error = display_label + ": invalid file name";
+        return ReadOutcome::kFailed;
+    }
+    if (!dir.is_open()) {
+        return ReadOutcome::kMissing;
+    }
+#if defined(_WIN32)
+    const int wide_child_size =
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, child_name.c_str(), -1, nullptr, 0);
+    if (wide_child_size <= 0) {
+        *error = "cannot encode " + display_label;
+        return ReadOutcome::kFailed;
+    }
+    std::wstring wide_child(static_cast<std::size_t>(wide_child_size - 1), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, child_name.c_str(), -1, &wide_child[0],
+                            wide_child_size) <= 0) {
+        *error = "cannot encode " + display_label;
+        return ReadOutcome::kFailed;
+    }
+    HANDLE verify_dir =
+        CreateFileW(dir.final_path().c_str(), FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (verify_dir == INVALID_HANDLE_VALUE) {
+        *error = display_label + " parent directory changed";
+        return ReadOutcome::kFailed;
+    }
+    FILE_ATTRIBUTE_TAG_INFO dir_attr = {};
+    BY_HANDLE_FILE_INFORMATION dir_info = {};
+    const bool dir_ok = GetFileInformationByHandleEx(verify_dir, FileAttributeTagInfo, &dir_attr,
+                                                     sizeof(dir_attr)) &&
+                        (dir_attr.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+                        GetFileInformationByHandle(verify_dir, &dir_info) &&
+                        dir_info.dwVolumeSerialNumber == dir.volume_serial() &&
+                        dir_info.nFileIndexHigh == dir.index_high() &&
+                        dir_info.nFileIndexLow == dir.index_low();
+    CloseHandle(verify_dir);
+    if (!dir_ok) {
+        *error = display_label + " parent directory changed";
+        return ReadOutcome::kFailed;
+    }
+    std::wstring child_path = dir.final_path();
+    if (!child_path.empty() && child_path.back() != L'\\') {
+        child_path.push_back(L'\\');
+    }
+    child_path += wide_child;
+    const HANDLE handle = CreateFileW(
+        child_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD saved = GetLastError();
+        if (saved == ERROR_FILE_NOT_FOUND || saved == ERROR_PATH_NOT_FOUND) {
+            return ReadOutcome::kMissing;
+        }
+        *error = "cannot open " + display_label;
+        return ReadOutcome::kFailed;
+    }
+    FILE_ATTRIBUTE_TAG_INFO attributes = {};
+    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &attributes,
+                                      sizeof(attributes))) {
+        CloseHandle(handle);
+        *error = "cannot inspect " + display_label;
+        return ReadOutcome::kFailed;
+    }
+    if ((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        CloseHandle(handle);
+        *error = display_label + " is not a regular file";
+        return ReadOutcome::kFailed;
+    }
+    const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        *error = "cannot open " + display_label;
+        return ReadOutcome::kFailed;
+    }
+#else
+    const int fd =
+        openat(dir.fd(), child_name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        if (errno == ENOENT || errno == ENOTDIR) {
+            return ReadOutcome::kMissing;
+        }
+        *error = (errno == ELOOP) ? display_label + " is not a regular file"
+                                  : "cannot open " + display_label;
+        return ReadOutcome::kFailed;
+    }
+#endif
+    return read_open_fd_safe(fd, display_label, max_bytes, cap_label, out, error);
+}
+
 ReadOutcome read_local_file_safe(const std::string& path, std::size_t max_bytes,
                                  const char* cap_label, std::vector<std::uint8_t>* out,
                                  std::string* error) {
@@ -197,91 +539,10 @@ ReadOutcome read_local_file_safe(const std::string& path, std::size_t max_bytes,
         return ReadOutcome::kFailed;
     }
 #endif
-
-#if defined(_WIN32)
-    struct _stat64 before = {};
-    const bool stat_ok = _fstat64(fd, &before) == 0;
-    const bool regular = stat_ok && (before.st_mode & _S_IFREG) != 0;
-#else
-    struct stat before = {};
-    const bool stat_ok = fstat(fd, &before) == 0;
-    const bool regular = stat_ok && S_ISREG(before.st_mode);
-    const bool owned = stat_ok && (before.st_uid == geteuid() || before.st_uid == 0);
-#endif
-    if (!stat_ok) {
-        close(fd);
-        *error = "cannot stat " + path;
-        return ReadOutcome::kFailed;
-    }
-    if (!regular) {
-        close(fd);
-        *error = path + " is not a regular file";
-        return ReadOutcome::kFailed;
-    }
-#if !defined(_WIN32)
-    if (!owned) {
-        close(fd);
-        *error = path + " is not owned by the current user";
-        return ReadOutcome::kFailed;
-    }
-#endif
-    if (before.st_size < 0 || static_cast<std::uint64_t>(before.st_size) > max_bytes) {
-        close(fd);
-        *error = path + " exceeds the " + cap_label;
-        return ReadOutcome::kFailed;
-    }
-
-    out->resize(static_cast<std::size_t>(before.st_size));
-    std::size_t offset = 0;
-    while (offset < out->size()) {
-#if defined(_WIN32)
-        const std::size_t chunk = std::min<std::size_t>(out->size() - offset, 16U * 1024U * 1024U);
-        const ssize_t count = read(fd, out->data() + offset, static_cast<unsigned int>(chunk));
-#else
-        const ssize_t count = read(fd, out->data() + offset, out->size() - offset);
-#endif
-        if (count < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            close(fd);
-            *error = "cannot read " + path;
-            return ReadOutcome::kFailed;
-        }
-        if (count == 0) {
-            break;
-        }
-        offset += static_cast<std::size_t>(count);
-    }
-    if (offset != out->size()) {
-        close(fd);
-        *error = path + " changed while being read";
-        return ReadOutcome::kFailed;
-    }
-
-#if defined(_WIN32)
-    struct _stat64 after = {};
-    const bool recheck_ok = _fstat64(fd, &after) == 0;
-#else
-    struct stat after = {};
-    const bool recheck_ok = fstat(fd, &after) == 0;
-#endif
-    close(fd);
-    if (!recheck_ok || !same_file_identity(before, after)) {
-        *error = path + " changed while being read";
-        return ReadOutcome::kFailed;
-    }
-    return ReadOutcome::kOk;
+    return read_open_fd_safe(fd, path, max_bytes, cap_label, out, error);
 }
 
-bool valid_application_id(const std::string& application) {
-    ActiveStateDocument probe;
-    probe.state = ActiveServiceState::kActive;
-    probe.application = application;
-    probe.version = "v0";
-    probe.generation = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-    return encode_active_state_json(probe).ok;
-}
+bool valid_application_id(const std::string& application) { return valid_tenant_id(application); }
 
 bool valid_local_secret_key_id(const std::string& key_id) {
     if (key_id.empty() || key_id.size() > kMaxLocalSecretKeyIdBytes) {
@@ -345,15 +606,6 @@ bool valid_local_secret_value(const std::vector<std::uint8_t>& value) {
         index += continuation + 1;
     }
     return true;
-}
-
-bool valid_local_entry_name(const std::string& entry) {
-    if (entry.empty() || entry.size() > 255 || entry == "." || entry == ".." ||
-        entry.find('/') != std::string::npos || entry.find('\\') != std::string::npos ||
-        entry.find(':') != std::string::npos || entry.find('\0') != std::string::npos) {
-        return false;
-    }
-    return entry.find("..") == std::string::npos;
 }
 
 bool read_secret_literal(const std::string& secrets_dir, const std::string& key_id,
@@ -790,25 +1042,51 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
         return fail_start(error, "cannot locate capsid-worker; pass --worker <path>");
     }
 
-    // 1. Read and schema-validate capsid.json (inline override or app_dir/capsid.json).
+    // 1. Read and schema-validate capsid.json (inline override or app_dir/capsid.json),
+    // anchoring the app directory identity before reading either capsid.json or the bundle.
     std::vector<std::uint8_t> capsid_bytes;
     std::string capsid_label;
     std::filesystem::path resolved_json_dir = options_.app_dir.empty()
                                                   ? std::filesystem::path(".")
                                                   : std::filesystem::path(options_.app_dir);
-    if (options_.capsid_json_text.has_value()) {
-        capsid_bytes.assign(options_.capsid_json_text->begin(), options_.capsid_json_text->end());
+    std::string json_filename = "capsid.json";
+    const bool need_disk_json = !options_.capsid_json_text.has_value();
+    const bool need_disk_bundle = (inline_bundle == nullptr);
+    if (need_disk_json) {
+        if (!options_.capsid_json_path.empty()) {
+            const std::filesystem::path json_path(options_.capsid_json_path);
+            capsid_label = json_path.string();
+            json_filename = json_path.filename().string();
+            if (json_path.has_parent_path()) {
+                resolved_json_dir = json_path.parent_path();
+            } else {
+                resolved_json_dir = std::filesystem::path(".");
+            }
+        } else {
+            capsid_label = (resolved_json_dir / json_filename).string();
+        }
+    } else {
         capsid_label =
             !options_.capsid_json_path.empty() ? options_.capsid_json_path : "capsid.json";
+    }
+
+    ScopedLocalDir app_dir_guard;
+    if (need_disk_json || need_disk_bundle) {
+        std::string dir_error;
+        const ReadOutcome dir_outcome =
+            app_dir_guard.open_dir(resolved_json_dir.string(), &dir_error);
+        if (dir_outcome == ReadOutcome::kFailed) {
+            return fail_start(error, dir_error);
+        }
+    }
+
+    if (!need_disk_json) {
+        capsid_bytes.assign(options_.capsid_json_text->begin(), options_.capsid_json_text->end());
     } else {
-        const std::filesystem::path json_path =
-            !options_.capsid_json_path.empty() ? std::filesystem::path(options_.capsid_json_path)
-                                               : (resolved_json_dir / "capsid.json");
-        capsid_label = json_path.string();
         std::string read_error;
         const ReadOutcome outcome =
-            read_local_file_safe(capsid_label, kMaxLocalConfigBytes, "1 MiB capsid.json cap",
-                                 &capsid_bytes, &read_error);
+            read_dir_file_safe(app_dir_guard, json_filename, capsid_label, kMaxLocalConfigBytes,
+                               "1 MiB capsid.json cap", &capsid_bytes, &read_error);
         if (outcome == ReadOutcome::kMissing) {
             if (options_.capsid_json_required) {
                 return fail_start(error, "cannot find " + capsid_label);
@@ -818,9 +1096,6 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
             capsid_bytes.assign(kDefaultAppV2.begin(), kDefaultAppV2.end());
         } else if (outcome != ReadOutcome::kOk) {
             return fail_start(error, read_error);
-        }
-        if (json_path.has_parent_path()) {
-            resolved_json_dir = json_path.parent_path();
         }
     }
 
@@ -873,13 +1148,13 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
 
     std::vector<std::uint8_t> bundle_bytes;
     const std::filesystem::path bundle_path = resolved_json_dir / entry_name;
-    if (inline_bundle != nullptr) {
+    if (!need_disk_bundle) {
         bundle_bytes = *inline_bundle;
     } else {
         std::string bundle_error;
-        const ReadOutcome bundle_outcome =
-            read_local_file_safe(bundle_path.string(), kMaxLocalBundleBytes, "64 MiB bundle cap",
-                                 &bundle_bytes, &bundle_error);
+        const ReadOutcome bundle_outcome = read_dir_file_safe(
+            app_dir_guard, entry_name, bundle_path.string(), kMaxLocalBundleBytes,
+            "64 MiB bundle cap", &bundle_bytes, &bundle_error);
         if (bundle_outcome == ReadOutcome::kMissing) {
             return fail_start(error, "cannot find bundle " + bundle_path.string());
         }
@@ -887,6 +1162,7 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
             return fail_start(error, bundle_error);
         }
     }
+    app_dir_guard.close();
 
     // 3. Load optional --host-config or construct permissive local Host defaults.
     bool has_host_config = !options_.host_config_path.empty();

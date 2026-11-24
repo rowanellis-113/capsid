@@ -5,9 +5,7 @@
 // health, inflight and stop/wait. capsid_worker_destroy runs exclusively
 // on the executor's reaper thread, exactly once.
 //
-// PR-06 gate (spec §8.4): the SingleWorkerServer tests are the regression
-// gate for the extraction; this test pins the NEW public contract that the
-// extraction exists to provide:
+// Pins the WorkerExecutor public contract:
 //   - startup failure: a factory that rejects leaves no thread, no worker
 //     and a stop_and_join() that is a safe no-op; a second start is
 //     rejected;

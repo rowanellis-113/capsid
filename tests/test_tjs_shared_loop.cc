@@ -1,4 +1,4 @@
-// Binding v1 §7.5 (docs/binding-technical-design.md §5.1): two TJS/QuickJS
+// Binding v1 §7.5 (docs/design/bindings-v1.md §5.1): two TJS/QuickJS
 // runtimes on one Capsid-owned loop. The second runtime attaches via
 // TJSRunOptions.shared_loop: it never initializes or closes the loop, its
 // job queue is pumped by the owning runtime's loop, heaps and globals stay

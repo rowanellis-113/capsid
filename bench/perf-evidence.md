@@ -1,6 +1,6 @@
 # Performance archive contract
 
-> See the [performance reference](../docs/performance-benchmarks.md) for the
+> See the [performance reference](../docs/reference/benchmarks.md) for the
 > latest accepted record. Archive acceptance applies to the measured binary,
 > not the published prerelease. Original raw assertions and budgets still apply.
 
@@ -10,10 +10,12 @@
 does not qualify a measurement point.
 
 The current validator and site staging path implement the T16 collection
-boundary. All three controllers produce this contract. The 2026-11-16 snapshot
-passed independent source/build/binary and complete-session acceptance; that
-acceptance is not inherited by 0.3.0-beta or another code/build. Do not create missing
-records retrospectively or claim measurement acceptance from synthetic tests.
+boundary. All three controllers produce this contract. The accepted local-rebuild
+records (`485b29b` archived `v1`, plus `v3` records at `82eaab9`, `c7a80b9`, and
+`6d4cc61`) each passed independent source/build/binary and complete-session
+acceptance; that acceptance is not inherited by published `0.3.1-beta` release
+packages or another code/build. Do not create missing records retrospectively or
+claim measurement acceptance from synthetic tests.
 
 ## Lane envelope
 
@@ -74,7 +76,7 @@ including density. There is no mixed-origin publication mode.
 | QPS | capsid, workerd, Deno, Node (`--jitless`), Bun (`--jitless`), Node, Bun × JSON 1k/16k/stream/`dynamic-api` | 64 connections/inflight; five rounds of 5 s warmup + 15 s measurement; fresh 10 req/s trickle for 15 s |
 | Density | capsid/workerd × 10k/100k/1m × cold/warm | 2048 MiB; 100 requests per worker/cell in warm phase; two stable reads; two verification retries |
 
-Density uses `warmupConcurrencyPolicy: pool-scaled-burst-v1`, base
+Density uses `warmupConcurrencyPolicy: per-instance-waves-v2`, base
 `parallelRequests: 64` and `warmupConcurrencyFactor: 128`. Each cell's conditioning
 limit is `max(64, 128 * count)`; its correctness file records that limit and the
 largest actual wave. All conditioning completes before settling and PSS reads.
@@ -95,8 +97,8 @@ QPS manifests require `responseValidation: "exact-bytes-v2"` and
 `requestTimeoutMilliseconds: 30000`. Both raw phases and their verdict require
 `workload`, `response_validation`, `payload_bytes`, `expected_body_sha256`,
 `requests_attempted` and `responses_checked`; each raw row also records
-`request_timeout_ms`. The validator independently reconstructs the three frozen
-payloads, rejects missing/swapped claims and requires all attempts/responses to
+`request_timeout_ms`. The validator independently reconstructs all four frozen `v3`
+payloads (three in legacy `v1`/`v2`), rejects missing/swapped claims and requires all attempts/responses to
 match completed requests with zero errors/timeouts/mismatches. Legacy archives
 are not filled in retrospectively. The QPS controller now binds each round to
 its actual Go PID/start identity and sealed sample/verdict files, and the
@@ -186,8 +188,9 @@ rewritten. Tests use synthetic complete archives only in temporary
 directories; those values never enter the checked-in performance history.
 
 Same-session measurement and independent build qualification remain required
-for each claimed source. The accepted 485b29b session does not qualify another
-binary, and archive validation alone is not full release qualification.
+for each claimed source. An accepted local-rebuild session (such as `6d4cc61`,
+`c7a80b9`, `82eaab9`, or `485b29b`) does not qualify another binary, and archive
+validation alone is not full release qualification.
 
 ## QPS producer
 
@@ -217,7 +220,7 @@ response record and fails if dispatch falls more than 0.1 s behind. Every
 measured round starts the real Go load generator in a separate owned session;
 both raw rows and its successful verdict are checked before the next round.
 
-Runner bytes, fixtures (`qps-worker.mjs`, `qps-node.mjs`, `qps-bun.mjs`) and
+Runner bytes, fixtures (`qps-worker.mjs`, `qps-deno.mjs`, `qps-node.mjs`, `qps-bun.mjs`) and
 selected executables are snapshotted before probes and rechecked at the end.
 Runtime files are retained with each path component percent-encoded, including
 managed filenames that contain a colon. The mapping is recorded in
@@ -228,7 +231,7 @@ For an actual short Linux observation:
 ```sh
 bash bench/qps-lane.sh --observation --out /tmp/qps-observation \
   --host /path/capsid-host --worker /path/capsid-worker \
-  --node /path/node --bun /path/bun --workerd /path/workerd \
+  --deno /path/deno --node /path/node --bun /path/bun --workerd /path/workerd \
   --loadgen /path/BUILD/benchmark-tools/loadgen \
   --rounds 1 --warmup 1 --duration 1 --connections 2 --inflight 2 \
   --trickle-seconds 1 --trickle-rate 10
@@ -239,15 +242,15 @@ OUT must be new. This writes sealed `observation.json`, `memory.json`, verified
 `lane.json`. Errors and SIGINT/SIGTERM preserve `failed.json`, phase logs and
 cleanup records and cannot publish partial cells as success.
 
-Formal mode uses the frozen defaults, all five pure-JS stacks and three
+Formal mode uses the frozen defaults, all seven pure-JS stacks and four
 workloads, four available CPU indices, `--metadata`/`CAPSID_BENCH_METADATA`,
 and an OUT below `bench/results/`. Metadata follows the density schema below
 and requires actual identities for `capsid-host`, `capsid-worker`, `loadgen`,
-`node`, `bun` and `workerd`; product/loadgen identity must match the clean
+`deno`, `node`, `bun` and `workerd`; product/loadgen identity must match the clean
 measured source. The coordination lock is acquired before fixture preparation
 and held through self-validation. It does not prove an otherwise quiet machine.
-The formal producer emits `schema: 2` (`capsid-perf-lane-v2`), seals and replays
-the real archive validator before success. Synthetic 15-cell/75-client tests
+The formal producer emits `schema: 3` (`capsid-perf-lane-v3`), seals and replays
+the real archive validator before success. Synthetic 28-cell/140-client tests
 use private temporary repositories and explicit injected probes only; short
 observations and signal tests are recorded separately. Neither substitutes for
 clean Release/LTO, full matrix or quiet-session formal performance
@@ -382,32 +385,34 @@ hashed. The compiler's no-replace contract is preserved on WSL mounts that rejec
 that filesystem operation. No lane writes shared APPS or reuses old bytecode.
 
 Formal cold metadata follows the density schema above and requires binary
-records for `capsid-worker`, `cold-start`, `capsid-bytecode-compile`, `node`,
-`bun` and `workerd` (`node-jitless` reuses the `node` binary and `app-node-*.mjs`
-fixtures with `--jitless`). The first three must match the measured clean source
-commit/tag/version. Formal mode emits `schema: 2` (`capsid-perf-lane-v2`) and
-requires all six stacks (`capsid-source`, `capsid-bytecode`, `node`,
-`node-jitless`, `bun`, `workerd`), all three sizes, five rounds, one discarded
-run, 50 warm requests and four available CPU indices. Source/binary/runner/input
-identities are rechecked before sealing. The actual sealed archive is replayed
-through the real cold validator before success.
+records for `capsid-worker`, `cold-start`, `capsid-bytecode-compile`, `deno`,
+`node`, `bun` and `workerd` (`node-jitless` reuses the `node` binary and
+`app-node-*.mjs` fixtures with `--jitless`; `bun-jitless` reuses the `bun` binary
+and `app-bun-*.mjs` fixtures with `BUN_JSC_useJIT=0`). The first three must match
+the measured clean source commit/tag/version. Formal mode emits `schema: 3`
+(`capsid-perf-lane-v3`) and requires all eight stacks (`capsid-source`,
+`capsid-bytecode`, `workerd`, `deno`, `node-jitless`, `bun-jitless`, `node`,
+`bun`), all three sizes, five rounds, one discarded run, 50 warm requests and
+four available CPU indices. Source/binary/runner/input identities are rechecked
+before sealing. The actual sealed archive is replayed through the real cold
+validator before success.
 
 For a restricted smoke, provide actual binary paths and frozen generated apps:
 
 ```sh
 OUT=/tmp/cold-observation APPS=/path/generated-apps \
 WORKER=/path/capsid-worker COLD=/path/cold-start \
-COMPILE=/path/capsid-bytecode-compile NODE_BIN=/path/node \
-BUN_BIN=/path/bun WORKERD_BIN=/path/workerd \
+COMPILE=/path/capsid-bytecode-compile DENO_BIN=/path/deno \
+NODE_BIN=/path/node BUN_BIN=/path/bun WORKERD_BIN=/path/workerd \
 bash bench/cold-start.sh --observation --sizes 10k --rounds 1 --warm 2
 ```
 
 OUT must be new. Observation mode writes no `lane.json`; formal mode additionally
 requires metadata and an OUT under `bench/results/`. Missing stacks or metadata
 fail before any SUT launch. Synthetic full-archive tests stay in temporary
-repositories and do not qualify an actual performance point. The existing
-accepted session is a separate original measurement, not the output of these
-fixtures or a fresh 0.3.0-beta benchmark.
+repositories and do not qualify an actual performance point. Existing accepted
+sessions are separate original local-rebuild measurements, not the output of
+these fixtures or benchmarks of distributed release packages.
 
 ## Compressed publication transport
 
@@ -433,7 +438,8 @@ Missing/corrupt parts, altered metrics, missing raw records, changed origins,
 responses, process ownership, rounds or budgets still fail the original gate.
 
 The published evidence-index.json maps every original file digest to its
-complete transport and measured session. The raw record is about 2.74 GB, but
-the published compressed transports total about 163 MB. Allow at least 8 GiB
-of scratch space for replay; memory/sanitizer/performance test budgets are not
-changed by this publication transport.
+complete transport and measured session. Across all 4 verified records (12
+bundles), the raw records total about 10.25 GiB (11.00 GB) uncompressed, and
+the published compressed transports total about 629 MiB (660 MB). Allow at least
+14 GiB of scratch space for full replay; memory/sanitizer/performance test
+budgets are not changed by this publication transport.

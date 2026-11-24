@@ -75,7 +75,7 @@ file(MAKE_DIRECTORY "${CAPSID_MATRIX_WORK_DIR}")
 # ABI difference. Both vendor and quickjs commits are rewritten so the
 # shape validation still passes; the fake file must actually differ.
 set(MATRIX_FAKE_MANIFEST "${CAPSID_MATRIX_WORK_DIR}/locked-quickjs-diff.json")
-file(READ "${CAPSID_SOURCE_DIR}/docs/txiki-upgrade-baseline.json"
+file(READ "${CAPSID_SOURCE_DIR}/docs/data/txiki-upgrade-baseline.json"
     MATRIX_BASE_JSON)
 string(REGEX REPLACE
     "\"commit\"[ ]*:[ ]*\"[0-9a-f]+\""

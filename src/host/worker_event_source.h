@@ -31,6 +31,10 @@ class WorkerEventSource {
     // call site in the Host.
     void set_worker(capsid_worker* worker);
 
+    // Releases the wake pipe descriptors once the worker thread has exited
+    // wait(). Caller must synchronize with wake() (WorkerExecutor::mutex_).
+    void close_wake_pipe();
+
     // io thread: wake the worker thread out of wait(). A full pipe is not
     // an error; see the class comment.
     void wake();

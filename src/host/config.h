@@ -39,7 +39,7 @@ inline constexpr std::size_t kMaxConfigNesting = 64U;
 // retaining a wide range for large benchmark and deployment hosts.
 inline constexpr std::uint32_t kMaxStaticPoolWorkers = 4096U;
 
-// Binding v1 artifact limits (docs/binding-technical-design.md §2.1/§2.3):
+// Binding v1 artifact limits (docs/design/bindings-v1.md §2.1/§2.3):
 // manifest.json, index.js and one binding's opaque config member.
 inline constexpr std::size_t kMaxBindingManifestBytes = 1024U * 1024U;
 inline constexpr std::size_t kMaxBindingSourceBytes = 16U * 1024U * 1024U;
@@ -76,7 +76,7 @@ struct ConfigValidationResult {
 // value and message is safe for an operator-facing diagnostic.
 ConfigValidationResult validate_config_json(ConfigDocument document, std::string_view json);
 
-// Binding manifest validation (docs/binding-technical-design.md §2.2/§4.1):
+// Binding manifest validation (docs/design/bindings-v1.md §2.2/§4.1):
 // the capsid/binding-v1 document with fixed sandbox profiles, the build's
 // grantable module set, typed net/fs/env/stdio permissions and the
 // profile-permission consistency rule. The byte limit (kMaxBindingManifest
@@ -91,12 +91,11 @@ bool valid_binding_id(std::string_view value);
 // Tenant ID grammar: [a-z0-9][a-z0-9._-]{0,62} (matching application IDs).
 bool valid_tenant_id(std::string_view value);
 
-// Parses capsid.json (the authoritative capsid/app-v1 shape) into the
-// AppRequest. The frozen schema boundary (validate_config_json) runs first
-// in the deploy pipeline; this parse maps the schema's fields onto the
-// request and stays fail-closed on any shape it cannot map. Shared with the
-// local-capsid.json data planes (single-worker / static-pool) so one
-// document grammar cannot diverge into two.
+// Parses capsid.json (capsid/app-v1 and capsid/app-v2) into AppRequest.
+// The schema boundary (validate_config_json) runs first in the deploy
+// pipeline; this parse maps the schema's fields onto the request and stays
+// fail-closed on any shape it cannot map. Shared with LocalDevHost so local
+// and managed modes enforce one document grammar.
 bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app, std::string* error);
 
 // Shared byte-size and duration grammars (worker.memoryMax, request

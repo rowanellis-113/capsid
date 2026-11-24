@@ -1,7 +1,7 @@
 // RFC 6455 codec tests (FetchRPC v4 / WS-C3, TDD).
 //
-// Contract: docs/fetchrpc-v4.md (D1 — the host owns framing) and
-// docs/workerd-websocket-semantics.md §5. The codec is self-contained:
+// Contract: docs/reference/fetchrpc-v4.md (D1 — the host owns framing) and
+// docs/reference/websocket-semantics.md §5. The codec is self-contained:
 // SHA-1 + base64 for the accept key, incremental frame parser, and a
 // role-aware encoder (clients mask, servers do not).
 #include "ws_codec.h"

@@ -5,8 +5,8 @@
 # for static libraries the sanitizer flags must be applied at compile time
 # to the library objects themselves, not only to test executables, or the
 # sanitizer coverage of the parsing core is fake (see
-# cmake/TestHostSanitizerInstrumentation.cmake). The Host data plane will
-# add its own TSan job later (see the Host design review §14).
+# cmake/TestHostSanitizerInstrumentation.cmake). Hosted TSan runs in
+# .github/workflows/testing-validity.yml.
 
 if(CAPSID_BUILD_HOST)
     # OpenSSL 3.5 LTS is the Host's digest/signature provider. On Apple
@@ -63,8 +63,8 @@ if(CAPSID_BUILD_HOST)
     if(NOT WIN32)
         # The managed coordinator is POSIX-only (dirfd-relative openat/
         # mkdirat state walks, uid-based verification, UDS admin plane);
-        # Windows builds ship the single-worker and static-pool data
-        # planes only (see docs/windows.md).
+        # Windows builds ship the local dev Host (LocalDevHost) only
+        # (see docs/guides/build-on-windows.md).
         target_sources(capsid_host_core PRIVATE
             src/host/admin_api.cc
             src/host/managed_admin_backend.cc
@@ -115,11 +115,10 @@ if(CAPSID_BUILD_HOST)
         endif()
     endif()
 
-    # M1A single-worker Host data plane. System Boost.Asio/Beast only: no
-    # FetchContent, no configure-time downloads, no hand-written HTTP parser.
-    # Platforms without system Boost configure fine but get no capsid-host;
-    # the frozen integration test registration only references the target
-    # when CAPSID_BUILD_WORKER is enabled, which requires the Linux toolchain.
+    # Host data plane (LocalDevHost and ManagedListener). System
+    # Boost.Asio/Beast only: no FetchContent, no configure-time downloads,
+    # no hand-written HTTP parser. Platforms without system Boost configure
+    # fine but get no capsid-host.
     # Shipped Hosts must not require an undeclared system Boost library.
     # Select the archive before resolving Boost::system even when libc and
     # the platform loader remain dynamic. Newer header-only Boost.System
@@ -159,7 +158,7 @@ if(CAPSID_BUILD_HOST)
         include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/host_dns.cmake")
         target_link_libraries(capsid_host_core PRIVATE OpenSSL::SSL)
         target_compile_definitions(capsid_host_core PUBLIC CAPSID_HOST_NETWORKING=1)
-        # StaticPoolServer and the managed coordinator reference this
+        # LocalDevHost and the managed coordinator reference this
         # transport. Keep its implementation in the same archive so core
         # consumers need no private source copy to satisfy the link closure.
         # Tests with their own transport object still resolve that object
@@ -167,13 +166,11 @@ if(CAPSID_BUILD_HOST)
         target_sources(capsid_host_core PRIVATE
             src/host/websocket_session.cc
             src/host/websocket_dialer.cc)
-        # M1A design gate (design review §4.3): only the WorkerEventSource
-        # adapter may call capsid_worker_fd(); every other Host module
-        # observes the worker IPC through readable/writable semantics.
-        # M2 item 5a adds the worker supervisor: it polls the current
-        # worker's IPC fd to observe EXIT and drive replacement/quarantine
-        # (design §10.5) — a second legitimate owner, in the managed layer
-        # only, never touching the data plane.
+        # Design gate: only the WorkerEventSource adapter may call
+        # capsid_worker_fd(); every other Host module observes worker IPC
+        # through readable/writable semantics (worker_supervisor.cc is kept
+        # in the historical allowlist below but observes workers through
+        # WorkerExecutor/GenerationPool and does not call capsid_worker_fd()).
         # Enforce the boundary at configure time.
         file(GLOB CAPSID_HOST_ALL_SOURCES
             "${CMAKE_CURRENT_SOURCE_DIR}/src/host/*.cc")

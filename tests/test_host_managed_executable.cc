@@ -38,6 +38,7 @@
 // __has_feature(thread_sanitizer). Other configurations keep their waits.
 constexpr int kTestWaitScale = CAPSID_TEST_TSAN_BUILD ? 8 : 1;
 
+#include <algorithm>
 #include <chrono>
 #include <cerrno>
 #include <cstdlib>
@@ -45,6 +46,9 @@ constexpr int kTestWaitScale = CAPSID_TEST_TSAN_BUILD ? 8 : 1;
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -383,8 +387,9 @@ json_t* parse_response(const std::string& response, unsigned status) {
 }
 
 std::string deploy(const Fixture& fixture, const std::string& application = "orders",
-                   const std::string& version = "v1") {
-    const std::string body = "{\"app\":\"" + application + "\",\"version\":\"" + version + "\"}";
+                   const std::string& version = "v1", const std::string& tenant = "") {
+    const std::string body = "{\"app\":\"" + application + "\",\"version\":\"" + version + "\"" +
+                             (tenant.empty() ? "" : ",\"tenant\":\"" + tenant + "\"") + "}";
     const std::string request = "POST /v1/deploy HTTP/1.1\r\nHost: local\r\n"
                                 "Content-Type: application/json\r\nContent-Length: " +
                                 std::to_string(body.size()) + "\r\n\r\n" + body;
@@ -551,7 +556,7 @@ struct HttpResponse {
     std::string body;
 };
 
-HttpResponse http_exchange_tcp(int port, const std::string& request) {
+int start_tcp_request(int port, const std::string& request) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     require(fd >= 0, "cannot create the data-plane HTTP socket");
     const struct timeval timeout = {10, 0};
@@ -573,6 +578,11 @@ HttpResponse http_exchange_tcp(int port, const std::string& request) {
         require(count > 0, "cannot write the data-plane request");
         sent += static_cast<std::size_t>(count);
     }
+    return fd;
+}
+
+HttpResponse http_exchange_tcp(int port, const std::string& request) {
+    const int fd = start_tcp_request(port, request);
     std::string wire;
     char buffer[4096];
     bool done = false;
@@ -881,17 +891,150 @@ void plant_staging_remnant(const Fixture& fixture, const std::string& op, bool c
     write_file(dir + "/COMPLETE", "");
 }
 
+void install_held_orders_stream(const Fixture& fixture) {
+    replace_file(fixture.applications_root + "/orders/v1/bundle.mjs", R"js(
+        export default { fetch() {
+            const chunk = new TextEncoder().encode("data: held\n\n");
+            let timer;
+            return new Response(new ReadableStream({
+                start(c) {
+                    c.enqueue(chunk);
+                    timer = setInterval(() => c.enqueue(chunk), 100);
+                },
+                cancel() { clearInterval(timer); }
+            }), {headers: {"Content-Type": "text/event-stream"}});
+        } };
+    )js");
+}
+
+int open_held_orders_stream(int port) {
+    const int fd = start_tcp_request(port, "GET /@capsid/orders/ HTTP/1.1\r\n"
+                                           "Host: localhost\r\nConnection: close\r\n\r\n");
+    std::string response;
+    char bytes[1024];
+    while (response.find("data: held") == std::string::npos) {
+        const auto n = recv(fd, bytes, sizeof(bytes), 0);
+        require(n > 0, "did not receive data from the live stream: " + response);
+        response.append(bytes, static_cast<std::size_t>(n));
+    }
+    require(response.rfind("HTTP/1.1 200 ", 0) == 0, "stream returned a non-200 response");
+    return fd;
+}
+
+int run_tenant_memory_cgroup(Fixture& fixture, const char* host, const char* worker,
+                             const std::filesystem::path& group_root) {
+    const int port = pick_port();
+    replace_file(fixture.host_config,
+                 R"({"apiVersion":"capsid/host-v2","paths":{"applications":")" +
+                     fixture.applications_root + R"(","state":")" + fixture.state_root +
+                     R"(","secrets":")" + fixture.secret_root +
+                     R"(/{application}"},"admin":{"unix":")" + fixture.socket_path +
+                     R"("},"listeners":[{"name":"public","tcp":"127.0.0.1:)" +
+                     std::to_string(port) + R"(","routing":{"mode":"path"}}],)" +
+                     R"("isolation":{"mode":"strict","required":["cgroup-v2"],"cgroupRoot":")" +
+                     group_root.string() + R"("},"capacity":{"workersTotal":4},)" +
+                     R"("defaults":{"worker":{"memoryMax":"192MiB"}},)" +
+                     R"("tenancy":{"defaultQuota":{"hardMemory":"384MiB"},)" +
+                     R"("overrides":{"other":{"hardMemory":"512MiB"}}}})");
+    fixture.create_application("billing");
+    fixture.create_application("catalog");
+    fixture.create_version("orders", "v2", "orders-v2");
+    for (const auto* version : {"orders/v1", "orders/v2", "billing/v1", "catalog/v1"}) {
+        replace_file(fixture.applications_root + "/" + version + "/capsid.json",
+                     R"({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"workers":1}})");
+    }
+    install_held_orders_stream(fixture);
+    start_host(fixture, host, worker);
+    wait_for_socket(fixture);
+    std::set<long> known;
+    auto deploy_one = [&](const char* app, const char* version, const char* tenant) {
+        wait_active(fixture, deploy(fixture, app, version, tenant));
+        const auto live = live_worker_children();
+        const std::set<long> now(live.begin(), live.end());
+        std::vector<long> added;
+        std::set_difference(now.begin(), now.end(), known.begin(), known.end(),
+                            std::back_inserter(added));
+        require(now.size() == known.size() + 1 && added.size() == 1,
+                std::string("expected a new resident worker alongside its peers: ") + app + "/" +
+                    version);
+        known = now;
+        return added.front();
+    };
+    const long old_orders = deploy_one("orders", "v1", "shared");
+    const int stream = open_held_orders_stream(port);
+    const long billing = deploy_one("billing", "v1", "shared");
+    const long catalog = deploy_one("catalog", "v1", "other");
+    const long new_orders = deploy_one("orders", "v2", "shared");
+    require_http(http_exchange_tcp(port, "GET /@capsid/orders/ HTTP/1.1\r\n"
+                                         "Host: localhost\r\nConnection: close\r\n\r\n"),
+                 200, "orders-v2", "the new orders generation must serve while v1 is draining");
+
+    // cgroup.procs lists direct members. Accumulate each known PID into its ancestors so
+    // the assertion is independent of tenant, app, generation, and worker directory names.
+    std::map<std::filesystem::path, std::set<long>> members;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(group_root)) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        std::ifstream procs(entry.path() / "cgroup.procs");
+        require(procs.is_open(), "cannot read cgroup.procs under " + entry.path().string());
+        long pid;
+        while (procs >> pid) {
+            if (known.contains(pid)) {
+                for (auto path = entry.path(); path != group_root; path = path.parent_path()) {
+                    members[path].insert(pid);
+                }
+            }
+        }
+        require(procs.eof(), "invalid cgroup.procs under " + entry.path().string());
+    }
+    const std::set<long> shared{old_orders, new_orders, billing};
+    bool shared_limit = false;
+    bool other_limit = false;
+    std::ostringstream observed;
+    for (const auto& [group, pids] : members) {
+        if (!std::filesystem::exists(group / "memory.max")) {
+            continue; // A descendant can inherit a limit from a controller-enabled ancestor.
+        }
+        std::ifstream max_file(group / "memory.max");
+        std::string limit;
+        require(static_cast<bool>(max_file >> limit), "missing memory.max under " + group.string());
+        observed << "\n  " << group.lexically_relative(group_root) << " memory.max=" << limit
+                 << " workers=" << pids.size();
+        if (pids == shared && limit == std::to_string(384ULL * 1024 * 1024)) {
+            shared_limit = true;
+        }
+        if (pids == std::set<long>{catalog} && limit == std::to_string(512ULL * 1024 * 1024)) {
+            other_limit = true;
+        }
+    }
+    close(stream);
+    stop_host(fixture);
+    if (!shared_limit || !other_limit) {
+        std::cerr << "FAIL: expected one 384 MiB cgroup covering both apps and both orders "
+                     "generations, and an independent 512 MiB cgroup for catalog. Observed:"
+                  << observed.str() << std::endl;
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    require(argc == 4, "expected mode, capsid-host and capsid-worker paths");
+    require(argc >= 2, "expected a managed test mode");
     const std::string mode = argv[1];
+    require(argc == (mode == "host_managed_tenant_hard_memory_cgroup" ? 5 : 4),
+            "expected mode, host, worker and a cgroup root for the tenant memory test");
 #if defined(__linux__)
     require(prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0,
             "enable ownership of this fixture's crash descendants");
     owns_adopted_children = true;
 #endif
     Fixture fixture;
+    if (mode == "host_managed_tenant_hard_memory_cgroup") {
+        return run_tenant_memory_cgroup(fixture, argv[2], argv[3], argv[4]);
+    }
     if (mode == "host_managed_executable_binding_deploy") {
         // Binding v1 through the real capsid-host process: the scanned
         // bindingsRoot snapshot, the effective compile, the worker
@@ -2200,6 +2343,53 @@ int main(int argc, char** argv) {
         require(wait_terminal_state(fixture, second) == "failed",
                 "recovered worker did not consume global Host capacity");
         require_active_app(fixture, "orders", "v1");
+        stop_host(fixture);
+        std::cout << "PASS" << std::endl;
+        return 0;
+    }
+
+    if (mode == "host_managed_retired_stream_tenant_memory") {
+        const int port = pick_port();
+        replace_file(
+            fixture.host_config,
+            "{\"apiVersion\":\"capsid/host-v2\",\"paths\":{\"applications\":\"" +
+                fixture.applications_root + "\",\"state\":\"" + fixture.state_root +
+                "\",\"secrets\":\"" + fixture.secret_root + "/{application}\"}," +
+                "\"admin\":{\"unix\":\"" + fixture.socket_path + "\"}," +
+                "\"listeners\":[{\"name\":\"public\",\"tcp\":\"127.0.0.1:" + std::to_string(port) +
+                "\",\"routing\":{\"mode\":\"path\"}}]," + "\"capacity\":{\"workersTotal\":4}," +
+                "\"tenancy\":{\"overrides\":{\"shared\":{\"hardMemory\":\"1MiB\"}}}}");
+        fixture.create_application("peer");
+        for (const auto& app : {"orders", "peer"}) {
+            replace_file(
+                fixture.applications_root + "/" + app + "/v1/capsid.json",
+                R"({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"workers":1}})");
+        }
+        install_held_orders_stream(fixture);
+        start_host(fixture, argv[2], argv[3]);
+        wait_for_socket(fixture);
+        wait_active(fixture, deploy(fixture, "orders", "v1", "shared"));
+        const int fd = open_held_orders_stream(port);
+        wait_active(fixture, retire(fixture, "orders"));
+        const auto rejected = deploy(fixture, "peer", "v1", "shared");
+        require(wait_terminal_state(fixture, rejected) == "failed",
+                "retiring the still-open stream released its tenant's memory early");
+        const auto metrics =
+            http_request(fixture.socket_path, "GET /metrics HTTP/1.1\r\nHost: local\r\n\r\n");
+        require(
+            metrics.find(
+                "capsid_pool_rejections_total{app=\"peer\",tenant=\"shared\",reason=\"tenant_hard_memory\"} 1") !=
+                std::string::npos,
+            "peer deploy failed without the expected tenant memory rejection");
+        close(fd);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(10 * kTestWaitScale);
+        while (!live_worker_children().empty()) {
+            require(std::chrono::steady_clock::now() < deadline,
+                    "retired worker did not exit after disconnect");
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        wait_active(fixture, deploy(fixture, "peer", "v1", "shared"));
         stop_host(fixture);
         std::cout << "PASS" << std::endl;
         return 0;

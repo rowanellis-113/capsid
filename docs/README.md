@@ -1,96 +1,42 @@
-# Documentation
+# Capsid documentation
 
-Start with the task you want to complete. User guides explain how to use Capsid;
-references define its contracts; dated reviews preserve what was observed for
-specific inputs. A historical review is not a current deployment instruction.
+**Start here:** [Run a Fetch application](guides/run-application.md). The quick start includes the commands for both the published `v0.3.1-beta.1` package and this `dev/v0.3.2` source branch. [Release status](reference/release-status.md) identifies the source behind each published result.
 
-The stable release is [`v0.2.2`](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2);
-[`v0.3.1-beta.1`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) is the current experimental prerelease (and GitHub `Latest`).
-[Current status and data scope](current-status.md) is the maintained entry point
-for delivered scope, source identities and the latest accepted measurement.
-[Release selection](releases.md) explains the channels. The preserved
-[v0.3.0 qualification record](v0.3.0-current-qualification.md) binds earlier `0.3.0-beta` acceptance to
-its exact source and artifacts without claiming full standards conformance.
+## Guides
 
-## Run an Application
-
-| Task | Read |
+| Task | Guide |
 | --- | --- |
-| Install and serve a minimal Fetch handler | [Getting started](getting-started.md) |
-| Select stable or beta; verify downloaded assets | [Releases and installation](releases.md) |
-| Choose Linux, macOS or Windows | [Platform support](platform-support.md) |
-| Request modules, egress and worker resources | [capsid.json guide](capsid-json.md) |
-| Select a Host mode or configure managed applications | [Host configuration reference](host-config.md) · [Config v2 design](config-v2-design.md) |
-| Use a Web-standard framework | [Framework compatibility](framework-compatibility/README.md) |
+| Install and run | [Install a package](guides/install-packages.md) · [Run an application](guides/run-application.md) · [Configure an application](guides/configure-application.md) |
+| Build the runtime or SDK | [Build from source](guides/build-from-source.md) · [Build on Windows](guides/build-on-windows.md) |
+| Contribute a change | [Format source](guides/format-source.md) · [Run tests](guides/run-tests.md) · [Contributing](../CONTRIBUTING.md) |
 
-## Integrate and Secure a Host
+## Reference
 
-| Task | Read |
+| Subject | Contracts and data |
 | --- | --- |
-| Understand the Host/worker split | [Architecture](architecture.md) |
-| Drive the C/C++ runtime API | [Host integration](host-integration.md) |
-| Define authority and resource rules | [Capability policy](capability-policy.md) · [Module permissions](module-permissions.md) |
-| Enforce production isolation | [Linux strict sandbox](linux-sandbox.md) · [Security policy](../SECURITY.md) |
-| Implement a trusted Binding package | [Binding modules](binding-modules.md) · [Binding design](binding-technical-design.md) |
+| Deployment | [Host configuration](reference/host-configuration.md) · [Platform support](reference/platform-support.md) · [Linux sandbox](reference/linux-sandbox.md) |
+| Embedding and authority | [C and C++ embedding API](reference/embedding-api.md) · [Host capability policy](reference/capability-policy.md) · [Application module permissions](reference/module-permissions.md) · [Trusted Binding permissions](reference/binding-permissions.md) |
+| Protocol and runtime | [FetchRPC v4](reference/fetchrpc-v4.md) · [WebSocket semantics](reference/websocket-semantics.md) · [Native runtime behavior](reference/runtime-behavior.md) |
+| Compatibility and measurements | [Web conformance](reference/web-conformance.md) · [Framework compatibility](reference/frameworks/README.md) · [Benchmarks](reference/benchmarks.md) · [Release status](reference/release-status.md) |
 
-Native development support is not a production isolation guarantee. The local
-`single-worker` and `static-pool` examples use trusted application code;
-`managed` and strict sandbox enforcement are Linux-only.
+## Design
 
-## Build and Verify
+- [Runtime architecture](design/runtime-architecture.md) and [Host architecture](design/host-architecture.md) describe the process boundary, request path and worker lifecycle.
+- [Binding v1](design/bindings-v1.md) describes trusted packages and their contract with the Host.
+- [Config v2 and elastic pools](design/config-v2.md) describes the development branch. The [v0.3.2 review](history/v0.3.2/README.md) records which design goals have been verified.
 
-- [Source formatting](formatting.md): pinned C/C++, JavaScript/Python tools,
-  shared write/check commands and preserved exact-byte inputs.
-- [Building from source](building.md): toolchains, dependencies, clean Release
-  inputs, development builds and SDK installation.
-- [Windows](windows.md): native MSVC/static-CRT requirements and platform limits.
-- [Testing guide](testing-guide.md): developer checks, full CI, raw results and
-  prerequisite skips.
-- [Standards and conformance](conformance.md): the selected Web API profile,
-  reference revisions and explicit deviations.
-- [Performance methodology](performance-benchmarks.md): benchmark protocol and
-  source/build/environment identities, not a release-independent speed claim.
-- [Contributing](../CONTRIBUTING.md): change scope, validation and documentation
-  maintenance.
+## History and supporting files
 
-## Behavioral References
+The source repository contains the review history and captured evidence. SDK packages built from this branch include the guides, reference, design pages and core manifests under `share/doc/capsid/`. [Capsid source repository](https://github.com/rowanellis-113/capsid)
 
-- [FetchRPC v4 wire contract](fetchrpc-v4.md): channel and Upgrade negotiation;
-  do not infer an ABI or default protocol version from a document title.
-- [workerd WebSocket semantics](workerd-websocket-semantics.md): observed
-  behavior and the pinned compatibility boundary.
-- [Native stream observation](native-stream-observation.md): body consumers and
-  request lifetime.
-- [Upgrade fallback gzip responses](native-upgrade-response-gzip.md).
-- [Native iterator storage](native-iterator-storage.md).
+| Directory | What belongs here |
+| --- | --- |
+| [history/](history/README.md) | Dated human reviews, plans, release qualification and original journals. Start with the [v0.3.0 qualification](history/v0.3.0/release-qualification.md) or the [v0.3.2 review](history/v0.3.2/README.md). |
+| [evidence/](evidence/) | Captured outcomes for a specific version and run, including [publication verification](evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json). |
+| [data/](data/) | Machine-readable manifests, baselines and indexes consumed by builds or tools, including the [capability manifest](data/capability-manifest.json) and [documentation inventory](data/documentation-coverage.json). |
 
-## Release Evidence and History
+## Filing a document
 
-Use [history and evidence](history/README.md) for dated qualification snapshots,
-implementation plans, audits and agent handoffs. Original paths and archived
-bytes are retained; old progress text does not supersede a later release record.
-In particular, a passing beta campaign does not erase earlier failures or close
-all historical v0.3.0 goals.
+Put a procedure in `guides/` and name it with a verb and an object, such as `run-tests.md`. Put a contract or lookup table in `reference/` and name it for its subject, such as `host-configuration.md`. Put an architecture decision or subsystem design in `design/`. Append a version to the subject only when it identifies the contract, as in `fetchrpc-v4.md`. Dated reviews belong under `history/<version>/`.
 
-## How This Documentation Is Maintained
-
-1. Put tutorials in guides, option/ABI semantics in references, and dated
-   results in evidence records. Avoid appending execution diaries to tutorials.
-2. Prefer public headers, capability manifests, build/configuration code and
-   actual source-bound artifacts over prose when they conflict. A current
-   checkout is not automatically the same input as a released binary.
-3. Link every maintained Markdown document from this index, directly or through
-   a linked sub-index. Keep existing anchors and paths unless migration is
-   explicitly planned.
-4. Preserve historical evidence, failed runs and their source identities. Never
-   rewrite old counts, hashes, timing budgets or outcomes as current results.
-5. Run `node tests/audit-current-docs.mjs .` after edits. It checks local links,
-   index reachability, security guidance and SHA-256 of archived qualification
-   snapshots. It is not a replacement for executing documented commands.
-
-The [per-file coverage inventory](documentation-coverage.json) records the
-content-review disposition and canonical-text/exact-evidence digest of every
-page. Dated plans/reviews are explicitly marked historical. Six mixed journal
-pages now have current reference fronts, with their original bytes and 483 old
-anchors inventoried under [history](history/README.md). No old result is
-silently relabeled as a current measurement.
+Use lowercase names with hyphens and reserve `README.md` for indexes. Link the page here or from a linked index, update the [documentation inventory](data/documentation-coverage.json), then run the [documentation checks](guides/run-tests.md#documentation-checks).

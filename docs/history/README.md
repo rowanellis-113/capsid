@@ -1,92 +1,29 @@
-# History and Evidence
+# History and evidence
 
-This index is for maintainers tracing a decision, regression or acceptance
-claim. It is not the getting-started path. Use the [documentation index](../README.md)
-for current guides and references.
+Use this index to trace an implementation decision, a review finding or a published result. Dates, commands and pass/fail counts in a review belong to the source revision it examined. [Current documentation](../README.md) · [Release identities](../reference/release-status.md)
 
-Historical plans/reviews stay at their existing paths with a prominent current
-context banner; their original body and evidence remain unchanged. Six mixed
-reference/journal pages have current fronts and retain their captured source
-bytes under [the 2026-11-17 migration index](archives/2026-11-17/index.json).
-The index binds every source length/hash and 483 legacy anchors, which are
-retained at the original entry paths. The [coverage inventory](../documentation-coverage.json)
-records the disposition of every page. Within dated sections, words such as “current”, “passed” and
-“not released” refer to that section's captured input and date—not necessarily
-to today's source or the published beta.
+## Reviews and design records
 
-## Release and Qualification Records
+| Subject | Records |
+| --- | --- |
+| v0.3.2 Config v2, elastic pools and tenant isolation | [Findings, subsequent verification, open items and probes](v0.3.2/README.md) |
+| v0.3.0 Host, FetchRPC and native fetch | [Implementation design](v0.3.0/implementation-design.md) · [FetchRPC v4 plan](v0.3.0/fetchrpc-v4-plan.md) · [Native fetch plan](v0.3.0/native-fetch-plan.md) · [Delivery plan](v0.3.0/delivery-plan.md) |
+| v0.3.0 reviews | [Review brief](v0.3.0/review-brief.md) · [Takeover review](v0.3.0/takeover-review.md) · [Combined review](v0.3.0/combined-review.md) · [Fix review](v0.3.0/fix-review.md) · [Rounds 5–7](v0.3.0/rounds-5-7-review.md) · [Test coverage review](v0.3.0/test-coverage-review.md) |
+| v0.3.0 handoffs | [Continuation](v0.3.0/continuation-handoff.md) · [Next steps](v0.3.0/next-steps-handoff.md) |
+| Binding v1 | [Security remediation plan](bindings-v1/security-remediation-plan.md) |
 
-- [v0.3.0 qualification and release boundary](../v0.3.0-current-qualification.md):
-  published `0.3.0-beta`, source identities, exact CI scope and retained limitations.
-- [Final v0.3.0-beta.5 publication verification](../evidence/v0.3.0/2026-11-21-beta5-publication/beta5-publication-final-r1.json), with the
-  tag Release, branch attempt history and exact asset digests.
-- [Final v0.3.0-beta.3 publication verification](../evidence/v0.3.0/2026-11-18-beta3-publication/beta3-publication-final-r1.json)
-  and earlier [v0.3.0-beta.2 verification](../evidence/v0.3.0/2026-11-13-ci-resumption/beta2-publication-final-r1.json).
-- [v0.3.0 evidence index](../evidence/v0.3.0/2026-11-10/index.json) and
-  [historical availability audit](../evidence/v0.3.0/2026-11-10/historical-evidence-availability.json):
-  what was retained or unavailable at those capture dates.
-- [Current testing reference](../testing.md) and [testing guide](../testing-guide.md).
-  The old execution journal is the exact captured
-  [testing.md.txt](archives/2026-11-17/testing.md.txt), not the current procedure.
-- [Current performance data](../performance-benchmarks.md) and the exact
-  [old performance journal](archives/2026-11-17/performance-benchmarks.md.txt).
-  Measured snapshots, published prereleases and older checkpoints have distinct
-  source identities; none substitutes for another.
+The byte-locked WebSocket fixture cites the test coverage review by its source-era filename, `v0.3.0-test-completeness-review.md`. The [test coverage review](v0.3.0/test-coverage-review.md) retains that record.
 
-## Six Byte-Preserved Reference/Journal Sources
+Published `v0.3.1-beta.1` headers cited two specifications by their source-era names (`fetchrpc-v4.md` is now the [wire contract](../reference/fetchrpc-v4.md), and `binding-technical-design.md` is now the [Binding v1 design](../design/bindings-v1.md)).
 
-- [FetchRPC v4 source](archives/2026-11-17/fetchrpc-v4.md.txt).
-- [WebSocket semantics source](archives/2026-11-17/workerd-websocket-semantics.md.txt).
-- [Host design/review source](archives/2026-11-17/host-technical-design-review.md.txt).
-- [Performance source](archives/2026-11-17/performance-benchmarks.md.txt).
-- [Testing source](archives/2026-11-17/testing.md.txt).
-- [Qualification source](archives/2026-11-17/v0.3.0-current-qualification.md.txt).
+## Release evidence
 
-These `.md.txt` files are exact historical source downloads, not new maintained
-instructions. Their old “current/unpublished” language refers to the captured
-phase. Do not edit those bytes or reinterpret their test/performance counts as
-`0.3.0-beta` data.
+- **v0.3.1** — [beta.1 publication and asset digests](../evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json).
+- **v0.3.0** — [Qualification and known limits](v0.3.0/release-qualification.md). Publication records are available for [beta.5](../evidence/v0.3.0/2026-11-21-beta5-publication/beta5-publication-final-r1.json), [beta.3](../evidence/v0.3.0/2026-11-18-beta3-publication/beta3-publication-final-r1.json) and [beta.2](../evidence/v0.3.0/2026-11-13-ci-resumption/beta2-publication-final-r1.json). The [evidence index](../evidence/v0.3.0/2026-11-10/index.json) and [availability audit](../evidence/v0.3.0/2026-11-10/historical-evidence-availability.json) identify the inputs retained at capture.
+- **Performance** — Match the commit, machine and protocol in the [benchmark record](../reference/benchmarks.md) to the measurement you are comparing.
 
-A `qualification-before.md` under a dated evidence directory is a byte-preserved
-snapshot. Its adjacent `index.json` supplies the SHA-256 checked by the
-repository's documentation auditor. Do not repair an old snapshot's wording or
-relative links by changing its bytes.
+## Historical journals
 
-## Design and Delivery Plans
+Read the journals for [FetchRPC](archives/2026-11-17/fetchrpc-v4.md.txt), [WebSocket](archives/2026-11-17/workerd-websocket-semantics.md.txt), the [Host](archives/2026-11-17/host-technical-design-review.md.txt), [performance](archives/2026-11-17/performance-benchmarks.md.txt), [testing](archives/2026-11-17/testing.md.txt) and [qualification](archives/2026-11-17/v0.3.0-current-qualification.md.txt) in English. The reference pages link to individual sections. The [archive inventory](archives/2026-11-17/index.json) records the original byte lengths and digests. The dated evidence indexes likewise retain the original hashes for `qualification-before.md`. The documentation audit verifies those captures from Git revision `845ae5dee5833c1bed1c2630cfb65e6ed76af7d7` and checks the English text separately against the coverage inventory.
 
-- [Project roadmap](../../ROADMAP.md).
-- [Host technical design and milestone review](../host-technical-design-review.md).
-- [FetchRPC v4 milestone plan](../v0.3.0-fetchrpc-v4-plan.md).
-- [v0.3.0 implementation design](../v0.3.0-implementation-design.md).
-- [Native Fetch branch plan](../v0.3.0-native-fetch-branches-plan.md).
-- [Remediation and delivery plan, 2026-10-12](../superpowers/plans/2026-10-12-v0.3.0-remediation-and-delivery.md).
-- [Binding security remediation plan, 2026-08-16](../superpowers/plans/2026-08-16-binding-v1-security-audit-remediation.md).
-
-A plan states intended work and acceptance conditions. A checked item is not a
-substitute for the corresponding source-bound result or release record.
-
-## Dated Reviews and Handoffs
-
-These retain their original scope and language:
-
-- [AI review brief](../ai-review-brief-v0.2.2-to-v0.3.0.md).
-- [GLM takeover review](../v0.3.0-glm-takeover-review.md).
-- [GLM continuation handoff](../v0.3.0-glm-continuation-handoff.md).
-- [Test-completeness review](../v0.3.0-test-completeness-review.md).
-- [Combined implementation review](../v0.3.0-latest-combined-review.md).
-- [Fix review](../v0.3.0-glm-fix-review.md).
-- [Rounds 5–7 review](../v0.3.0-glm-round5-7-review.md).
-- [Agent continuation handoff](../v0.3.0-next-ai-handoff.md).
-
-Do not treat an old handoff's pending tasks, environment assumptions or build
-paths as instructions to restart a completed campaign.
-
-## Evidence Rules
-
-Keep source commit/tree, build identity, platform, command, actual exit, raw
-reports and genuine prerequisite skips together. Preserve failed/partial runs
-and reviewer revisions. Equal source trees do not imply equal embedded binary
-identities, and a later pass does not reconstruct the cause of an earlier
-failure. Performance claims additionally require the original protocol and
-whole-session/environment evidence; release qualification alone is not a new
-benchmark point.
+The [coverage inventory](../data/documentation-coverage.json) records the role and digest of each page. When recording a new result, include the exact source, build, platform, command, exit status, raw reports and prerequisite skips.

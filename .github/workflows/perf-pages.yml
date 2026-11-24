@@ -10,7 +10,6 @@ on:
       - 'bench/perf_evidence.py'
       - 'bench/prepare-perf-site.py'
       - 'bench/perf_archive.py'
-      - 'docs/current-status.json'
       - 'docs/data/**'
       - 'tools/refresh-documentation-data.py'
       - '.github/workflows/perf-pages.yml'

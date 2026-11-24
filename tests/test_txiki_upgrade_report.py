@@ -355,9 +355,9 @@ class SurfaceInventoryContract(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in ["js", "docs", "src"]:
-            (self.root / name).mkdir()
-        (self.root / "docs/capability-manifest.json").write_text(
+        for name in ["js", "docs/data", "src"]:
+            (self.root / name).mkdir(parents=True)
+        (self.root / "docs/data/capability-manifest.json").write_text(
             json.dumps(
                 {
                     "modules": {
@@ -401,15 +401,15 @@ class SurfaceInventoryContract(unittest.TestCase):
                 self.assertEqual(self.profile.read_bytes(), before)
 
     def test_actual_manifest_retains_the_pre_format_exported_surface(self):
-        # Independently captured from the actual module exports at 5d9ab83,
-        # before formatting, not derived through this source-text parser.
+        # Independently captured from the actual JS module exports (including
+        # QuotaExceededError), not derived through this source-text parser.
         value = report.surface_inventory(SOURCE.parents[1])
         self.assertEqual(value["profile"], "CAPSID-MIN-2025-subset-v0")
-        self.assertEqual(value["globals"]["count"], 127)
+        self.assertEqual(value["globals"]["count"], 128)
         encoded = json.dumps(value["globals"]["names"], separators=(",", ":")).encode()
         self.assertEqual(
             hashlib.sha256(encoded).hexdigest(),
-            "b2940ab14b449d55a63d5253dd9b1bb49dee8a7297a7f229c0d8b890d55b1fcc",
+            "de7d2126cbb57f05fabfd7badf841f22c15a569fdb25d59213381de3d6fba575",
         )
 
     def test_duplicate_globals_remain_a_failure(self):

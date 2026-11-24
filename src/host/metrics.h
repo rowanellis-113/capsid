@@ -11,8 +11,8 @@
 namespace capsid::host {
 class ServiceChannelBudget;
 
-// M2 item 7 (design §12.1): the fixed, low-cardinality metric registry
-// behind the Admin /metrics endpoint. Families:
+// Fixed, low-cardinality metric registry behind the Admin /metrics endpoint.
+// Families:
 //
 //   capsid_worker_events_total{event,app,generation}          counter
 //   capsid_recovery_instability_budget_remaining{app}         gauge
@@ -26,18 +26,25 @@ class ServiceChannelBudget;
 //   capsid_isolation_applied_features{app}                    gauge
 //   capsid_isolation_failures_total{kind,app}                 counter
 //   capsid_log_dropped_total{app}                             counter
+//   capsid_pool_evictions_total{app,tenant,reason}            counter
+//   capsid_pool_rejections_total{app,tenant,reason}           counter
+//   capsid_channel_active{scope}                              gauge
+//   capsid_channel_http_inflight{scope}                       gauge
+//   capsid_channel_reservations{scope}                        gauge
+//   capsid_channel_pending_dials{scope}                       gauge
+//   capsid_channel_queue_bytes{scope}                         gauge
+//   capsid_channel_budget_limit{scope,resource}               gauge
+//   capsid_channel_budget_high_water{scope,resource}          gauge
+//   capsid_channel_budget_rejections_total{scope,reason}      counter
 //   capsid_process_rss_bytes / capsid_process_pss_bytes /     gauge
 //   capsid_process_cpu_seconds_total                          counter
 //   capsid_worker_rss_bytes{app,pid}                          gauge
 //
-// Labels are controlled: app, generation (a digest), result and event
-// enums only. Request IDs, URLs, version free text, hostnames and error
-// messages never become labels. The request/latency/stream families of
-// §12.1 are unreachable in managed mode: there is no data plane on the
-// Host (requests terminate at an external gateway), so those families
-// intentionally do not exist here. A process snapshot is injected by the
-// Host at startup (render-time /proc reads, never blocking the caller of
-// the count methods).
+// Labels are controlled: app, tenant, generation (a digest), scope, resource,
+// reason, result, and event enums only. Request IDs, URLs, version free text,
+// hostnames, and error messages never become labels. A process snapshot is
+// injected by the Host at startup (render-time /proc reads, never blocking
+// callers of the count methods).
 struct ProcessMetricsSnapshot {
     std::uint64_t rss_bytes = 0;
     std::uint64_t pss_bytes = 0;

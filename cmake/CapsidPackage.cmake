@@ -61,19 +61,14 @@ install(FILES
     include/capsid/runtime.hpp
     DESTINATION include/capsid)
 
-install(FILES
-    README.md
-    docs/architecture.md
-    docs/host-integration.md
-    docs/capsid-json.md
-    docs/host-config.md
-    docs/capability-policy.md
-    docs/module-permissions.md
-    docs/linux-sandbox.md
-    docs/conformance.md
-    docs/performance-benchmarks.md
-    docs/testing.md
+install(FILES README.md logo.png LICENSE CONTRIBUTING.md ROADMAP.md SECURITY.md
     DESTINATION share/doc/capsid)
+install(FILES docs/README.md DESTINATION share/doc/capsid/docs)
+install(FILES docs/data/capability-manifest.json docs/data/current-status.json
+    DESTINATION share/doc/capsid/docs/data)
+install(DIRECTORY docs/guides docs/reference docs/design
+    DESTINATION share/doc/capsid/docs
+    FILES_MATCHING PATTERN "*.md")
 
 install(FILES LICENSE DESTINATION share/licenses/capsid)
 if(TARGET capsid-worker)

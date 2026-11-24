@@ -2,10 +2,11 @@
 import 'txiki-polyfills/self.js';
 import 'txiki-polyfills/timers.js';
 import 'txiki-polyfills/event-target-polyfill.js';
-import './dom-exception.js';
+import { QuotaExceededError, installStructuredCloneDomExceptionSupport } from './dom-exception.js';
 import { ErrorEvent } from './events.js';
 import { dispatchTrustedEvent } from 'txiki-polyfills/event-target.js';
 import 'txiki-polyfills/structured-clone.js';
+installStructuredCloneDomExceptionSupport();
 import './message-channel.js';
 import 'txiki-polyfills/text-encoding.js';
 import 'txiki-polyfills/text-encode-transform.js';
@@ -44,6 +45,27 @@ configureFetchLimits(core.capsidFetchRequestBodyLimit(), core.capsidFetchRespons
 const fixedResponseBodyLimit = Number(core.capsidFixedResponseBodyLimit());
 
 const nativeCrypto = globalThis.crypto;
+const TypedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayToStringTag = Object.getOwnPropertyDescriptor(
+  TypedArrayPrototype,
+  Symbol.toStringTag,
+).get;
+const typedArrayBuffer = Object.getOwnPropertyDescriptor(TypedArrayPrototype, 'buffer').get;
+const dataViewBuffer = Object.getOwnPropertyDescriptor(DataView.prototype, 'buffer').get;
+const typedArrayByteOffset = Object.getOwnPropertyDescriptor(TypedArrayPrototype, 'byteOffset').get;
+const typedArrayByteLength = Object.getOwnPropertyDescriptor(TypedArrayPrototype, 'byteLength').get;
+const arrayBufferIsView = ArrayBuffer.isView;
+const integerTypedArrayTags = new Set([
+  'Int8Array',
+  'Uint8Array',
+  'Uint8ClampedArray',
+  'Int16Array',
+  'Uint16Array',
+  'Int32Array',
+  'Uint32Array',
+  'BigInt64Array',
+  'BigUint64Array',
+]);
 let cryptoObject;
 class Crypto {
   constructor() {
@@ -61,26 +83,30 @@ class Crypto {
     if (this !== cryptoObject) {
       throw new TypeError('Illegal invocation');
     }
-    const integerTypedArray =
-      value instanceof Int8Array ||
-      value instanceof Uint8Array ||
-      value instanceof Uint8ClampedArray ||
-      value instanceof Int16Array ||
-      value instanceof Uint16Array ||
-      value instanceof Int32Array ||
-      value instanceof Uint32Array ||
-      value instanceof BigInt64Array ||
-      value instanceof BigUint64Array;
-    if (!integerTypedArray) {
+    if (!arrayBufferIsView(value)) {
+      throw new TypeError(
+        "Failed to execute 'getRandomValues' on 'Crypto': parameter 1 is not of type 'ArrayBufferView'.",
+      );
+    }
+    const tag = typedArrayToStringTag.call(value);
+    const buffer = tag === undefined ? dataViewBuffer.call(value) : typedArrayBuffer.call(value);
+    if (!core.isArrayBuffer(buffer)) {
+      throw new TypeError('getRandomValues requires a non-shared buffer');
+    }
+    if (!integerTypedArrayTags.has(tag)) {
       throw new DOMException(
         'The provided ArrayBufferView is not an integer typed array',
         'TypeMismatchError',
       );
     }
-    if (value.byteLength > 65536) {
-      throw new DOMException('The requested length exceeds 65536 bytes', 'QuotaExceededError');
+    const byteLength = typedArrayByteLength.call(value);
+    if (byteLength > 65536) {
+      throw new QuotaExceededError('The requested length exceeds 65536 bytes');
     }
-    return nativeCrypto.getRandomValues(value);
+    if (byteLength !== 0) {
+      core.random(buffer, typedArrayByteOffset.call(value), byteLength);
+    }
+    return value;
   }
 
   randomUUID() {

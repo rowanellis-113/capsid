@@ -11,13 +11,15 @@
 namespace capsid {
 namespace host {
 
-// GLM T08: the first-party 0.3.0 hosts launch workers through
-// capsid_worker_spawn_ex at wire version 4 (the carriage slice keeps
-// v3 semantics). A host.json "channels" section additionally requests
-// the channel capability set (DUPLEX | A2 | UPGRADE | HALF_CLOSE — a
-// closure-satisfying set); a worker that does not answer the bits
-// leaves the effective set without them and channel requests fail
-// fast and explicitly. The wire version is never auto-downgraded.
+// First-party hosts launch workers through capsid_worker_spawn_ex at wire
+// version 4, requesting the default WebSocket/channel capability set
+// (DUPLEX_CHANNEL | UPGRADE | CHANNEL_LAYOUT_A2 | CHANNEL_CONFIRM |
+// CHANNEL_CLOSE_FINAL | FETCH_UPGRADE | CONNECTION_LIFETIME). When a
+// host.json "channels" section is configured, from() additionally requests
+// CAPSID_PROTOCOL_CAP_HALF_CLOSE and forwards the configured channel limits.
+// A worker that does not answer a capability bit leaves it out of the
+// effective set so unsupported operations fail fast and explicitly. The wire
+// version is never auto-downgraded.
 struct ProtocolLaunch {
     bool use_v4 = true; // first-party hosts: v4 carriage
     capsid_protocol_options options{};

@@ -19,6 +19,7 @@
 #include "host/channel_ledger.h"
 #include "host/generation_pool.h"
 #include "host/host_config_model.h"
+#include "host/managed_admin_backend.h"
 #include "host/managed_host.h"
 #include "host/managed_listener.h"
 #include "host/protocol_launch.h"
@@ -40,11 +41,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
+#include <future>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -673,6 +678,349 @@ void run_two_tier_reaping_slot_transfer(const std::string& worker_path) {
     std::cout << "PASS: two_tier_reaping_slot_transfer" << std::endl;
 }
 
+GenerationPoolOptions cold_pool_options() {
+    GenerationPoolOptions opts;
+    opts.application_id = "cold";
+    opts.version = "v1";
+    opts.generation_digest = "sha256:" + std::string(64, 'a');
+    opts.workers = 1;
+    opts.has_min_ready = true;
+    opts.min_ready = 0;
+    opts.recovery = default_recovery_policy();
+    return opts;
+}
+
+void run_cold_start_permit_refusal() {
+    capsid::host::StartupPermitCoordinator permits(nullptr, 0);
+    WorkerCapacityLedger ledger(1, 0);
+    unsigned factory_calls = 0;
+    unsigned failures = 0;
+    std::string failure_reason;
+    auto opts = cold_pool_options();
+    opts.startup_permits = &permits;
+    opts.acquire_elastic_slot = [&] { return ledger.try_acquire_elastic("cold"); };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold"); };
+    opts.factory = [&](capsid_worker**, std::string*) {
+        ++factory_calls;
+        return false;
+    };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create cold pool: " + error);
+    pool->set_scale_callbacks({}, [&](const std::string& reason) {
+        ++failures;
+        failure_reason = reason;
+    });
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "expected asynchronous scale-out");
+    const bool settled =
+        wait_for([&] { return !pool->scale_out_in_flight(); }, std::chrono::seconds(5));
+    pool->stop_and_join();
+    require(settled && factory_calls == 0 && ledger.elastic_used() == 0,
+            "permit refusal must settle without spawning or holding capacity");
+    require(failures == 1 && !failure_reason.empty(),
+            "cold-start waiter must receive one failure notification when its permit is refused");
+}
+
+void run_cold_start_retry_after_spawn_failure(const std::string& worker_path) {
+    WorkerCapacityLedger ledger(1, 0);
+    std::atomic<unsigned> attempts{0};
+    std::atomic<unsigned> failures{0};
+    std::atomic<unsigned> ready{0};
+    auto spawn = spawn_factory(worker_path, 5000, kBurstBundle);
+    auto opts = cold_pool_options();
+    opts.acquire_elastic_slot = [&] { return ledger.try_acquire_elastic("cold"); };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold"); };
+    opts.factory = [&](capsid_worker** worker, std::string* error) {
+        if (++attempts == 1) {
+            *error = "test factory refused the first start";
+            return false;
+        }
+        return spawn(worker, error);
+    };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create cold pool: " + error);
+    pool->set_scale_callbacks([&] { ++ready; }, [&](const std::string&) { ++failures; });
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "first cold start was not scheduled");
+    require(wait_for([&] { return failures.load() == 1; }, std::chrono::seconds(5)),
+            "factory failure never reached the waiter");
+    require(pool->ready_workers() == 0 && ledger.elastic_used() == 0 && ready.load() == 0,
+            "failed start published a worker or retained the slot");
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "retry could not acquire the released slot");
+    require(wait_for([&] { return ready.load() == 1; }, std::chrono::seconds(5)),
+            "retry never reached READY");
+    require(attempts.load() == 2 && failures.load() == 1 && pool->ready_workers() == 1 &&
+                ledger.elastic_used() == 1,
+            "retry did not produce exactly one serving worker");
+    pool->stop_and_join();
+    require(ledger.elastic_used() == 0 &&
+                pool->request_scale_out() == GenerationPool::ScaleOutResult::kNotActive,
+            "a drained pool retained capacity or accepted new work");
+}
+
+void run_ws_upgrade_pumps_parked_queue(const std::string& worker_path) {
+    static const char* kGatedWsBundle = R"js(
+        let released = false;
+        export default {
+            async fetch(request) {
+                if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket')
+                    return new Response('parked-ok');
+                const control = new URL(request.url).searchParams.get('control') === 'yes';
+                while (!control && !released) await new Promise(resolve => setTimeout(resolve, 5));
+                const [client, server] = Object.values(new WebSocketPair());
+                server.accept();
+                if (control) server.addEventListener('message', () => { released = true; });
+                server.addEventListener('close', () => server.close());
+                return new Response(null, { status: 101, webSocket: client });
+            }
+        };
+    )js";
+
+    WorkerCapacityLedger ledger(1, 0);
+    require(ledger.reserve_fresh("ws-queue", 1), "reserve ws-queue floor");
+    ledger.commit_fresh("ws-queue");
+    auto channel_budget = std::make_shared<capsid::host::ServiceChannelBudget>();
+
+    GenerationPoolOptions pool_opts;
+    pool_opts.application_id = "ws-queue";
+    pool_opts.version = "v1";
+    pool_opts.generation_digest = "sha256:" + std::string(64, 'e');
+    pool_opts.workers = 1;
+    pool_opts.has_min_ready = true;
+    pool_opts.min_ready = 1;
+    pool_opts.channel_budget = channel_budget;
+    pool_opts.max_inflight_per_worker = 1;
+    pool_opts.max_queued_requests = 1;
+    pool_opts.queue_timeout_ms = 15000;
+    pool_opts.factory = spawn_factory(worker_path, 15000, kGatedWsBundle);
+    pool_opts.recovery = default_recovery_policy();
+
+    std::string error;
+    std::shared_ptr<GenerationPool> pool = GenerationPool::create(pool_opts, &error);
+    require(pool != nullptr, "ws-queue pool create failed: " + error);
+
+    auto routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"ws-queue", pool}}));
+
+    ManagedListenerOptions listener_opts;
+    listener_opts.config = loopback_path_listener();
+    listener_opts.routing = routing;
+    listener_opts.channel_service_budget = channel_budget;
+    ManagedListener listener(listener_opts);
+    require(listener.start(&error), "listener start failed: " + error);
+    const std::uint16_t port = listener.bound_port();
+
+    const auto start_upgrade = [port](const std::string& query) {
+        const SocketHandle fd = connect_listener(port);
+        send_raw_request(fd, "GET /@capsid/ws-queue/" + query +
+                                 " HTTP/1.1\r\n"
+                                 "Host: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                 "Sec-WebSocket-Version: 13\r\n\r\n");
+        return fd;
+    };
+    const auto read_upgrade = [](SocketHandle fd, const std::string& name) {
+        std::string headers;
+        char buf[1024];
+        while (headers.find("\r\n\r\n") == std::string::npos) {
+            const auto n = recv(fd, buf, sizeof(buf), 0);
+            require(n > 0, "WebSocket handshake interrupted: " + headers);
+            headers.append(buf, static_cast<std::size_t>(n));
+        }
+        require(headers.rfind("HTTP/1.1 101 ", 0) == 0, name + " upgrade failed: " + headers);
+    };
+
+    const SocketHandle control = start_upgrade("?control=yes");
+    read_upgrade(control, "control");
+    const SocketHandle ws = start_upgrade("");
+    require(wait_for([&] { return pool->inflight() == 1; }, std::chrono::seconds(4)),
+            "subject upgrade never occupied the request slot");
+
+    const auto get = [port] { return do_http_get(port, "/@capsid/ws-queue/"); };
+    auto first = std::async(std::launch::async, get);
+    auto second = std::async(std::launch::async, get);
+    const auto ready = [](auto& future) {
+        return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    };
+    require(wait_for([&] { return ready(first) || ready(second); }, std::chrono::seconds(5)),
+            "second GET never encountered a full queue during the pending upgrade");
+    const bool first_done = ready(first);
+    auto& rejected = first_done ? first : second;
+    auto& parked = first_done ? second : first;
+    const HttpResponse full = rejected.get();
+    require(full.status == 429 && full.body == "request queue full" && !ready(parked),
+            "expected one rejected GET and one parked GET before releasing the upgrade");
+    // A masked one-byte client text frame ("g") releases the subject's gate.
+    send_raw_request(control, std::string("\x81\x81\x01\x02\x03\x04\x66", 7));
+    read_upgrade(ws, "subject");
+    const HttpResponse parked_resp = parked.get();
+    require(parked_resp.status == 200 && parked_resp.body == "parked-ok",
+            "parked request failed after 101 upgrade: status=" +
+                std::to_string(parked_resp.status) + " body=" + parked_resp.body);
+
+    const std::string close_frame("\x88\x82\x12\x34\x56\x78\x11\xdc", 8);
+    send_raw_request(ws, close_frame);
+    send_raw_request(control, close_frame);
+    close_socket_handle(ws);
+    close_socket_handle(control);
+
+    listener.request_stop();
+    listener.wait(&error);
+    pool->stop_and_join();
+    ledger.release_active("ws-queue", 1);
+    std::cout << "PASS: ws_upgrade_pumps_parked_queue" << std::endl;
+}
+
+void run_drain_during_slot_admission() {
+    for (const bool grant_slot : {true, false}) {
+        WorkerCapacityLedger ledger(1, 0);
+        std::promise<void> entered_admission;
+        auto entered = entered_admission.get_future();
+        std::promise<void> resume_admission;
+        auto resume = resume_admission.get_future();
+        std::atomic<unsigned> factory_calls{0};
+
+        auto opts = cold_pool_options();
+        opts.acquire_worker_slot = [&](const GenerationPool*, std::string* reason) -> bool {
+            const bool acquired = grant_slot ? ledger.try_acquire_elastic("cold") : false;
+            if (!acquired && reason != nullptr) {
+                *reason = "host_capacity_exhausted";
+            }
+            entered_admission.set_value();
+            (void)resume.wait_for(std::chrono::seconds(5));
+            return acquired;
+        };
+        opts.release_elastic_slot = [&] { ledger.release_elastic("cold", 1); };
+        opts.factory = [&](capsid_worker**, std::string* err) {
+            ++factory_calls;
+            if (err != nullptr) {
+                *err = "unexpected spawn during drain";
+            }
+            return false;
+        };
+
+        std::string error;
+        auto pool = GenerationPool::create(std::move(opts), &error);
+        require(pool != nullptr, "create cold pool: " + error);
+
+        std::string scale_reason;
+        auto pending =
+            std::async(std::launch::async, [&] { return pool->request_scale_out(&scale_reason); });
+        require(entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+                "acquire_worker_slot never entered");
+        require(ledger.elastic_used() == (grant_slot ? 1U : 0U),
+                "unexpected elastic ledger occupancy before drain");
+
+        pool->request_drain();
+        require(wait_for([&] { return pool->drain_check_cycles() >= 2; }, std::chrono::seconds(5)),
+                "pump never evaluated drain completion while slot admission was in flight");
+        require(pool->state() == GenerationPool::State::kDraining,
+                "pump finalized drain before in-flight slot admission returned");
+
+        resume_admission.set_value();
+        require(pending.get() == GenerationPool::ScaleOutResult::kNotActive,
+                "request_scale_out must abort with kNotActive when pool drained mid-admission");
+        pool->stop_and_join();
+
+        require(pool->state() == GenerationPool::State::kDead && factory_calls.load() == 0,
+                "drained pool either stayed alive or launched a factory after admission race");
+        require(ledger.elastic_used() == 0 && ledger.try_acquire_elastic("peer"),
+                "capacity leaked after draining mid-admission");
+        ledger.release_elastic("peer", 1);
+    }
+    std::cout << "PASS: drain_during_slot_admission" << std::endl;
+}
+
+void run_drain_during_worker_start(const std::string& worker_path) {
+    WorkerCapacityLedger ledger(1, 0);
+    std::promise<void> entered_factory;
+    auto entered = entered_factory.get_future();
+    std::promise<void> resume_factory;
+    auto resume = resume_factory.get_future();
+    std::atomic<bool> spawned{false};
+    auto spawn = spawn_factory(worker_path, 5000, kBurstBundle);
+    auto opts = cold_pool_options();
+    opts.acquire_elastic_slot = [&] { return ledger.try_acquire_elastic("cold"); };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold"); };
+    opts.factory = [&](capsid_worker** worker, std::string* error) {
+        entered_factory.set_value();
+        if (resume.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            *error = "timed out waiting for drain signal";
+            return false;
+        }
+        spawned.store(spawn(worker, error));
+        return spawned.load();
+    };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create cold pool: " + error);
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "could not schedule cold start");
+    require(entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "worker factory did not start");
+    require(ledger.elastic_used() == 1, "factory started without a capacity slot");
+    pool->request_drain();
+    const bool refused = pool->request_scale_out() == GenerationPool::ScaleOutResult::kNotActive;
+    resume_factory.set_value();
+    pool->stop_and_join();
+    require(spawned.load(), "fixture did not complete a successful in-progress startup");
+    require(refused && pool->state() == GenerationPool::State::kDead && !pool->pick_worker(),
+            "drained generation accepted or published more work");
+    require(ledger.elastic_used() == 0 && ledger.try_acquire_elastic("peer"),
+            "completed drain did not return the in-progress worker's capacity");
+    ledger.release_elastic("peer");
+}
+
+#if defined(__linux__)
+void run_cold_cycles_release_descriptors(const std::string& worker_path) {
+    const auto open_fds = [] {
+        return std::distance(std::filesystem::directory_iterator("/proc/self/fd"),
+                             std::filesystem::directory_iterator());
+    };
+    auto opts = cold_pool_options();
+    opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    std::string error;
+    // Initialize process-wide runtime resources before measuring per-worker descriptors.
+    {
+        auto warm = opts;
+        warm.min_ready = 1;
+        auto pool = GenerationPool::create(std::move(warm), &error);
+        require(pool != nullptr, "warm up runtime: " + error);
+        pool->stop_and_join();
+    }
+    for (const bool with_started_observer : {false, true}) {
+        auto run_opts = opts;
+        std::atomic<unsigned> started_count{0};
+        if (with_started_observer) {
+            run_opts.on_worker_started = [&](const WorkerExecutor*) { ++started_count; };
+        }
+        auto pool = GenerationPool::create(std::move(run_opts), &error);
+        require(pool != nullptr, "create cold pool: " + error);
+        const auto baseline = open_fds();
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+                    "cold wakeup did not schedule a worker");
+            require(wait_for([&] { return pool->ready_workers() == 1; }, std::chrono::seconds(5)),
+                    "cold worker did not become ready");
+            require(pool->evict_idle_worker(0, "global_lru"), "could not release idle worker");
+        }
+        const bool reclaimed =
+            wait_for([&] { return open_fds() <= baseline; }, std::chrono::seconds(5));
+        const auto remaining = open_fds();
+        pool->stop_and_join();
+        require(!with_started_observer || started_count.load() == 3,
+                "on_worker_started did not fire for all cold cycles");
+        require(reclaimed,
+                std::string("live generation retained descriptors after three cold cycles") +
+                    (with_started_observer ? " (with on_worker_started)" : "") +
+                    ": before=" + std::to_string(baseline) + " after=" + std::to_string(remaining));
+    }
+}
+#endif
+
 #if !defined(_WIN32)
 std::string create_temp_dir(const char* prefix) {
     std::string tmpl = std::string("/tmp/") + prefix + "-XXXXXX";
@@ -763,6 +1111,479 @@ void run_disk_backed_generation_tamper_fails(const std::string& worker_path) {
 #endif
 }
 
+void run_dispatch_lease_blocks_eviction(const std::string& worker_path) {
+    WorkerCapacityLedger ledger(2, 0);
+    auto opts = cold_pool_options();
+    opts.workers = 2;
+    opts.min_ready = 0;
+    opts.max_inflight_per_worker = 1;
+    opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts.acquire_elastic_slot = [&] { return ledger.try_acquire_elastic("cold"); };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold", 1); };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create elastic pool: " + error);
+
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "could not warm first elastic worker");
+    require(wait_for([&] { return pool->ready_workers() == 1; }, std::chrono::seconds(5)),
+            "worker never reached ready");
+
+    GenerationPool::DispatchLease lease = pool->acquire_worker();
+    require(static_cast<bool>(lease) && lease->pending_dispatches() == 1 && !lease->is_idle(),
+            "acquire_worker did not arm pending dispatch protection");
+
+    bool at_max_inflight = false;
+    GenerationPool::DispatchLease second = pool->acquire_worker(&at_max_inflight);
+    require(!second && at_max_inflight,
+            "second acquire_worker did not observe pending dispatch against max_inflight");
+
+    const auto snaps = pool->snapshot_workers();
+    require(snaps.size() == 1 && !snaps[0].idle,
+            "snapshot reported pending-dispatch worker as idle");
+    require(!pool->evict_idle_worker(0, "global_lru"),
+            "idle eviction evicted a worker holding an active DispatchLease");
+    require(pool->ready_workers() == 1, "worker disappeared while DispatchLease was held");
+
+    lease.release();
+    require(pool->evict_idle_worker(0, "global_lru"),
+            "worker could not be evicted once DispatchLease was released");
+    require(pool->ready_workers() == 0 && ledger.elastic_used() == 0,
+            "releasing DispatchLease and evicting did not return elastic slot");
+    pool->stop_and_join();
+    std::cout << "PASS: dispatch_lease_blocks_eviction" << std::endl;
+}
+
+void run_floor_recovery_after_scale_out_failure(const std::string& worker_path) {
+    auto opts = cold_pool_options();
+    opts.min_ready = 1;
+    opts.workers = 2;
+    std::atomic<unsigned> calls{0};
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::promise<void> failed;
+    auto gate = release.get_future();
+    auto spawn = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts.factory = [&](capsid_worker** out, std::string* error) {
+        if (++calls == 2) {
+            entered.set_value();
+            gate.wait();
+            *error = "controlled scale-out failure";
+            return false;
+        }
+        return spawn(out, error);
+    };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create floor-recovery pool: " + error);
+    pool->set_scale_callbacks({}, [&](const std::string&) { failed.set_value(); });
+    auto floor = pool->current_worker_snapshot();
+    require(floor != nullptr, "missing initial floor worker");
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "scale-out did not start");
+    require(entered.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "scale-out factory never entered");
+    require(pool->recycle_worker(floor.get()), "health recycle of floor worker refused");
+    release.set_value();
+    require(failed.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "missing scale-out failure callback");
+    // Without any new incoming request, the pool must restore its minReady=1 floor.
+    const bool restored =
+        wait_for([&] { return pool->ready_workers() >= 1; }, std::chrono::seconds(5));
+    const auto ready = pool->ready_workers();
+    const auto total_calls = calls.load();
+    pool->stop_and_join();
+    require(restored && ready == 1 && total_calls >= 3,
+            "floor was not automatically restored after scale-out failure: ready=" +
+                std::to_string(ready) + " calls=" + std::to_string(total_calls));
+    std::cout << "PASS: floor_recovery_after_scale_out_failure" << std::endl;
+}
+
+void run_floor_recovery_after_admission_refusal(const std::string& worker_path) {
+    using namespace std::chrono_literals;
+    WorkerCapacityLedger ledger(2, 0);
+    require(ledger.reserve_fresh("cold", 1), "reserve floor");
+    ledger.commit_fresh("cold");
+    require(ledger.try_acquire_elastic("peer"), "occupy remaining slot");
+
+    std::promise<void> admitting;
+    std::promise<void> resume;
+    auto gate = resume.get_future().share();
+    std::atomic<unsigned> attempts{0};
+    std::atomic<unsigned> denials{0};
+    auto opts = cold_pool_options();
+    opts.min_ready = 1;
+    opts.workers = 2;
+    opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts.acquire_elastic_slot = [&] {
+        if (++attempts == 1) {
+            admitting.set_value();
+            gate.wait();
+        }
+        const bool granted = ledger.try_acquire_elastic("cold");
+        if (!granted)
+            ++denials;
+        return granted;
+    };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold"); };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create floor pool: " + error);
+    auto floor = pool->current_worker_snapshot();
+    require(floor != nullptr, "missing initial floor worker");
+    auto scaling = std::async(std::launch::async, [&] { return pool->request_scale_out(); });
+    require(admitting.get_future().wait_for(5s) == std::future_status::ready,
+            "elastic admission did not start");
+    require(pool->recycle_worker(floor.get()), "floor recycle refused during admission");
+    resume.set_value();
+    scaling.get();
+    require(denials.load() >= 1, "fixture did not reject elastic admission");
+
+    // No more requests or scale-out calls. The active floor is already paid for.
+    const bool recovered = wait_for([&] { return pool->ready_workers() == 1; }, 5s);
+    auto replacement = pool->current_worker_snapshot();
+    const bool settled = ledger.steady_of("cold") == 1 && ledger.elastic_of("cold") == 0 &&
+                         ledger.elastic_of("peer") == 1;
+    pool->stop_and_join();
+    ledger.release_elastic("peer");
+    require(recovered && replacement && replacement != floor,
+            "admission refusal left minReady=1 without a replacement worker");
+    require(settled, "floor recovery changed the peer's capacity or borrowed an elastic slot");
+}
+
+void run_exit_observer_during_floor_replacement(const std::string& worker_path) {
+    using namespace std::chrono_literals;
+    WorkerCapacityLedger ledger(2, 0);
+    require(ledger.reserve_fresh("cold", 1), "reserve floor");
+    ledger.commit_fresh("cold");
+    std::promise<void> spawning;
+    std::promise<void> resume;
+    std::promise<void> exit_delivered;
+    auto gate = resume.get_future();
+    std::atomic<unsigned> calls{0};
+    std::atomic<const WorkerExecutor*> original{nullptr};
+    std::atomic<unsigned> old_exits{0};
+    auto opts = cold_pool_options();
+    opts.min_ready = 1;
+    opts.workers = 2;
+    auto spawn = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts.factory = [&](capsid_worker** out, std::string* error) {
+        if (++calls == 2) {
+            spawning.set_value();
+            gate.wait();
+        }
+        return spawn(out, error);
+    };
+    opts.on_worker_exited = [&](const WorkerExecutor* worker) {
+        if (worker == original.load())
+            ++old_exits;
+    };
+    opts.acquire_elastic_slot = [&] { return ledger.try_acquire_elastic("cold"); };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold"); };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create pool: " + error);
+    auto floor = pool->current_worker_snapshot();
+    require(floor != nullptr, "missing initial worker");
+    original = floor.get();
+    pool->set_shared_event_sink(
+        [&](std::shared_ptr<WorkerExecutor> worker, capsid::host::WorkerEvent event) {
+            if (worker == floor && event.type == capsid::host::WorkerEvent::Type::kExit)
+                exit_delivered.set_value();
+        });
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "scale-out did not start");
+    require(spawning.get_future().wait_for(5s) == std::future_status::ready &&
+                ledger.elastic_of("cold") == 1,
+            "elastic worker did not reach its factory with a reserved slot");
+    require(pool->recycle_worker(floor.get()), "floor recycle refused");
+    require(exit_delivered.get_future().wait_for(5s) == std::future_status::ready,
+            "original worker exit did not reach the event sink before replacement");
+    resume.set_value();
+    require(
+        wait_for([&] { return pool->ready_workers() == 1 && ledger.elastic_of("cold") == 0; }, 5s),
+        "replacement failed to take over floor and release its elastic slot");
+    const bool peer = ledger.try_acquire_elastic("peer");
+    const bool notified = wait_for([&] { return old_exits.load() >= 1; }, 5s);
+    pool->set_shared_event_sink({});
+    pool->stop_and_join();
+    if (peer)
+        ledger.release_elastic("peer");
+    require(peer, "peer could not reuse elastic slot");
+    require(notified && old_exits.load() == 1,
+            "expected exactly one exit notification for the original worker before drain; total=" +
+                std::to_string(old_exits.load()));
+}
+
+void run_begin_after_exit(const std::string& worker_path, bool leased) {
+    using namespace std::chrono_literals;
+    auto opts = cold_pool_options();
+    opts.min_ready = 1;
+    opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create pool: " + error);
+    auto floor = pool->current_worker_snapshot();
+    require(floor != nullptr, "missing initial worker");
+    GenerationPool::DispatchLease lease;
+    if (leased) {
+        lease = pool->acquire_worker();
+        require(lease.get() == floor.get() && floor->pending_dispatches() == 1,
+                "lease did not claim original worker");
+    }
+    require(pool->recycle_worker(floor.get()), "floor recycle refused");
+    require(wait_for([&] { return floor->exited(); }, 5s), "original worker did not exit");
+    capsid::host::Command begin;
+    begin.type = capsid::host::CommandType::kBeginRequest;
+    begin.request_id = 11;
+    begin.method = "GET";
+    begin.url = "http://localhost/";
+    begin.end_request = true;
+    const bool accepted =
+        leased ? lease.submit_begin(std::move(begin)) : floor->submit(std::move(begin));
+
+    const auto pending = floor->pending_dispatches();
+    const auto inflight = floor->inflight();
+    const auto claims = floor->active_http_requests();
+    pool->stop_and_join();
+    require(!accepted, "caller was told that an exited worker accepted the begin");
+    require(pending == 0 && inflight == 0 && claims == 0,
+            "begin submitted after exit left pending=" + std::to_string(pending) +
+                " inflight=" + std::to_string(inflight) + " claims=" + std::to_string(claims));
+}
+
+void run_floor_recovery_stops_at_quarantine(const std::string& worker_path) {
+    using namespace std::chrono_literals;
+    auto opts = cold_pool_options();
+    opts.min_ready = 1;
+    opts.recovery.max_events = 3;
+    auto spawn = spawn_factory(worker_path, 5000, kBurstBundle);
+    std::atomic<unsigned> starts{0};
+    std::atomic<unsigned> quarantines{0};
+    opts.factory = [&](capsid_worker** out, std::string* error) {
+        if (++starts == 1)
+            return spawn(out, error);
+        *error = "controlled replacement failure";
+        return false;
+    };
+    opts.on_quarantine = [&] { ++quarantines; };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create pool: " + error);
+    auto floor = pool->current_worker_snapshot();
+    require(floor && pool->recycle_worker(floor.get()), "could not recycle initial floor");
+    const bool dead = wait_for([&] { return pool->state() == GenerationPool::State::kDead; }, 5s);
+    const auto ready = pool->ready_workers();
+    pool->stop_and_join();
+    require(dead && ready == 0 && quarantines.load() == 1 && starts.load() == 4,
+            "floor recovery did not settle after three failures: starts=" +
+                std::to_string(starts.load()) +
+                " quarantine callbacks=" + std::to_string(quarantines.load()));
+}
+
+void run_health_recycle_returns_elastic_slot(const std::string& worker_path) {
+    WorkerCapacityLedger ledger(2, 0);
+    require(ledger.reserve_fresh("cold", 1), "reserve floor");
+    ledger.commit_fresh("cold");
+    auto opts = cold_pool_options();
+    opts.min_ready = 1;
+    opts.workers = 2;
+    opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts.acquire_elastic_slot = [&] { return ledger.try_acquire_elastic("cold"); };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold"); };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create health-recycle pool: " + error);
+    auto floor = pool->current_worker_snapshot();
+    require(floor != nullptr, "missing initial floor worker");
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "could not scale to 2 workers");
+    require(wait_for([&] { return pool->ready_workers() == 2; }, std::chrono::seconds(5)),
+            "second worker never became ready");
+    require(ledger.elastic_of("cold") == 1, "expected 1 elastic slot before recycle");
+    require(pool->recycle_worker(floor.get()), "health recycle refused");
+    const auto ready = pool->ready_workers();
+    const auto charged = ledger.elastic_of("cold");
+    const bool peer_acquired = ledger.try_acquire_elastic("peer");
+    if (peer_acquired) {
+        ledger.release_elastic("peer");
+    }
+    pool->stop_and_join();
+    ledger.release_active("cold", 1);
+    require(ready == 1 && charged == 0 && peer_acquired,
+            "health recycle of floor worker failed to return elastic slot to peer");
+    std::cout << "PASS: health_recycle_returns_elastic_slot" << std::endl;
+}
+
+void run_http_selection_skips_full_worker(const std::string& worker_path) {
+    auto opts = cold_pool_options();
+    opts.workers = 2;
+    opts.min_ready = 2;
+    opts.max_inflight_per_worker = 1;
+    const WorkerExecutor* first = nullptr;
+    opts.client_bytes_loader = [&](const WorkerExecutor* w) -> std::uint64_t {
+        return (first != nullptr && w != first) ? 2ULL : 0ULL;
+    };
+    opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create two-worker pool: " + error);
+    std::mutex sink_mutex;
+    std::condition_variable sink_cv;
+    const WorkerExecutor* served_second_by = nullptr;
+    std::uint16_t second_status = 0;
+    std::string second_body;
+    bool second_done = false;
+    pool->set_shared_event_sink(
+        [&](std::shared_ptr<WorkerExecutor> exec, capsid::host::WorkerEvent ev) {
+            if (ev.request_id != 202) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(sink_mutex);
+            if (ev.type == capsid::host::WorkerEvent::Type::kResponseHead) {
+                served_second_by = exec.get();
+                second_status = ev.status;
+            } else if (ev.type == capsid::host::WorkerEvent::Type::kResponseBody) {
+                second_body.append(ev.body.begin(), ev.body.end());
+            } else if (ev.type == capsid::host::WorkerEvent::Type::kResponseEnd) {
+                second_done = true;
+                sink_cv.notify_all();
+            }
+        });
+    {
+        auto lease_a = pool->acquire_worker();
+        require(static_cast<bool>(lease_a), "first lease failed");
+        first = lease_a.get();
+        bool at_max = false;
+        auto lease_b = pool->acquire_worker(&at_max);
+        require(static_cast<bool>(lease_b) && lease_b.get() != first && !at_max,
+                "scheduler reported pool full even though second worker had a free HTTP slot");
+        const WorkerExecutor* second_worker = lease_b.get();
+        bool third_full = false;
+        auto lease_c = pool->acquire_worker(&third_full);
+        require(!lease_c && third_full,
+                "scheduler did not report at_max once all ready workers reached max_inflight");
+
+        capsid::host::Command begin;
+        begin.type = capsid::host::CommandType::kBeginRequest;
+        begin.request_id = 202;
+        begin.method = "GET";
+        begin.url = "http://localhost/second";
+        begin.end_request = true;
+        lease_b.submit_begin(std::move(begin));
+        {
+            std::unique_lock<std::mutex> lock(sink_mutex);
+            require(sink_cv.wait_for(lock, std::chrono::seconds(5), [&] { return second_done; }),
+                    "request dispatched to second worker timed out");
+            require(served_second_by == second_worker && second_status == 200 &&
+                        second_body == "elastic-ok",
+                    "second request was not served cleanly by second worker");
+        }
+    }
+    pool->stop_and_join();
+    std::cout << "PASS: http_selection_skips_full_worker" << std::endl;
+}
+
+void run_dispatch_handoff_blocks_eviction(const std::string& worker_path) {
+    WorkerCapacityLedger ledger(1, 0);
+    auto opts = cold_pool_options();
+    opts.workers = 1;
+    opts.min_ready = 0;
+    opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts.acquire_elastic_slot = [&] { return ledger.try_acquire_elastic("cold"); };
+    opts.release_elastic_slot = [&] { ledger.release_elastic("cold", 1); };
+    std::string error;
+    auto pool = GenerationPool::create(std::move(opts), &error);
+    require(pool != nullptr, "create handoff pool: " + error);
+
+    std::mutex resp_mutex;
+    std::condition_variable resp_cv;
+    std::uint16_t status = 0;
+    std::string body;
+    bool ended = false;
+    bool failed = false;
+    pool->set_shared_event_sink([&](std::shared_ptr<WorkerExecutor>, capsid::host::WorkerEvent ev) {
+        if (ev.request_id != 42) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(resp_mutex);
+        if (ev.type == capsid::host::WorkerEvent::Type::kResponseHead) {
+            status = ev.status;
+        } else if (ev.type == capsid::host::WorkerEvent::Type::kResponseBody) {
+            body.append(ev.body.begin(), ev.body.end());
+        } else if (ev.type == capsid::host::WorkerEvent::Type::kResponseEnd) {
+            ended = true;
+            resp_cv.notify_all();
+        } else if (ev.type == capsid::host::WorkerEvent::Type::kRequestFailure ||
+                   ev.type == capsid::host::WorkerEvent::Type::kRequestTimeout ||
+                   ev.type == capsid::host::WorkerEvent::Type::kExit) {
+            failed = true;
+            resp_cv.notify_all();
+        }
+    });
+
+    require(pool->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight,
+            "could not warm handoff worker");
+    require(wait_for([&] { return pool->ready_workers() == 1; }, std::chrono::seconds(5)),
+            "handoff worker never reached ready");
+
+    GenerationPool::DispatchLease lease = pool->acquire_worker();
+    require(static_cast<bool>(lease) && lease->pending_dispatches() == 1 && lease->inflight() == 0,
+            "lease did not claim pending dispatch before handoff");
+    std::shared_ptr<WorkerExecutor> target = lease.executor();
+
+    std::promise<void> evictor_in_idle_window;
+    std::promise<void> handoff_finished;
+    auto handoff_future = handoff_finished.get_future();
+    std::atomic<bool> hook_fired{false};
+    target->set_idle_check_hook_for_test([&] {
+        if (!hook_fired.exchange(true)) {
+            evictor_in_idle_window.set_value();
+            (void)handoff_future.wait_for(std::chrono::seconds(5));
+        }
+    });
+
+    std::atomic<bool> evicted_during_handoff{false};
+    std::thread evictor(
+        [&] { evicted_during_handoff.store(pool->evict_idle_worker(0, "global_lru")); });
+
+    require(evictor_in_idle_window.get_future().wait_for(std::chrono::seconds(5)) ==
+                std::future_status::ready,
+            "eviction thread never entered idle-check window");
+
+    capsid::host::Command begin;
+    begin.type = capsid::host::CommandType::kBeginRequest;
+    begin.request_id = 42;
+    begin.method = "GET";
+    begin.url = "http://localhost/handoff";
+    begin.end_request = true;
+    lease.submit_begin(std::move(begin));
+    require(target->pending_dispatches() == 0 && target->inflight() == 1,
+            "submit_begin did not transfer lease to inflight");
+    handoff_finished.set_value();
+
+    evictor.join();
+    target->set_idle_check_hook_for_test({});
+    require(!evicted_during_handoff.load(),
+            "eviction falsely observed idle during DispatchLease-to-inflight handoff");
+
+    {
+        std::unique_lock<std::mutex> lock(resp_mutex);
+        require(resp_cv.wait_for(lock, std::chrono::seconds(5), [&] { return ended || failed; }),
+                "in-flight request timed out after handoff");
+        require(ended && !failed && status == 200 && body == "elastic-ok",
+                "request in handoff did not receive complete 200 response: status=" +
+                    std::to_string(status) + " body=" + body);
+    }
+    require(pool->ready_workers() == 1, "worker left ready set during handoff request");
+    require(pool->evict_idle_worker(0, "global_lru"),
+            "worker could not be evicted after request completed");
+    require(pool->ready_workers() == 0 && ledger.elastic_used() == 0,
+            "post-response eviction did not return elastic slot");
+    pool->stop_and_join();
+    std::cout << "PASS: dispatch_handoff_blocks_eviction" << std::endl;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -774,6 +1595,32 @@ int main(int argc, char** argv) {
 #endif
     const std::string worker_path = argv[1];
     const std::string mode = argv[2];
+    if (mode == "cold_start_permit_refusal") {
+        run_cold_start_permit_refusal();
+        return 0;
+    }
+    if (mode == "cold_start_retry_after_spawn_failure") {
+        run_cold_start_retry_after_spawn_failure(worker_path);
+        return 0;
+    }
+    if (mode == "drain_during_worker_start") {
+        run_drain_during_worker_start(worker_path);
+        return 0;
+    }
+    if (mode == "drain_during_slot_admission") {
+        run_drain_during_slot_admission();
+        return 0;
+    }
+    if (mode == "ws_upgrade_pumps_parked_queue") {
+        run_ws_upgrade_pumps_parked_queue(worker_path);
+        return 0;
+    }
+#if defined(__linux__)
+    if (mode == "cold_cycles_release_descriptors") {
+        run_cold_cycles_release_descriptors(worker_path);
+        return 0;
+    }
+#endif
     if (mode == "scale_to_zero_burst_and_reclaim") {
         run_scale_to_zero_burst_and_reclaim(worker_path);
         return 0;
@@ -788,6 +1635,42 @@ int main(int argc, char** argv) {
     }
     if (mode == "disk_backed_generation_tamper_fails") {
         run_disk_backed_generation_tamper_fails(worker_path);
+        return 0;
+    }
+    if (mode == "dispatch_lease_blocks_eviction") {
+        run_dispatch_lease_blocks_eviction(worker_path);
+        return 0;
+    }
+    if (mode == "floor_recovery_after_scale_out_failure") {
+        run_floor_recovery_after_scale_out_failure(worker_path);
+        return 0;
+    }
+    if (mode == "floor_recovery_after_admission_refusal") {
+        run_floor_recovery_after_admission_refusal(worker_path);
+        return 0;
+    }
+    if (mode == "floor_recovery_stops_at_quarantine") {
+        run_floor_recovery_stops_at_quarantine(worker_path);
+        return 0;
+    }
+    if (mode == "exit_observer_during_floor_replacement") {
+        run_exit_observer_during_floor_replacement(worker_path);
+        return 0;
+    }
+    if (mode == "leased_begin_after_exit" || mode == "direct_begin_after_exit") {
+        run_begin_after_exit(worker_path, mode == "leased_begin_after_exit");
+        return 0;
+    }
+    if (mode == "health_recycle_returns_elastic_slot") {
+        run_health_recycle_returns_elastic_slot(worker_path);
+        return 0;
+    }
+    if (mode == "http_selection_skips_full_worker") {
+        run_http_selection_skips_full_worker(worker_path);
+        return 0;
+    }
+    if (mode == "dispatch_handoff_blocks_eviction") {
+        run_dispatch_handoff_blocks_eviction(worker_path);
         return 0;
     }
     fail("unknown elastic pool test case: " + mode);

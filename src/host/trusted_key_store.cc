@@ -63,7 +63,7 @@ void set_key_error(std::string* error, const char* stable_message) {
 // Opens the trusted key with reparse-point rejection: a symlinked key
 // file fails the open instead of being followed (the O_NOFOLLOW
 // equivalent; intermediate directory traversal follows Windows default
-// resolution, see docs/windows.md).
+// resolution, see docs/guides/build-on-windows.md).
 int open_trusted_key(const std::string& path, std::string* error) {
     const int wide_size = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
     if (wide_size <= 0) {
@@ -213,7 +213,7 @@ TrustedKeyStore TrustedKeyStore::load(std::span<const TrustedKeyDescriptor> desc
 #if !defined(_WIN32)
         // Owner is root or the Host euid; group/other have no write bits.
         // (Windows has no uid/mode on files; NTFS ACLs are the boundary,
-        // see docs/windows.md.)
+        // see docs/guides/build-on-windows.md.)
         const uid_t euid = geteuid();
         if (!(before.st_uid == 0 || before.st_uid == euid) || (before.st_mode & 0022) != 0) {
             close(fd);

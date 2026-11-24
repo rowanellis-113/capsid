@@ -550,6 +550,211 @@ async function testCompressionAndCrypto() {
     const random = new Uint8Array(32);
     crypto.getRandomValues(random);
     check(random.some(value => value !== 0), 'crypto.getRandomValues');
+
+    const quotaErr = new QuotaExceededError('x', { quota: 10, requested: 20 });
+    const clonedQuota = structuredClone(quotaErr);
+    check(
+        clonedQuota !== quotaErr &&
+            clonedQuota.constructor === QuotaExceededError &&
+            clonedQuota.name === 'QuotaExceededError' &&
+            clonedQuota.message === 'x' &&
+            clonedQuota.code === 22 &&
+            clonedQuota.quota === 10 &&
+            clonedQuota.requested === 20,
+        'structuredClone preserves QuotaExceededError top-level',
+    );
+    const defaultQuota = structuredClone(new QuotaExceededError('d'));
+    check(
+        defaultQuota.constructor === QuotaExceededError &&
+            defaultQuota.quota === null &&
+            defaultQuota.requested === null,
+        'structuredClone preserves default null QuotaExceededError fields',
+    );
+    const graph = { a: quotaErr, b: quotaErr, list: [quotaErr] };
+    graph.self = graph;
+    const clonedGraph = structuredClone(graph);
+    check(
+        clonedGraph.self === clonedGraph &&
+            clonedGraph.a === clonedGraph.b &&
+            clonedGraph.a === clonedGraph.list[0] &&
+            clonedGraph.a !== quotaErr &&
+            clonedGraph.a.constructor === QuotaExceededError &&
+            clonedGraph.a.quota === 10 &&
+            clonedGraph.a.requested === 20,
+        'structuredClone preserves nested, cyclic and shared QuotaExceededError refs',
+    );
+    check(
+        Object.is(new QuotaExceededError('', { quota: -0 }).quota, -0) &&
+            Object.is(structuredClone(new QuotaExceededError('', { quota: -0 })).quota, -0),
+        'QuotaExceededError preserves signed negative zero',
+    );
+    for (const [label, fn, expectedName] of [
+        ['missing arg', () => crypto.getRandomValues(), 'TypeError'],
+        ['plain object', () => crypto.getRandomValues({}), 'TypeError'],
+        ['Float32Array', () => crypto.getRandomValues(new Float32Array(1)), 'TypeMismatchError'],
+        ['DataView', () => crypto.getRandomValues(new DataView(new ArrayBuffer(4))), 'TypeMismatchError'],
+    ]) {
+        let actualName = 'no-throw';
+        try {
+            fn();
+        } catch (err) {
+            actualName = err?.name ?? String(err);
+        }
+        check(
+            actualName === expectedName,
+            `crypto.getRandomValues(${label}) expected ${expectedName}, got ${actualName}`,
+        );
+    }
+    const shadowedView = new Uint8Array(1);
+    Object.defineProperty(shadowedView, 'byteLength', { value: 65537 });
+    check(
+        crypto.getRandomValues(shadowedView) === shadowedView,
+        'crypto.getRandomValues uses internal [[ByteLength]] slot',
+    );
+    let oversizedOk = false;
+    try {
+        crypto.getRandomValues(new Uint8Array(65537));
+    } catch (err) {
+        oversizedOk =
+            err.constructor === QuotaExceededError &&
+            err.name === 'QuotaExceededError' &&
+            err.code === 22 &&
+            err.quota === null &&
+            err.requested === null;
+    }
+    check(oversizedOk, 'crypto.getRandomValues oversized throws QuotaExceededError');
+}
+
+function checkCase(label, run) {
+    try {
+        check(run() === true, label);
+    } catch (error) {
+        failures.push(`${label}: threw ${error.name} (${error.message})`);
+    }
+}
+
+function testQuotaCloneAndTransfer() {
+    const quota = new QuotaExceededError('limit', { quota: 10, requested: 20 });
+    function isClonedQuota(value) {
+        return value !== quota && value instanceof QuotaExceededError &&
+            value.message === 'limit' && value.quota === 10 && value.requested === 20;
+    }
+    function throwsDataCloneError(run) {
+        try {
+            run();
+        } catch (error) {
+            return error instanceof DOMException && error.name === 'DataCloneError';
+        }
+        return false;
+    }
+    checkCase('clone keeps enumerable array properties and aliases', () => {
+        const source = [quota];
+        source.detail = quota;
+        const copy = structuredClone(source);
+        return Array.isArray(copy) && Object.hasOwn(copy, 'detail') &&
+            isClonedQuota(copy[0]) && copy.detail === copy[0];
+    });
+    checkCase('clone preserves sparse array holes and trailing length', () => {
+        const source = new Array(5);
+        source[2] = quota;
+        const copy = structuredClone(source);
+        return Array.isArray(copy) && copy.length === 5 &&
+            Object.keys(copy).join(',') === '2' && isClonedQuota(copy[2]);
+    });
+    checkCase('clone copies own data on a class instance containing a quota error', () => {
+        class Record {
+            constructor() {
+                this.error = quota;
+                this.label = 'batch';
+            }
+        }
+        const copy = structuredClone(new Record());
+        return Object.getPrototypeOf(copy) === Object.prototype && copy.label === 'batch' &&
+            Object.hasOwn(copy, 'error') && isClonedQuota(copy.error);
+    });
+    checkCase('clone rejects duplicate transfers before detaching the buffer', () => {
+        const bytes = Uint8Array.of(3, 17, 5);
+        const buffer = bytes.buffer;
+        const rejected = throwsDataCloneError(() =>
+            structuredClone(quota, { transfer: [buffer, buffer] }));
+        return rejected && buffer.byteLength === 3 && bytes.join(',') === '3,17,5';
+    });
+    checkCase('clone rejects an already detached transfer', () => {
+        const buffer = new ArrayBuffer(3);
+        const first = structuredClone(buffer, { transfer: [buffer] });
+        return first.byteLength === 3 && buffer.byteLength === 0 &&
+            throwsDataCloneError(() => structuredClone(quota, { transfer: [buffer] }));
+    });
+    checkCase('clone reads transfer once and preserves transferred buffer identity and bytes', () => {
+        const buffer = Uint8Array.of(3, 17, 5).buffer;
+        let reads = 0;
+        const copy = structuredClone({ error: quota, buffer, alias: buffer }, {
+            get transfer() {
+                ++reads;
+                return [buffer];
+            },
+        });
+        return reads === 1 && buffer.byteLength === 0 && isClonedQuota(copy.error) &&
+            copy.buffer !== buffer && copy.buffer === copy.alias && copy.buffer.byteLength === 3 &&
+            new Uint8Array(copy.buffer).join(',') === '3,17,5';
+    });
+    checkCase('transfer snapshots bytes after getters and preserves both view backings', () => {
+        const data = Uint8Array.of(4, 8, 12, 16);
+        const view = new DataView(data.buffer, 1, 2);
+        const source = { data, view, buffer: data.buffer, get last() {
+            data[1] = 51;
+            return quota;
+        } };
+        const copy = structuredClone(source, { transfer: [data.buffer] });
+        return data.buffer.byteLength === 0 && copy.buffer === copy.data.buffer &&
+            copy.buffer === copy.view.buffer && copy.view.byteOffset === 1 &&
+            copy.view.byteLength === 2 && copy.view.getUint8(0) === 51 &&
+            copy.data.join(',') === '4,51,12,16' && isClonedQuota(copy.last);
+    });
+    checkCase('clone propagates the original getter exception before transferring', () => {
+        const buffer = Uint8Array.of(29).buffer;
+        const failure = new RangeError('stop');
+        let calls = 0;
+        try {
+            structuredClone({ error: quota, get next() { ++calls; throw failure; } },
+                { transfer: [buffer] });
+        } catch (error) {
+            return error === failure && calls === 1 && new Uint8Array(buffer)[0] === 29;
+        }
+        return false;
+    });
+}
+
+function testRandomValueViews() {
+    checkCase('getRandomValues returns an attached empty integer view', () => {
+        const view = new Uint8Array(0);
+        return crypto.getRandomValues(view) === view;
+    });
+    for (const length of [0, 1]) {
+        checkCase(`getRandomValues returns the detached integer view (original length ${length})`, () => {
+            const buffer = new ArrayBuffer(length);
+            const view = new Uint8Array(buffer);
+            const transferred = structuredClone(buffer, { transfer: [buffer] });
+            // Even a buffer originally of length zero must actually have detached.
+            let detached = false;
+            try {
+                new Uint8Array(buffer);
+            } catch (error) {
+                detached = error instanceof TypeError;
+            }
+            return detached && transferred.byteLength === length && view.byteLength === 0 &&
+                crypto.getRandomValues(view) === view;
+        });
+    }
+    checkCase('getRandomValues rejects a shared integer view with TypeError', () => {
+        const view = new Uint8Array(new SharedArrayBuffer(1));
+        try {
+            crypto.getRandomValues(view);
+        } catch (error) {
+            return error instanceof TypeError;
+        }
+        return false;
+    });
 }
 
 function testConsoleAndPerformance() {
@@ -607,6 +812,8 @@ export default {
         await testEncodingAndUrl();
         await testStreamsAndBodies();
         await testCompressionAndCrypto();
+        testQuotaCloneAndTransfer();
+        testRandomValueViews();
         testConsoleAndPerformance();
         return Response.json({
             profile: 'CAPSID-MIN-2025-subset-v0',

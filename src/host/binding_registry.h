@@ -1,4 +1,4 @@
-// bindingsRoot security scan (Binding v1, docs/binding-technical-design.md
+// bindingsRoot security scan (Binding v1, docs/design/bindings-v1.md
 // §2.1). The Host scans the fixed directory layout once at startup and
 // forms an immutable snapshot of every Binding package. The scan is the
 // trust boundary between Host-managed files and the worker: it rejects

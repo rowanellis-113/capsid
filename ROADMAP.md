@@ -3,7 +3,7 @@
 > Updated 2026-11-22 against published `0.3.1-beta` (`v0.3.1-beta.1`, `quickjs-turbo`
 > integration). Stable is `v0.2.2`; this roadmap separates
 > delivered beta scope from future milestones and does not claim complete
-> workerd/Cloudflare parity. See [current status](docs/current-status.md).
+> workerd/Cloudflare parity. See [current status](docs/reference/release-status.md).
 
 ## Purpose
 
@@ -28,9 +28,10 @@ not part of this roadmap.
 
 ## Current Baseline
 
-The stable channel is `0.2.2`. Experimental `0.3.0-beta` adds the delivered
-FetchRPC v4/WebSocket foundation while retaining ABI v7 and the legacy v3 entry.
-The shared HTTP runtime contains:
+The stable channel is `0.2.2`. Experimental `0.3.0-beta` introduced the delivered
+FetchRPC v4/WebSocket foundation while retaining ABI v7 and the legacy v3 entry;
+`0.3.1-beta` (`v0.3.1-beta.1`) is the current experimental prerelease and
+integrates `quickjs-turbo`. The shared HTTP runtime contains:
 
 - a pinned txiki.js, `quickjs-turbo` (QuickJS-NG 0.15.1-derived), and WAMR stack;
 - self-contained ESM bundles with `default.fetch(request)` or a named `fetch`;
@@ -43,11 +44,11 @@ The shared HTTP runtime contains:
 - Binding v1 with isolated User and Binding QuickJS runtimes.
 
 The current standards baseline is
-[`CAPSID-MIN-2025-subset-v0`](docs/conformance.md). The exact global surface is
+[`CAPSID-MIN-2025-subset-v0`](docs/reference/web-conformance.md). The exact global surface is
 recorded in [`js/profile-manifest.js`](js/profile-manifest.js), the product
-boundary is documented in [`docs/architecture.md`](docs/architecture.md), and
+boundary is documented in [`docs/design/runtime-architecture.md`](docs/design/runtime-architecture.md), and
 the current cross-runtime contract is documented in
-[`docs/binding-technical-design.md`](docs/binding-technical-design.md).
+[`docs/design/bindings-v1.md`](docs/design/bindings-v1.md).
 
 The current compatibility boundary (delivered foundations and remaining gaps) is:
 
@@ -177,16 +178,16 @@ the hosted evidence index.
 
 ### v0.3.0: FetchRPC v4 and WebSocket Foundation
 
-Milestone plan: [docs/v0.3.0-fetchrpc-v4-plan.md](docs/v0.3.0-fetchrpc-v4-plan.md) ·
-wire reference: [docs/fetchrpc-v4.md](docs/fetchrpc-v4.md) · workerd semantics
-dossier: [docs/workerd-websocket-semantics.md](docs/workerd-websocket-semantics.md).
+Milestone plan: [docs/history/v0.3.0/fetchrpc-v4-plan.md](docs/history/v0.3.0/fetchrpc-v4-plan.md) ·
+wire reference: [docs/reference/fetchrpc-v4.md](docs/reference/fetchrpc-v4.md) · workerd semantics
+dossier: [docs/reference/websocket-semantics.md](docs/reference/websocket-semantics.md).
 
 Delivered in experimental 0.3.0-beta: v4 negotiation, A2 channel layout,
 confirmation/terminal barriers, inbound WebSocketPair/101, outbound ws/wss,
 Upgrade-fetch metadata/body fallback and connection-lifetime accounting.
 First-party local/static-pool and Linux managed paths, native clients,
 sanitizers, fuzzing and actual platform packages passed the declared
-[source-bound qualification](docs/v0.3.0-current-qualification.md).
+[source-bound qualification](docs/history/v0.3.0/release-qualification.md).
 
 The executable v4 contract specifies:
 
@@ -213,13 +214,15 @@ The delivered vertical slice includes:
 
 The public embedding APIs are additive ABI v7 descriptors/functions; no ABI v8
 bump was needed. FetchRPC v3 and v4 peers must never be mixed silently.
-See the [embedding reference](docs/host-integration.md) for size negotiation,
+See the [embedding reference](docs/reference/embedding-api.md) for size negotiation,
 channel ACKs, counted Close reasons and optional capabilities.
 
 This delivery does not imply complete standards conformance, every historical
-R1–R9 causal closure, native Windows/macOS production isolation or benchmark
-results for `v0.3.0-beta.5`. The [accepted measurement](docs/performance-benchmarks.md)
-belongs to its own development snapshot.
+R1–R9 causal closure, native Windows/macOS production isolation, or direct
+benchmarking of distributed release packages. The
+[accepted measurements](docs/reference/benchmarks.md) belong to their respective
+local Release/LTO rebuilds (`v0.3.0-beta.5` at `c7a80b9` and the `v0.3.1-beta.1`
+pre-publication snapshot at `6d4cc61`).
 
 Acceptance: real client/server interoperability, fragmented messages, slow
 consumers, simultaneous close, half-close where applicable, invalid frames,

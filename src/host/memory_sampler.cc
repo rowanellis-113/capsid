@@ -9,12 +9,19 @@
 #endif
 
 #include <charconv>
+#include <chrono>
 #include <string>
 #include <utility>
 
 namespace capsid::host {
 
 namespace {
+
+std::uint64_t steady_now_ms() noexcept {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+}
 
 bool default_read_cgroup_current(std::string_view cgroup_path, std::uint64_t* bytes_out) {
     if (cgroup_path.empty() || bytes_out == nullptr) {
@@ -93,16 +100,19 @@ std::uint64_t MemorySampler::sample_worker_bytes(std::int64_t pid, std::string_v
     if (pid <= 0) {
         return 0;
     }
-    if (!force_refresh) {
+    const std::uint64_t max_age = max_age_ms_.load(std::memory_order_acquire);
+    const std::uint64_t now_ms = steady_now_ms();
+    if (!force_refresh && max_age > 0) {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto found = cached_pid_bytes_.find(pid);
-        if (found != cached_pid_bytes_.end()) {
-            return found->second;
+        if (found != cached_pid_bytes_.end() && now_ms >= found->second.sampled_at_ms &&
+            (now_ms - found->second.sampled_at_ms) < max_age) {
+            return found->second.bytes;
         }
     }
     if (footprint_reader_ && footprint_reader_(pid, &bytes)) {
         std::lock_guard<std::mutex> lock(mutex_);
-        cached_pid_bytes_[pid] = bytes;
+        cached_pid_bytes_[pid] = CachedSample{bytes, steady_now_ms()};
         return bytes;
     }
     std::lock_guard<std::mutex> lock(mutex_);

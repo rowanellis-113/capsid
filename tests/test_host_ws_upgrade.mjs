@@ -1,6 +1,6 @@
 // Host-side WebSocket upgrade validation (FetchRPC v4 WS-C3, TDD).
 //
-// Contract: docs/fetchrpc-v4.md §2 — the host owns the handshake gates
+// Contract: docs/reference/fetchrpc-v4.md §2 — the host owns the handshake gates
 // (frozen decision D1). A request that presents itself as a WebSocket
 // upgrade is validated per RFC 6455 §4.2.1 BEFORE any worker
 // involvement:

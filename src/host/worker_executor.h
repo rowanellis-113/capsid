@@ -9,13 +9,14 @@
 // runs exclusively on the executor's owner/reaper thread (the worker
 // thread's exit path), exactly once.
 //
-// The SingleWorkerServer composes this class; the pool (PR-07) composes
-// one per worker.
+// GenerationPool composes one WorkerExecutor per worker slot (used by both
+// LocalDevHost and the managed Host).
 //
 // Thread model:
-//   - the owner thread (the SingleWorkerServer io thread) calls submit(),
-//     mark_canceled(), retire_terminal_request(), drain_events(),
-//     request_shutdown() and stop_and_join();
+//   - the owner/caller threads (ManagedListener io thread and GenerationPool
+//     pump/lifecycle paths) call submit(), mark_canceled(),
+//     retire_terminal_request(), drain_events(), request_shutdown() and
+//     stop_and_join();
 //   - the worker thread runs worker_thread_main() and owns the destroy;
 //   - the two threads communicate through two mutex-protected queues; the
 //     worker thread copies every event payload before posting it, so
@@ -275,8 +276,30 @@ class WorkerExecutor {
 
     // ---- command direction (owner thread) ------------------------------
 
-    void submit(Command command);
+    bool submit(Command command);
+    // Transfers one pre-claimed DispatchLease directly to an inflight request
+    // without letting request_claims_ drop to zero or double-count during handoff.
+    bool submit_begin_from_dispatch(Command command);
     bool try_submit_channel(Command command);
+    std::uint64_t id() const noexcept { return id_; }
+    void acquire_dispatch() noexcept {
+        request_claims_.fetch_add(1, std::memory_order_acq_rel);
+        pending_dispatches_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    void release_dispatch() noexcept {
+        pending_dispatches_.fetch_sub(1, std::memory_order_acq_rel);
+        request_claims_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    std::uint64_t pending_dispatches() const noexcept {
+        return pending_dispatches_.load(std::memory_order_acquire);
+    }
+    std::uint64_t active_http_requests() const noexcept {
+        return request_claims_.load(std::memory_order_acquire);
+    }
+    bool is_idle() const;
+    // Test-only synchronization hook invoked inside is_idle() to place a
+    // concurrent dispatch handoff deterministically inside the idle check window.
+    void set_idle_check_hook_for_test(std::function<void()> hook);
     std::uint64_t channels() const { return channels_.load(std::memory_order_relaxed); }
     std::uint64_t retained_contexts() const {
         return retained_contexts_.load(std::memory_order_relaxed);
@@ -288,7 +311,7 @@ class WorkerExecutor {
     }
     // Combined least-loaded score used by GenerationPool scheduling.
     std::uint64_t load_score() const noexcept {
-        return inflight_.load(std::memory_order_acquire) +
+        return request_claims_.load(std::memory_order_acquire) +
                connection_owners_.load(std::memory_order_acquire);
     }
     // Per-worker leaf cgroup directory (empty on non-Linux or when cgroup
@@ -379,6 +402,8 @@ class WorkerExecutor {
     std::int64_t process_id() const noexcept { return process_id_.load(); }
 
   private:
+    bool submit_command(Command command, bool from_dispatch);
+    const std::uint64_t id_;
     std::uint32_t effective_channel_caps_ = 0;
     capsid::protocol::ChannelLimits channel_limits_;
 
@@ -458,6 +483,11 @@ class WorkerExecutor {
     // decrements (a cancel racing an already-queued RESPONSE_END).
     std::set<std::uint64_t> inflight_ids_;
     std::atomic<std::uint64_t> inflight_ = 0;
+    std::atomic<std::uint64_t> pending_dispatches_{0};
+    // Single continuous occupancy counter covering pending_dispatches_ +
+    // inflight_ so dispatch-to-inflight handoff never exposes a false-idle gap.
+    std::atomic<std::uint64_t> request_claims_{0};
+    std::function<void()> idle_check_hook_;
     std::atomic<std::uint64_t> started_at_ms_{0};
     std::atomic<std::uint64_t> last_active_at_ms_{0};
     bool ready_ = false;

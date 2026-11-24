@@ -876,14 +876,14 @@ for (const [name, before, after, diagnostic] of [
   [
     'container script shell',
     '--entrypoint /bin/bash',
-    '--entrypoint /repo/scripts/run-delegated-sandbox-tests.sh',
+    '--entrypoint /repo/tests/sandbox/run-delegated-sandbox-tests.sh',
     'delegated container invokes the reviewed script through its shell',
   ],
   [
     'container script argument',
-    '/repo/scripts/run-delegated-sandbox-tests.sh /build',
+    '/repo/tests/sandbox/run-delegated-sandbox-tests.sh /build',
     '/repo/other.sh /build',
-    'testing-validity workflow lost required gate: scripts/run-delegated-sandbox-tests.sh',
+    'testing-validity workflow lost required gate: tests/sandbox/run-delegated-sandbox-tests.sh',
   ],
   [
     'archive presence',

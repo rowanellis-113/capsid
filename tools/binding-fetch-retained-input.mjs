@@ -21,7 +21,7 @@ export const retainedBindingInputPaths = Object.freeze({
   user: 'tests/fixtures/binding-fetch-retained-user.mjs',
   sourceModel: 'tools/binding-fetch-retained-input.mjs',
   contract: 'tools/binding-fetch-retained-contract.mjs',
-  policy: 'docs/binding-technical-design.md',
+  policy: 'docs/design/bindings-v1.md',
   priorBodyModel: 'tools/binding-fetch-body-input.mjs',
   priorBodyContract: 'tools/binding-fetch-body-contract.mjs',
   finiteIoReferenceFixture: 'tests/fixtures/workerd-binding-fetch-body.mjs',

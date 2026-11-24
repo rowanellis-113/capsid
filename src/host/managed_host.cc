@@ -331,9 +331,9 @@ void destroy_unadopted_worker(capsid_worker* worker) {
 } // namespace
 
 capsid_worker*
-spawn_loaded_worker(const ManagedHostOptions& options, const std::vector<std::uint8_t>& bundle,
-                    bool trusted_bytecode, const std::string& source_name,
-                    const EffectiveConfig& effective,
+spawn_loaded_worker(const ManagedHostOptions& options, const std::string& tenant,
+                    const std::vector<std::uint8_t>& bundle, bool trusted_bytecode,
+                    const std::string& source_name, const EffectiveConfig& effective,
                     const std::vector<std::pair<std::string, std::string>>& env_values,
                     const std::vector<capsid::host::EffectiveBinding>& bindings, std::string* error,
                     capsid::WorkerReadyProof* expected_ready = nullptr) {
@@ -357,7 +357,10 @@ spawn_loaded_worker(const ManagedHostOptions& options, const std::vector<std::ui
     runtime_policy.apply(&config);
     std::shared_ptr<WorkerCgroupLease> cgroup_lease;
     if (effective.strict_sandbox && !options.host_policy.isolation_cgroup_root.empty()) {
-        cgroup_lease = create_worker_cgroup(options.host_policy.isolation_cgroup_root, error);
+        const auto hard_memory =
+            options.tenancy ? options.tenancy->quota_for(tenant).hard_memory_bytes : 0;
+        cgroup_lease = create_worker_cgroup(options.host_policy.isolation_cgroup_root, error,
+                                            tenant, hard_memory);
         if (!cgroup_lease) {
             return nullptr;
         }
@@ -412,9 +415,10 @@ spawn_loaded_worker(const ManagedHostOptions& options, const std::vector<std::ui
     return worker;
 }
 
-WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std::uint8_t>& bundle,
-                       bool trusted_bytecode, const std::string& source_name,
-                       const std::string& generation, const EffectiveConfig& effective,
+WarmResult warm_worker(const ManagedHostOptions& options, const std::string& tenant,
+                       const std::vector<std::uint8_t>& bundle, bool trusted_bytecode,
+                       const std::string& source_name, const std::string& generation,
+                       const EffectiveConfig& effective,
                        const std::vector<std::pair<std::string, std::string>>& env_values,
                        const std::vector<capsid::host::EffectiveBinding>& bindings) {
     WarmResult out;
@@ -428,8 +432,8 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::vector<std:
     std::string spawn_error;
     capsid::WorkerReadyProof expected_ready;
     capsid_worker* spawned =
-        spawn_loaded_worker(options, bundle, trusted_bytecode, source_name, effective, env_values,
-                            bindings, &spawn_error, &expected_ready);
+        spawn_loaded_worker(options, tenant, bundle, trusted_bytecode, source_name, effective,
+                            env_values, bindings, &spawn_error, &expected_ready);
     if (spawned == nullptr) {
         out.error = spawn_error;
         return out;
@@ -551,16 +555,16 @@ struct WarmPoolResult {
 // Warm `count` distinct worker processes, each READY and
 // compatibility-verified. The pool is atomic: when any single worker fails
 // to warm, every already-warmed worker is destroyed and recycled.
-WarmPoolResult warm_worker_pool(const ManagedHostOptions& options, std::uint32_t count,
-                                const std::vector<std::uint8_t>& bundle, bool trusted_bytecode,
-                                const std::string& source_name, const std::string& generation,
-                                const EffectiveConfig& effective,
+WarmPoolResult warm_worker_pool(const ManagedHostOptions& options, const std::string& tenant,
+                                std::uint32_t count, const std::vector<std::uint8_t>& bundle,
+                                bool trusted_bytecode, const std::string& source_name,
+                                const std::string& generation, const EffectiveConfig& effective,
                                 const std::vector<std::pair<std::string, std::string>>& env_values,
                                 const std::vector<capsid::host::EffectiveBinding>& bindings) {
     WarmPoolResult out;
     out.workers.reserve(count);
     for (std::uint32_t index = 0; index < count; ++index) {
-        const WarmResult warm = warm_worker(options, bundle, trusted_bytecode, source_name,
+        const WarmResult warm = warm_worker(options, tenant, bundle, trusted_bytecode, source_name,
                                             generation, effective, env_values, bindings);
         if (!warm.ok) {
             for (capsid_worker* worker : out.workers) {
@@ -795,6 +799,77 @@ class PosixActiveStateFilesystem final : public ActiveStateFilesystem {
     Ownership ownership_;
 };
 
+bool reserve_tenant_quota_for_deploy(ManagedHostOptions* options, const std::string& tenant,
+                                     std::uint32_t min_ready, std::uint32_t warm_workers,
+                                     std::string* error) {
+    if (options->reserve_tenant_deploy) {
+        return options->reserve_tenant_deploy(tenant, min_ready, warm_workers, error);
+    }
+    if (options->check_tenant_deploy && warm_workers > 0) {
+        return options->check_tenant_deploy(tenant, min_ready, error);
+    }
+    return true;
+}
+
+void release_tenant_quota_for_deploy(ManagedHostOptions* options) {
+    if (options != nullptr && options->release_tenant_deploy) {
+        options->release_tenant_deploy();
+    }
+}
+
+void release_pre_acquired_elastic(ManagedHostOptions* options, DeployOutcome* outcome) {
+    if (options != nullptr && options->ledger != nullptr && outcome != nullptr &&
+        outcome->pre_acquired_elastic > 0) {
+        options->ledger->release_elastic(options->application, outcome->pre_acquired_elastic);
+        outcome->pre_acquired_elastic = 0;
+    }
+}
+
+bool reserve_deploy_capacity(ManagedHostOptions* options, const std::string& effective_tenant,
+                             std::uint32_t min_ready, bool* replacement,
+                             std::uint32_t* pre_acquired_elastic, std::string* error_out) {
+    *pre_acquired_elastic = 0;
+    if (options->ledger == nullptr) {
+        return true;
+    }
+    *replacement = options->ledger->holds(options->application);
+    bool reserved = *replacement ? options->ledger->reserve_replace(options->application, min_ready)
+                                 : options->ledger->reserve_fresh(options->application, min_ready);
+    while (!reserved && options->reclaim_elastic_slot && options->reclaim_elastic_slot()) {
+        reserved = *replacement ? options->ledger->reserve_replace(options->application, min_ready)
+                                : options->ledger->reserve_fresh(options->application, min_ready);
+    }
+    if (!reserved) {
+        if (options->metrics != nullptr) {
+            options->metrics->count_pool_rejection(options->application, effective_tenant,
+                                                   "host_capacity_exhausted");
+        }
+        if (error_out != nullptr) {
+            *error_out = "worker capacity exceeded";
+        }
+        return false;
+    }
+    if (min_ready == 0) {
+        bool elastic_ok = options->ledger->try_acquire_elastic(options->application);
+        while (!elastic_ok && options->reclaim_elastic_slot && options->reclaim_elastic_slot()) {
+            elastic_ok = options->ledger->try_acquire_elastic(options->application);
+        }
+        if (!elastic_ok) {
+            options->ledger->abort_reserve(options->application, min_ready, *replacement);
+            if (options->metrics != nullptr) {
+                options->metrics->count_pool_rejection(options->application, effective_tenant,
+                                                       "host_capacity_exhausted");
+            }
+            if (error_out != nullptr) {
+                *error_out = "worker capacity exceeded";
+            }
+            return false;
+        }
+        *pre_acquired_elastic = 1;
+    }
+    return true;
+}
+
 // §9.3 activation transaction tail, shared by every successful warm path
 // (deploy and idempotent redeploy): prepare (before the persist, may
 // fail) → persist (may fail) → commit (after the persist, noexcept).
@@ -825,9 +900,11 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
         // configuration fails the deploy instead of half-publishing.
         if (options->commit_activation == nullptr || options->abort_activation == nullptr) {
             destroy_pool(warm);
+            release_pre_acquired_elastic(options, outcome);
             if (options->ledger)
                 options->ledger->abort_reserve(options->application, outcome->effective.min_ready,
                                                replacement);
+            release_tenant_quota_for_deploy(options);
             status->state = OperationState::kFailed;
             status->error = "activation transaction misconfigured";
             outcome->error = status->error;
@@ -839,9 +916,11 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
         plan = options->prepare_activation(options->application, *outcome, &plan_error);
         if (plan == nullptr) {
             // The failed prepare destroyed the warmed workers.
+            release_pre_acquired_elastic(options, outcome);
             if (options->ledger)
                 options->ledger->abort_reserve(options->application, outcome->effective.min_ready,
                                                replacement);
+            release_tenant_quota_for_deploy(options);
             status->state = OperationState::kFailed;
             status->error = plan_error.empty() ? "cannot activate the new generation" : plan_error;
             outcome->error = status->error;
@@ -855,6 +934,7 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
         options->abort_activation(plan.get());
         plan->new_pool->stop_and_join();
         capacity->abort(true);
+        release_tenant_quota_for_deploy(options);
         status->state = OperationState::kFailed;
         status->error = "replacement capacity ownership missing";
         outcome->error = status->error;
@@ -885,6 +965,7 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
                 plan->new_pool->stop_and_join();
         } else {
             destroy_pool(warm);
+            release_pre_acquired_elastic(options, outcome);
         }
         if (options->ledger != nullptr) {
             if (capacity)
@@ -893,6 +974,7 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
                 options->ledger->abort_reserve(options->application, outcome->effective.min_ready,
                                                replacement);
         }
+        release_tenant_quota_for_deploy(options);
         status->state = OperationState::kFailed;
         status->error = "cannot persist active state";
         outcome->error = status->error;
@@ -918,11 +1000,16 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
     }
     if (plan != nullptr) {
         options->commit_activation(plan.get());
+        release_tenant_quota_for_deploy(options);
         // Ownership moved to the plan: the warmed pointers are stale.
         outcome->workers.clear();
         outcome->worker = nullptr;
     } else {
-        // Legacy caller path: the coordinator hands the owning pool back.
+        // Legacy caller path: the coordinator hands the owning pool back
+        // without a GenerationPool elastic release hook, so return any
+        // minReady=0 pre-warm slot now that warming/persistence completed.
+        release_pre_acquired_elastic(options, outcome);
+        release_tenant_quota_for_deploy(options);
         publish_pool(outcome, warm);
     }
     status->state = OperationState::kActive;
@@ -1127,7 +1214,8 @@ ReadFileStatus read_file_at(int dir_fd, const char* name, std::size_t max_bytes,
 // When state_root is non-empty, bytes are re-read from committed bundle.bin and
 // verified against expected_bundle_sha256 (avoiding retaining ~16 MiB per app).
 WorkerExecutor::WorkerFactory
-make_generation_factory(const ManagedHostOptions& options, const std::vector<std::uint8_t>& bundle,
+make_generation_factory(const ManagedHostOptions& options, const std::string& tenant,
+                        const std::vector<std::uint8_t>& bundle,
                         const std::string& generation_digest, bool trusted_bytecode,
                         const std::string& source_name, const EffectiveConfig& effective,
                         const std::vector<std::pair<std::string, std::string>>& env_values,
@@ -1142,7 +1230,7 @@ make_generation_factory(const ManagedHostOptions& options, const std::vector<std
     const std::vector<std::uint8_t> inline_bundle =
         disk_backed ? std::vector<std::uint8_t>{} : bundle;
     WorkerExecutor::WorkerFactory factory =
-        [options, inline_bundle, generation_digest, expected_bundle_sha256, disk_backed,
+        [options, tenant, inline_bundle, generation_digest, expected_bundle_sha256, disk_backed,
          trusted_bytecode, source_name, effective, env_values, bindings, configured,
          configuration_error](capsid_worker** out, std::string* factory_error) -> bool {
         if (!configured) {
@@ -1197,8 +1285,8 @@ make_generation_factory(const ManagedHostOptions& options, const std::vector<std
         }
         std::string spawn_error;
         capsid_worker* worker =
-            spawn_loaded_worker(options, *bundle_ptr, trusted_bytecode, source_name, effective,
-                                env_values, bindings, &spawn_error);
+            spawn_loaded_worker(options, tenant, *bundle_ptr, trusted_bytecode, source_name,
+                                effective, env_values, bindings, &spawn_error);
         if (worker == nullptr) {
             *factory_error = spawn_error;
             return false;
@@ -2800,10 +2888,12 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
         // single process starts. `replacement` is captured BEFORE the
         // reserve: a fresh reserve turns the App into a holder, which
         // must not flip the category of a later rollback.
-        if (options->check_tenant_deploy) {
+        const std::uint32_t warm_count = std::max<std::uint32_t>(1U, validated.effective.min_ready);
+        {
             std::string tenant_error;
-            if (!options->check_tenant_deploy(effective_tenant, validated.effective.min_ready,
-                                              &tenant_error)) {
+            if (!reserve_tenant_quota_for_deploy(options, effective_tenant,
+                                                 validated.effective.min_ready, warm_count,
+                                                 &tenant_error)) {
                 close_managed_state_fd(app_state_fd);
                 close_managed_state_fd(state_fd);
                 status->state = OperationState::kFailed;
@@ -2813,37 +2903,31 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
             }
         }
         bool replacement = false;
-        if (options->ledger != nullptr) {
-            replacement = options->ledger->holds(options->application);
-            const bool reserved =
-                replacement ? options->ledger->reserve_replace(options->application,
-                                                               validated.effective.min_ready)
-                            : options->ledger->reserve_fresh(options->application,
-                                                             validated.effective.min_ready);
-            if (!reserved) {
-                if (options->metrics != nullptr) {
-                    options->metrics->count_pool_rejection(options->application, effective_tenant,
-                                                           "host_capacity_exhausted");
-                }
-                close_managed_state_fd(app_state_fd);
-                close_managed_state_fd(state_fd);
-                status->state = OperationState::kFailed;
-                status->error = "worker capacity exceeded";
-                outcome.error = status->error;
-                return outcome;
-            }
+        std::uint32_t pre_acquired_elastic = 0;
+        std::string reserve_error;
+        if (!reserve_deploy_capacity(options, effective_tenant, validated.effective.min_ready,
+                                     &replacement, &pre_acquired_elastic, &reserve_error)) {
+            release_tenant_quota_for_deploy(options);
+            close_managed_state_fd(app_state_fd);
+            close_managed_state_fd(state_fd);
+            status->state = OperationState::kFailed;
+            status->error = reserve_error;
+            outcome.error = status->error;
+            return outcome;
         }
-        const std::uint32_t warm_count = std::max<std::uint32_t>(1U, validated.effective.min_ready);
+        outcome.pre_acquired_elastic = pre_acquired_elastic;
         const WarmPoolResult warm = warm_worker_pool(
-            *options, warm_count, bundle,
+            *options, effective_tenant, warm_count, bundle,
             validated.selected == SelectedArtifactKind::kTrustedBytecode, validated.source_name,
             generation_digest, validated.effective, validated.env_values, validated.bindings);
         if (!warm.ok) {
             // The failed warm rolls its own reserve back.
+            release_pre_acquired_elastic(options, &outcome);
             if (options->ledger != nullptr) {
                 options->ledger->abort_reserve(options->application, validated.effective.min_ready,
                                                replacement);
             }
+            release_tenant_quota_for_deploy(options);
             close_managed_state_fd(app_state_fd);
             close_managed_state_fd(state_fd);
             status->state = OperationState::kFailed;
@@ -2858,7 +2942,7 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
         outcome.generation_digest = generation_digest;
         outcome.effective = validated.effective;
         outcome.generation_factory = make_generation_factory(
-            *options, bundle, generation_digest,
+            *options, effective_tenant, bundle, generation_digest,
             validated.selected == SelectedArtifactKind::kTrustedBytecode, validated.source_name,
             validated.effective, validated.env_values, validated.bindings);
         finish_activation(options, &outcome, warm.workers, version, generation_digest, app_state_fd,
@@ -3042,9 +3126,11 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
     // starts. `replacement` is captured BEFORE the reserve (a fresh
     // reserve turns the App into a holder — the rollback must not flip
     // its category).
-    if (options->check_tenant_deploy) {
+    const std::uint32_t warm_count = std::max<std::uint32_t>(1U, effective.min_ready);
+    {
         std::string tenant_error;
-        if (!options->check_tenant_deploy(effective_tenant, effective.min_ready, &tenant_error)) {
+        if (!reserve_tenant_quota_for_deploy(options, effective_tenant, effective.min_ready,
+                                             warm_count, &tenant_error)) {
             close_managed_state_fd(app_state_fd);
             status->state = OperationState::kFailed;
             status->error = tenant_error.empty() ? "tenant quota exceeded" : tenant_error;
@@ -3053,34 +3139,30 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
         }
     }
     bool replacement = false;
-    if (options->ledger != nullptr) {
-        replacement = options->ledger->holds(options->application);
-        const bool reserved =
-            replacement
-                ? options->ledger->reserve_replace(options->application, effective.min_ready)
-                : options->ledger->reserve_fresh(options->application, effective.min_ready);
-        if (!reserved) {
-            if (options->metrics != nullptr) {
-                options->metrics->count_pool_rejection(options->application, effective_tenant,
-                                                       "host_capacity_exhausted");
-            }
-            close_managed_state_fd(app_state_fd);
-            status->state = OperationState::kFailed;
-            status->error = "worker capacity exceeded";
-            outcome.error = status->error;
-            return outcome;
-        }
+    std::uint32_t pre_acquired_elastic = 0;
+    std::string reserve_error;
+    if (!reserve_deploy_capacity(options, effective_tenant, effective.min_ready, &replacement,
+                                 &pre_acquired_elastic, &reserve_error)) {
+        release_tenant_quota_for_deploy(options);
+        close_managed_state_fd(app_state_fd);
+        status->state = OperationState::kFailed;
+        status->error = reserve_error;
+        outcome.error = status->error;
+        return outcome;
     }
+    outcome.pre_acquired_elastic = pre_acquired_elastic;
     status->state = OperationState::kWarming;
-    const std::uint32_t warm_count = std::max<std::uint32_t>(1U, effective.min_ready);
-    const WarmPoolResult warm = warm_worker_pool(
-        *options, warm_count, bundle_bytes, selected == SelectedArtifactKind::kTrustedBytecode,
-        source_name, generation_digest, effective, env_values, prepared.bindings);
+    const WarmPoolResult warm =
+        warm_worker_pool(*options, effective_tenant, warm_count, bundle_bytes,
+                         selected == SelectedArtifactKind::kTrustedBytecode, source_name,
+                         generation_digest, effective, env_values, prepared.bindings);
     if (!warm.ok) {
         // The failed warm rolls its own reserve back.
+        release_pre_acquired_elastic(options, &outcome);
         if (options->ledger != nullptr) {
             options->ledger->abort_reserve(options->application, effective.min_ready, replacement);
         }
+        release_tenant_quota_for_deploy(options);
         close_managed_state_fd(app_state_fd);
         status->state = OperationState::kFailed;
         status->error = warm.error;
@@ -3093,7 +3175,7 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
     outcome.generation_digest = generation_digest;
     outcome.effective = effective;
     outcome.generation_factory =
-        make_generation_factory(*options, bundle_bytes, generation_digest,
+        make_generation_factory(*options, effective_tenant, bundle_bytes, generation_digest,
                                 selected == SelectedArtifactKind::kTrustedBytecode, source_name,
                                 effective, env_values, prepared.bindings);
     finish_activation(options, &outcome, warm.workers, version, generation_digest, app_state_fd,
@@ -3572,10 +3654,12 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
     const std::vector<std::uint8_t> bundle(validated.bundle_bin.begin(),
                                            validated.bundle_bin.end());
     const std::string effective_tenant(recovered.document.effective_tenant());
-    if (options->check_tenant_deploy) {
+    const std::uint32_t warm_count = validated.effective.min_ready;
+    {
         std::string tenant_error;
-        if (!options->check_tenant_deploy(effective_tenant, validated.effective.min_ready,
-                                          &tenant_error)) {
+        if (!reserve_tenant_quota_for_deploy(options, effective_tenant,
+                                             validated.effective.min_ready, warm_count,
+                                             &tenant_error)) {
             status->state = OperationState::kFailed;
             status->error = tenant_error.empty() ? "tenant quota exceeded" : tenant_error;
             outcome.error = status->error;
@@ -3588,6 +3672,7 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
     // (an active-generation count beyond capacity never overspawns).
     if (options->ledger != nullptr &&
         !options->ledger->reserve_fresh(options->application, validated.effective.min_ready)) {
+        release_tenant_quota_for_deploy(options);
         if (options->metrics != nullptr) {
             options->metrics->count_pool_rejection(options->application, effective_tenant,
                                                    "host_capacity_exhausted");
@@ -3598,7 +3683,7 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
         return outcome;
     }
     const WarmPoolResult warm = warm_worker_pool(
-        *options, validated.effective.min_ready, bundle,
+        *options, effective_tenant, validated.effective.min_ready, bundle,
         validated.selected == SelectedArtifactKind::kTrustedBytecode, validated.source_name,
         active_generation, validated.effective, validated.env_values, validated.bindings);
     if (!warm.ok) {
@@ -3606,11 +3691,13 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
             options->ledger->abort_reserve(options->application, validated.effective.min_ready,
                                            /*replacement=*/false);
         }
+        release_tenant_quota_for_deploy(options);
         status->state = OperationState::kFailed;
         status->error = warm.error;
         outcome.error = warm.error;
         return outcome;
     }
+    release_tenant_quota_for_deploy(options);
     status->state = OperationState::kActive;
     outcome.ok = true;
     // PR-09c: the generation identity + replacement factory travel with
@@ -3620,7 +3707,7 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
     outcome.tenant = effective_tenant;
     outcome.effective = validated.effective;
     outcome.generation_factory = make_generation_factory(
-        *options, bundle, active_generation,
+        *options, effective_tenant, bundle, active_generation,
         validated.selected == SelectedArtifactKind::kTrustedBytecode, validated.source_name,
         validated.effective, validated.env_values, validated.bindings);
     publish_pool(&outcome, warm.workers);

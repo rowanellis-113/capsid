@@ -8,7 +8,7 @@
 #include <optional>
 #include <string>
 #if defined(_WIN32)
-// The admin plane is not built on Windows (docs/windows.md); these
+// The admin plane is not built on Windows (docs/guides/build-on-windows.md); these
 // typedefs keep the option structs parseable for the portable core
 // sources that share this header (sys/types.h on MSVC has no
 // mode_t/gid_t/uid_t).

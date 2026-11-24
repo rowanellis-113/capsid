@@ -1,4 +1,4 @@
-// Binding manifest schema (docs/binding-technical-design.md §2.2, §4).
+// Binding manifest schema (docs/design/bindings-v1.md §2.2, §4).
 //
 // The manifest declares the package's maximum permission: fixed sandbox
 // profiles, a required module list from the build's grantable set, and

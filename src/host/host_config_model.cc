@@ -1010,10 +1010,21 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
         config.policy.max_pool_workers = config.maximums.pool.has_max_workers
                                              ? config.maximums.pool.max_workers
                                              : config.maximums.pool.workers;
+        if (config.maximums.pool.has_min_ready) {
+            config.policy.has_max_min_ready = true;
+            config.policy.max_min_ready = config.maximums.pool.min_ready;
+        } else if (!config.maximums.pool.has_max_workers && config.maximums.pool.workers != 0) {
+            config.policy.has_max_min_ready = true;
+            config.policy.max_min_ready = config.maximums.pool.workers;
+        }
         config.policy.max_idle_timeout_ms = config.maximums.pool.idle_timeout_ms;
         config.policy.max_queue_requests = config.maximums.pool.queue_requests;
         config.policy.max_queue_header_bytes = config.maximums.pool.queue_header_bytes;
         config.policy.max_queue_timeout_ms = config.maximums.pool.queue_timeout_ms;
+    }
+    if (config.policy.has_max_min_ready && config.policy.max_pool_workers != 0 &&
+        config.policy.max_min_ready > config.policy.max_pool_workers) {
+        return reject("maximums.pool minReady exceeds maxWorkers");
     }
     const std::uint32_t default_pool_max = config.policy.default_max_workers != 0
                                                ? config.policy.default_max_workers
@@ -1032,6 +1043,11 @@ bool parse_host_config(std::string_view json, ParsedHostConfig* out, std::string
          default_pool_max > config.policy.max_pool_workers) ||
         (config.policy.has_default_min_ready && config.policy.max_pool_workers != 0 &&
          config.policy.default_min_ready > config.policy.max_pool_workers) ||
+        (config.policy.has_max_min_ready && config.policy.has_default_min_ready &&
+         config.policy.default_min_ready > config.policy.max_min_ready) ||
+        (config.policy.has_max_min_ready && !config.policy.has_default_min_ready &&
+         config.policy.default_workers != 0 &&
+         config.policy.default_workers > config.policy.max_min_ready) ||
         (config.policy.max_idle_timeout_ms != 0 &&
          config.policy.default_idle_timeout_ms > config.policy.max_idle_timeout_ms) ||
         (config.policy.max_queue_requests != 0 &&
@@ -1140,6 +1156,23 @@ ResolvedRecoveryPolicy resolve_recovery_policy(const RecoveryConfig& config) {
     out.policy.replacements_concurrent_per_app = static_cast<std::uint32_t>(replacements);
     out.ok = true;
     return out;
+}
+
+TenantQuotaConfig TenancyConfig::quota_for(const std::string& tenant) const {
+    TenantQuotaConfig resolved = default_quota;
+    const auto found = overrides.find(tenant);
+    if (found != overrides.end()) {
+        if (found->second.max_workers != 0) {
+            resolved.max_workers = found->second.max_workers;
+        }
+        if (found->second.min_soft_memory_bytes != 0) {
+            resolved.min_soft_memory_bytes = found->second.min_soft_memory_bytes;
+        }
+        if (found->second.hard_memory_bytes != 0) {
+            resolved.hard_memory_bytes = found->second.hard_memory_bytes;
+        }
+    }
+    return resolved;
 }
 
 } // namespace capsid::host

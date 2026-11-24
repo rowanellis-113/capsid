@@ -1,7 +1,7 @@
 // Protocol options descriptor: two-way size negotiation and spawn_ex
 // gating (v0.3.0 remediation T01).
 //
-// Contract: docs/v0.3.0-implementation-design.md §2.2 — the published
+// Contract: docs/history/v0.3.0/implementation-design.md §2.2 — the published
 // capsid_worker_config layout is frozen at ABI v7; protocol selection
 // lives in a separately versioned descriptor with explicit caller-size
 // negotiation, validated before any OS side effect.
