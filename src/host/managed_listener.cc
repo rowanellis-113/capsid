@@ -41,6 +41,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -56,6 +57,14 @@ using tcp = asio::ip::tcp;
 class ListenerSession;
 
 namespace {
+
+struct PairU64Hash {
+    std::size_t operator()(const std::pair<std::uint64_t, std::uint64_t>& key) const noexcept {
+        std::size_t h1 = std::hash<std::uint64_t>{}(key.first);
+        std::size_t h2 = std::hash<std::uint64_t>{}(key.second);
+        return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    }
+};
 
 void write_stderr(std::string_view message) {
     std::fwrite(message.data(), 1, message.size(), stderr);
@@ -187,9 +196,11 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
     // the io thread starts — the drain reads it without the mutex, and
     // post() reads it under the mutex, so it never changes afterwards.
     void
-    set_dispatcher(std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> dispatcher) {
+    set_dispatcher(std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> dispatcher,
+                   std::function<void()> on_batch_drained = {}) {
         std::lock_guard<std::mutex> lock(mutex_);
         dispatcher_ = std::move(dispatcher);
+        on_batch_drained_ = std::move(on_batch_drained);
     }
 
     void post(std::shared_ptr<WorkerExecutor> executor, WorkerEvent event) {
@@ -198,13 +209,16 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
             return; // fail closed: no listener side to serve the event
         }
         events_.emplace_back(std::move(executor), std::move(event));
-        // Post under mutex_: serialized against close()/destruction, so a
-        // post can never race the io_context.
-        asio::post(ioc, [weak = weak_from_this()] {
-            if (std::shared_ptr<WorkerEventMailbox> mailbox = weak.lock()) {
-                mailbox->drain();
-            }
-        });
+        if (!drain_scheduled_) {
+            drain_scheduled_ = true;
+            // Post under mutex_: serialized against close()/destruction, so a
+            // post can never race the io_context.
+            asio::post(ioc, [weak = weak_from_this()] {
+                if (std::shared_ptr<WorkerEventMailbox> mailbox = weak.lock()) {
+                    mailbox->drain();
+                }
+            });
+        }
     }
 
     void post_task(std::function<void()> task) {
@@ -226,48 +240,6 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
         });
     }
 
-    // §8.2 "bytes awaiting client consumption" per executor, for the pool's
-    // pick_worker loader. Written by the io thread (write submissions and
-    // completions), read by the pump thread under the pool mutex; guarded
-    // by mutex_.
-    void add_client_bytes(std::uint64_t executor_id, std::size_t bytes) {
-        if (bytes == 0 || executor_id == 0) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        client_bytes_[executor_id] += bytes;
-    }
-
-    void sub_client_bytes(std::uint64_t executor_id, std::size_t bytes) {
-        if (bytes == 0 || executor_id == 0) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = client_bytes_.find(executor_id);
-        if (it == client_bytes_.end()) {
-            return;
-        }
-        if (it->second <= bytes) {
-            client_bytes_.erase(it);
-        } else {
-            it->second -= bytes;
-        }
-    }
-
-    std::uint64_t load_of(const WorkerExecutor* executor) const {
-        if (executor == nullptr) {
-            return 0;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = client_bytes_.find(executor->id());
-        return it == client_bytes_.end() ? 0 : it->second;
-    }
-
-    void erase_executor(std::uint64_t executor_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        client_bytes_.erase(executor_id);
-    }
-
     // Drops future posts (the listener is stopping). Existing queued events
     // are drained by the io thread and dispatched to an expiring listener —
     // their sessions are being closed anyway.
@@ -280,27 +252,38 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
     // Set once via set_dispatcher() before the io thread starts; read by
     // the drain and by post() (under mutex_).
     std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> dispatcher_;
+    std::function<void()> on_batch_drained_;
 
     void drain() {
         std::deque<std::pair<std::shared_ptr<WorkerExecutor>, WorkerEvent>> local;
-        {
-            // Swap + dispatch AFTER release (lock-order rule in the class
-            // comment): the dispatcher can route through acquire_worker/pick_worker,
-            // which takes the pool mutex.
-            std::lock_guard<std::mutex> lock(mutex_);
-            local.swap(events_);
-        }
-        for (auto& [executor, event] : local) {
-            if (dispatcher_) {
-                dispatcher_(std::move(executor), std::move(event));
+        for (;;) {
+            {
+                // Swap + dispatch AFTER release (lock-order rule in the class
+                // comment): the dispatcher can route through acquire_worker/pick_worker,
+                // which takes the pool mutex.
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (events_.empty()) {
+                    drain_scheduled_ = false;
+                    return;
+                }
+                local.swap(events_);
+            }
+            for (auto& [executor, event] : local) {
+                if (dispatcher_) {
+                    dispatcher_(std::move(executor), std::move(event));
+                }
+            }
+            local.clear();
+            if (on_batch_drained_) {
+                on_batch_drained_();
             }
         }
     }
 
     mutable std::mutex mutex_;
     bool closed_ = false;
+    bool drain_scheduled_ = false;
     std::deque<std::pair<std::shared_ptr<WorkerExecutor>, WorkerEvent>> events_;
-    std::map<std::uint64_t, std::uint64_t> client_bytes_;
 };
 
 // Early-credit window (host, spec §8.1): response credit is returned at
@@ -311,6 +294,16 @@ static constexpr std::size_t kEarlyCreditWindow = 64u * 1024u;
 // Minimum response-credit batch before sending a kGrantResponseCredit command
 // mid-stream; smaller tails flush immediately at write completion or end.
 static constexpr std::uint32_t kCreditFlushThreshold = 16u * 1024u;
+
+struct FixedResponseState {
+    http::response<http::vector_body<std::uint8_t>> response;
+    std::optional<http::response_serializer<http::vector_body<std::uint8_t>>> serializer;
+};
+
+struct StreamResponseState {
+    http::response<http::buffer_body> response;
+    std::optional<http::response_serializer<http::buffer_body>> serializer;
+};
 
 // Request state owned by the io thread only.
 struct PendingRequest {
@@ -331,12 +324,10 @@ struct PendingRequest {
 
     // Response direction. Shared ownership keeps the serializer alive
     // through in-flight async writes after the request is erased.
-    std::shared_ptr<http::response<http::buffer_body>> response;
-    std::shared_ptr<http::response_serializer<http::buffer_body>> serializer;
+    std::shared_ptr<StreamResponseState> stream;
     // Complete responses advertised by the bounded fixed-body protocol are
     // accumulated to their exact <=4 KiB size and emitted in one HTTP write.
-    std::shared_ptr<http::response<http::vector_body<std::uint8_t>>> fixed_response;
-    std::shared_ptr<http::response_serializer<http::vector_body<std::uint8_t>>> fixed_serializer;
+    std::shared_ptr<FixedResponseState> fixed;
     std::size_t fixed_body_expected = 0;
     std::size_t fixed_body_received = 0;
     bool fixed_write_started = false;
@@ -352,6 +343,7 @@ struct PendingRequest {
     std::size_t body_queue_bytes = 0; // client-bytes accounting
     std::uint32_t pending_response_credit = 0;
     bool outgoing_credit_returned_early = false;
+    bool head_deferred = false;
     bool head_sent = false;
     bool head_only = false;
     bool writing = false;
@@ -387,7 +379,8 @@ class ListenerSession : public std::enable_shared_from_this<ListenerSession> {
   private:
     void read_head();
     void read_body();
-    void handle_request(http::request<http::string_body> request);
+    void handle_request(http::request<http::string_body> request,
+                        std::optional<RequestNormalizationResult> cached_normalized = std::nullopt);
     // Listener-level CORS: answers a browser preflight (returns false) or
     // records the matched origin for response stamping (returns true).
     bool prepare_cors(const http::request<http::string_body>& request);
@@ -399,7 +392,8 @@ class ListenerSession : public std::enable_shared_from_this<ListenerSession> {
     std::shared_ptr<ManagedListenerImpl> impl_;
     beast::tcp_stream stream_;
     beast::flat_buffer buffer_;
-    std::shared_ptr<http::request_parser<http::string_body>> parser_;
+    std::optional<http::request_parser<http::string_body>> parser_;
+    std::vector<PublicRequestHeaderView> header_views_;
     // The current in-flight request (for the disconnect probe and close).
     std::shared_ptr<WorkerExecutor> current_executor_;
     std::optional<std::uint64_t> current_request_id_;
@@ -427,6 +421,12 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
           max_request_body_bytes_(options_.max_request_body_bytes),
           credit_grant_threshold_(
               clamp_credit_grant_threshold(kCreditFlushThreshold, options_.initial_stream_window)) {
+        requests_.reserve(128);
+        next_request_id_.reserve(16);
+        sessions_.reserve(128);
+        streaming_inflight_.reserve(16);
+        deferred_heads_.reserve(16);
+        upgrade_views_.reserve(16);
         const char* bodyless_env = std::getenv("CAPSID_BODYLESS");
         if (bodyless_env != nullptr && std::strcmp(bodyless_env, "0") == 0) {
             bodyless_enabled_ = false;
@@ -491,6 +491,9 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
                        const http::request<http::string_body>& request,
                        const NormalizedPublicRequest& normalized);
     void handle_worker_event(std::shared_ptr<WorkerExecutor> executor, WorkerEvent event);
+    void flush_deferred_response_heads();
+    void start_streaming_head_write(const std::shared_ptr<WorkerExecutor>& executor,
+                                    std::uint64_t request_id, PendingRequest& pending);
     void advance_request_body(const std::shared_ptr<WorkerExecutor>& executor,
                               std::uint64_t request_id);
     void write_body_block(const std::shared_ptr<WorkerExecutor>& executor, std::uint64_t request_id,
@@ -545,7 +548,7 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     const std::uint64_t max_request_body_bytes_;
     const std::uint32_t credit_grant_threshold_;
     std::optional<tcp::acceptor> acceptor_;
-    std::map<std::uint64_t, std::shared_ptr<ListenerSession>> sessions_;
+    std::unordered_map<std::uint64_t, std::shared_ptr<ListenerSession>> sessions_;
     std::uint64_t next_session_id_ = 1;
     std::shared_ptr<ServiceChannelBudget> service_channel_budget_ =
         options_.channel_service_budget ? options_.channel_service_budget
@@ -555,9 +558,12 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
                             options_.config.limits.channel_queue_bytes},
         service_channel_budget_);
     ChannelLedger channel_ledger_{ChannelLedger::Limits{}, channel_budget_.get()};
-    std::map<std::pair<std::uint64_t, std::uint64_t>, PendingRequest> requests_;
-    std::map<std::uint64_t, std::uint64_t> next_request_id_;
-    std::map<std::uint64_t, std::uint64_t> streaming_inflight_;
+    std::unordered_map<std::pair<std::uint64_t, std::uint64_t>, PendingRequest, PairU64Hash>
+        requests_;
+    std::unordered_map<std::uint64_t, std::uint64_t> next_request_id_;
+    std::unordered_map<std::uint64_t, std::uint64_t> streaming_inflight_;
+    std::vector<std::pair<std::shared_ptr<WorkerExecutor>, std::uint64_t>> deferred_heads_;
+    std::vector<PublicRequestHeaderView> upgrade_views_;
     std::map<const GenerationPool*, PoolQueue> pool_queues_;
     std::map<std::pair<std::uint64_t, std::uint32_t>, std::shared_ptr<WebSocketSession>>
         websockets_;
@@ -577,6 +583,7 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
 
 ListenerSession::ListenerSession(std::shared_ptr<ManagedListenerImpl> impl, tcp::socket socket)
     : impl_(std::move(impl)), stream_(std::move(socket)), read_timer_(impl_->mailbox_->ioc) {
+    header_views_.reserve(16);
     // TCP_NODELAY on by default (single-connection latency; benchmark
     // parity with the M1A server).
     const char* nodelay = std::getenv("CAPSID_TCP_NODELAY");
@@ -595,7 +602,7 @@ void ListenerSession::read_head() {
     current_pool_.reset();
     current_executor_.reset();
     current_request_id_.reset();
-    parser_ = std::make_shared<http::request_parser<http::string_body>>();
+    parser_.emplace();
     parser_->body_limit(boost::none);
     const std::uint64_t header_bytes = impl_->options_.config.limits.header_bytes;
     if (header_bytes != 0) {
@@ -604,8 +611,7 @@ void ListenerSession::read_head() {
     }
     arm_read_timer(true);
     http::async_read_header(
-        stream_, buffer_, *parser_,
-        [self = shared_from_this(), parser = parser_](beast::error_code ec, std::size_t) {
+        stream_, buffer_, *parser_, [self = shared_from_this()](beast::error_code ec, std::size_t) {
             self->read_timer_.cancel();
             if (ec) {
                 if (ec == http::error::header_limit) {
@@ -617,56 +623,61 @@ void ListenerSession::read_head() {
                 return;
             }
             std::uint64_t limit = self->impl_->max_request_body_bytes_;
-            if (self->impl_->options_.routing) {
-                const auto& req = parser->get();
-                std::vector<PublicRequestHeaderView> views;
-                views.reserve(16);
+            std::optional<RequestNormalizationResult> cached_normalized;
+            if (self->impl_->options_.routing && self->parser_) {
+                const auto& req = self->parser_->get();
+                self->header_views_.clear();
                 for (const auto& field : req.base()) {
-                    views.push_back({field.name_string(), field.value()});
+                    self->header_views_.push_back({field.name_string(), field.value()});
                 }
-                const RequestNormalizationResult normalized =
-                    normalize_public_request(self->impl_->policy_, req.target(), views);
-                if (normalized.ok) {
+                cached_normalized.emplace(normalize_validated_public_request(
+                    self->impl_->policy_, req.target(), self->header_views_));
+                if (cached_normalized->ok) {
                     const std::shared_ptr<const RoutingSnapshot> snapshot =
                         self->impl_->options_.routing->load();
                     if (snapshot != nullptr) {
                         if (const std::shared_ptr<GenerationPool> pool =
-                                snapshot->find(normalized.request.application)) {
+                                snapshot->find(cached_normalized->request.application)) {
                             limit = pool->max_request_body_bytes();
                         }
                     }
                 }
             }
-            if (parser->content_length().has_value() && *parser->content_length() > limit) {
+            if (self->parser_->content_length().has_value() &&
+                *self->parser_->content_length() > limit) {
                 self->send_simple(http::status::payload_too_large, "request body limit exceeded",
-                                  false, parser->get().version());
+                                  false, self->parser_->get().version());
                 return;
             }
-            parser->body_limit(limit);
+            self->parser_->body_limit(limit);
+            if (self->parser_->is_done()) {
+                self->handle_request(self->parser_->release(), std::move(cached_normalized));
+                return;
+            }
             self->read_body();
         });
 }
 
 void ListenerSession::read_body() {
     arm_read_timer(false);
-    http::async_read(
-        stream_, buffer_, *parser_,
-        [self = shared_from_this(), parser = parser_](beast::error_code ec, std::size_t) {
-            self->read_timer_.cancel();
-            if (ec) {
-                if (ec == http::error::body_limit) {
-                    self->send_simple(http::status::payload_too_large,
-                                      "request body limit exceeded", false, 11);
-                } else if (ec != asio::error::operation_aborted) {
-                    self->close();
-                }
-                return;
-            }
-            self->handle_request(parser->release());
-        });
+    http::async_read(stream_, buffer_, *parser_,
+                     [self = shared_from_this()](beast::error_code ec, std::size_t) {
+                         self->read_timer_.cancel();
+                         if (ec) {
+                             if (ec == http::error::body_limit) {
+                                 self->send_simple(http::status::payload_too_large,
+                                                   "request body limit exceeded", false, 11);
+                             } else if (ec != asio::error::operation_aborted) {
+                                 self->close();
+                             }
+                             return;
+                         }
+                         self->handle_request(self->parser_->release());
+                     });
 }
 
-void ListenerSession::handle_request(http::request<http::string_body> request) {
+void ListenerSession::handle_request(http::request<http::string_body> request,
+                                     std::optional<RequestNormalizationResult> cached_normalized) {
     last_request_head_ = request.method() == http::verb::head;
     // Listener-level CORS runs before routing: a browser preflight can
     // never carry header-routing's control header (the custom header is
@@ -676,28 +687,27 @@ void ListenerSession::handle_request(http::request<http::string_body> request) {
     if (impl_->options_.config.cors.configured && !prepare_cors(request)) {
         return; // preflight answered (allowed or rejected)
     }
-    RequestRoutingPolicy policy = impl_->policy_;
-    std::vector<PublicRequestHeaderView> views;
-    views.reserve(16);
+    header_views_.clear();
     for (const auto& field : request.base()) {
-        views.push_back({field.name_string(), field.value()});
+        header_views_.push_back({field.name_string(), field.value()});
     }
-    const auto rejection = websocket_upgrade_rejection(
-        check_websocket_upgrade(views, request.method_string(), request.version()));
+    const WebSocketUpgradeCheck ws_check =
+        check_websocket_upgrade(header_views_, request.method_string(), request.version());
+    const auto rejection = websocket_upgrade_rejection(ws_check);
     if (rejection.status != 0) {
         send_simple(static_cast<http::status>(rejection.status), rejection.body, false,
                     request.version());
         return;
     }
-    if (check_websocket_upgrade(views, request.method_string(), request.version()) ==
-            WebSocketUpgradeCheck::kValid &&
-        !request.body().empty()) {
+    if (ws_check == WebSocketUpgradeCheck::kValid && !request.body().empty()) {
         send_simple(http::status::bad_request, "WebSocket upgrade must be bodyless", false,
                     request.version());
         return;
     }
     const RequestNormalizationResult normalized =
-        normalize_public_request(policy, request.target(), views);
+        cached_normalized
+            ? std::move(*cached_normalized)
+            : normalize_validated_public_request(impl_->policy_, request.target(), header_views_);
     if (!normalized.ok) {
         const http::status status =
             normalized.error.code == RequestNormalizationErrorCode::kRouteNotFound
@@ -1113,6 +1123,11 @@ bool ManagedListenerImpl::start(std::string* error) {
         [weak = weak_from_this()](std::shared_ptr<WorkerExecutor> executor, WorkerEvent event) {
             if (std::shared_ptr<ManagedListenerImpl> self = weak.lock()) {
                 self->handle_worker_event(std::move(executor), std::move(event));
+            }
+        },
+        [weak = weak_from_this()] {
+            if (std::shared_ptr<ManagedListenerImpl> self = weak.lock()) {
+                self->flush_deferred_response_heads();
             }
         });
 
@@ -1577,11 +1592,11 @@ void ManagedListenerImpl::begin_request(const std::shared_ptr<GenerationPool>& p
     }
     PendingRequest pending;
     pending.pool = pool;
-    std::vector<PublicRequestHeaderView> upgrade_views;
+    upgrade_views_.clear();
     for (const auto& field : request.base())
-        upgrade_views.push_back({field.name_string(), field.value()});
+        upgrade_views_.push_back({field.name_string(), field.value()});
     const bool upgrade =
-        check_websocket_upgrade(upgrade_views, request.method_string(), request.version()) ==
+        check_websocket_upgrade(upgrade_views_, request.method_string(), request.version()) ==
         WebSocketUpgradeCheck::kValid;
     if (upgrade && !(executor->effective_channel_caps() & CAPSID_PROTOCOL_CAP_UPGRADE)) {
         session->current_request_id_.reset();
@@ -1772,17 +1787,16 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
         }
         pending.head_only = pending.method == "HEAD";
         if (event.fixed_body) {
-            pending.fixed_response =
-                std::make_shared<http::response<http::vector_body<std::uint8_t>>>();
-            pending.fixed_response->result(static_cast<http::status>(event.status));
-            pending.fixed_response->version(pending.version);
-            pending.fixed_response->keep_alive(pending.keep_alive);
+            pending.fixed = std::make_shared<FixedResponseState>();
+            pending.fixed->response.result(static_cast<http::status>(event.status));
+            pending.fixed->response.version(pending.version);
+            pending.fixed->response.keep_alive(pending.keep_alive);
             for (const auto& [name, value] : event.headers) {
-                pending.fixed_response->base().insert(name, value);
+                pending.fixed->response.base().insert(name, value);
             }
             const auto content_length_field =
-                pending.fixed_response->base().find(http::field::content_length);
-            if (content_length_field != pending.fixed_response->base().end()) {
+                pending.fixed->response.base().find(http::field::content_length);
+            if (content_length_field != pending.fixed->response.base().end()) {
                 std::uint64_t value = 0;
                 bool valid = true;
                 const std::string_view text(content_length_field->value());
@@ -1810,23 +1824,24 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
             pending.fixed_body_expected = event.fixed_body_size;
             pending.fixed_body_received = 0;
             if (!pending.head_only) {
-                pending.fixed_response->body().reserve(pending.fixed_body_expected);
+                pending.fixed->response.body().reserve(pending.fixed_body_expected);
             }
             return;
         }
-        pending.response = std::make_shared<http::response<http::buffer_body>>();
-        pending.response->result(static_cast<http::status>(event.status));
-        pending.response->version(pending.version);
-        pending.response->keep_alive(pending.keep_alive);
+        pending.stream = std::make_shared<StreamResponseState>();
+        pending.stream->response.result(static_cast<http::status>(event.status));
+        pending.stream->response.version(pending.version);
+        pending.stream->response.keep_alive(pending.keep_alive);
+        pending.stream->response.body().more = true;
         for (const auto& [name, value] : event.headers) {
-            pending.response->base().insert(name, value);
+            pending.stream->response.base().insert(name, value);
         }
-        if (!pending.response->has_content_length() && !pending.response->chunked()) {
-            pending.response->chunked(true);
+        if (!pending.stream->response.has_content_length() && !pending.stream->response.chunked()) {
+            pending.stream->response.chunked(true);
         }
         const auto content_length_field =
-            pending.response->base().find(http::field::content_length);
-        if (content_length_field != pending.response->base().end()) {
+            pending.stream->response.base().find(http::field::content_length);
+        if (content_length_field != pending.stream->response.base().end()) {
             std::uint64_t value = 0;
             bool valid = true;
             const std::string_view text(content_length_field->value());
@@ -1853,47 +1868,13 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
             pending.cl_known = true;
             pending.cl_remaining = static_cast<std::size_t>(value);
         }
-        pending.serializer =
-            std::make_shared<http::response_serializer<http::buffer_body>>(*pending.response);
-        pending.writing = true;
-        arm_write_timer(event.request_id, pending);
-        http::async_write_header(
-            pending.session->stream(), *pending.serializer,
-            [self = shared_from_this(), response = pending.response,
-             serializer = pending.serializer, session = pending.session, executor,
-             request_id = event.request_id](beast::error_code ec, std::size_t) {
-                (void)response;
-                (void)serializer;
-                (void)session;
-                auto it = self->requests_.find({executor->id(), request_id});
-                if (it == self->requests_.end()) {
-                    return;
-                }
-                PendingRequest& pending = it->second;
-                pending.writing = false;
-                self->disarm_write_timer(pending);
-                if (ec) {
-                    self->fail_request(executor, request_id, pending.session);
-                    return;
-                }
-                pending.head_sent = true;
-                if (pending.holds_streaming_permit && !pending.end_seen) {
-                    self->arm_stream_idle_timer(executor, request_id, pending);
-                }
-                if (!pending.body_queue.empty()) {
-                    PendingRequest::QueuedBody queued =
-                        take_coalesced_response_body(&pending.body_queue, &pending.body_queue_bytes,
-                                                     kResponseBodyWriteBatchLimit);
-                    self->write_body_block(executor, request_id, std::move(queued.bytes),
-                                           queued.credit_returned_early);
-                } else if (pending.end_seen) {
-                    if (pending.head_only) {
-                        self->finalize_request(executor, request_id, pending.session);
-                    } else {
-                        self->write_end_block(executor, request_id);
-                    }
-                }
-            });
+        pending.stream->serializer.emplace(pending.stream->response);
+        if (!pending.cl_known) {
+            pending.head_deferred = true;
+            deferred_heads_.emplace_back(executor, event.request_id);
+        } else {
+            start_streaming_head_write(executor, event.request_id, pending);
+        }
         return;
     }
     case WorkerEvent::Type::kResponseBody: {
@@ -1905,7 +1886,7 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
         if (pending.holds_streaming_permit && !pending.end_seen) {
             arm_stream_idle_timer(executor, event.request_id, pending);
         }
-        if (pending.fixed_response) {
+        if (pending.fixed) {
             if (pending.fixed_body_received > pending.fixed_body_expected ||
                 event.body.size() > pending.fixed_body_expected - pending.fixed_body_received) {
                 fail_request(executor, event.request_id, pending.session);
@@ -1913,8 +1894,7 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
             }
             pending.fixed_body_received += event.body.size();
             if (!pending.head_only) {
-                mailbox_->add_client_bytes(exec_id, event.body.size());
-                pending.fixed_response->body().insert(pending.fixed_response->body().end(),
+                pending.fixed->response.body().insert(pending.fixed->response.body().end(),
                                                       event.body.begin(), event.body.end());
             }
             return;
@@ -1934,10 +1914,7 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
             // HEAD consumes the worker body without exposing it.
             return;
         }
-        // Client-bytes accounting: counted once at arrival (queued or
-        // written directly), returned on the write completion.
-        mailbox_->add_client_bytes(exec_id, event.body.size());
-        if (pending.writing) {
+        if (pending.writing || pending.head_deferred) {
             pending.body_queue_bytes += event.body.size();
             pending.body_queue.push_back(
                 PendingRequest::QueuedBody{std::move(event.body), credit_returned_early});
@@ -1957,13 +1934,9 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
             pending.idle_timer->cancel();
             pending.idle_timer.reset();
         }
-        // Drain any remaining pending credit; the Runtime erased the
-        // request, so the grant frame is queued only to satisfy the
-        // terminal retirement.
-        flush_pending_credit(executor, event.request_id, pending, true);
-        // The Runtime erased this request with RESPONSE_END. Purge queued
-        // stale frames and retire the tombstone after the worker's current
-        // command batch, without a redundant Runtime cancel.
+        // The Runtime already erased this request with RESPONSE_END, so any
+        // accumulated credit is moot; clear it without waking the executor.
+        pending.pending_response_credit = 0;
         const std::shared_ptr<GenerationPool> pool = pending.pool;
         executor->retire_terminal_request(event.request_id);
         pump_pool_queue(pool.get());
@@ -1972,12 +1945,15 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
             return;
         }
         PendingRequest& active_pending = still_it->second;
-        if (active_pending.fixed_response) {
+        if (active_pending.fixed) {
             if (active_pending.fixed_body_received != active_pending.fixed_body_expected) {
                 fail_request(executor, event.request_id, active_pending.session);
                 return;
             }
             write_fixed_response(executor, event.request_id);
+            return;
+        }
+        if (active_pending.head_deferred) {
             return;
         }
         if (active_pending.head_only) {
@@ -2102,9 +2078,81 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
         }
         next_request_id_.erase(exec_id);
         streaming_inflight_.erase(exec_id);
-        mailbox_->erase_executor(exec_id);
         return;
     }
+    }
+}
+
+void ManagedListenerImpl::start_streaming_head_write(
+    const std::shared_ptr<WorkerExecutor>& executor, std::uint64_t request_id,
+    PendingRequest& pending) {
+    pending.writing = true;
+    arm_write_timer(request_id, pending);
+    http::async_write_header(
+        pending.session->stream(), *pending.stream->serializer,
+        [self = shared_from_this(), stream = pending.stream, session = pending.session, executor,
+         request_id](beast::error_code ec, std::size_t) {
+            (void)stream;
+            (void)session;
+            auto it = self->requests_.find({executor->id(), request_id});
+            if (it == self->requests_.end()) {
+                return;
+            }
+            PendingRequest& pending = it->second;
+            pending.writing = false;
+            self->disarm_write_timer(pending);
+            if (ec) {
+                self->fail_request(executor, request_id, pending.session);
+                return;
+            }
+            pending.head_sent = true;
+            if (pending.holds_streaming_permit && !pending.end_seen) {
+                self->arm_stream_idle_timer(executor, request_id, pending);
+            }
+            if (!pending.body_queue.empty()) {
+                PendingRequest::QueuedBody queued = take_coalesced_response_body(
+                    &pending.body_queue, &pending.body_queue_bytes, kResponseBodyWriteBatchLimit);
+                self->write_body_block(executor, request_id, std::move(queued.bytes),
+                                       queued.credit_returned_early);
+            } else if (pending.end_seen) {
+                if (pending.head_only) {
+                    self->finalize_request(executor, request_id, pending.session);
+                } else {
+                    self->write_end_block(executor, request_id);
+                }
+            }
+        });
+}
+
+void ManagedListenerImpl::flush_deferred_response_heads() {
+    if (deferred_heads_.empty()) {
+        return;
+    }
+    std::vector<std::pair<std::shared_ptr<WorkerExecutor>, std::uint64_t>> batch;
+    batch.swap(deferred_heads_);
+    for (const auto& [executor, request_id] : batch) {
+        if (!executor) {
+            continue;
+        }
+        auto it = requests_.find({executor->id(), request_id});
+        if (it == requests_.end()) {
+            continue;
+        }
+        PendingRequest& pending = it->second;
+        if (!pending.head_deferred || !pending.stream) {
+            continue;
+        }
+        pending.head_deferred = false;
+        if (!pending.head_only && !pending.body_queue.empty()) {
+            PendingRequest::QueuedBody queued = take_coalesced_response_body(
+                &pending.body_queue, &pending.body_queue_bytes, kResponseBodyWriteBatchLimit);
+            write_body_block(executor, request_id, std::move(queued.bytes),
+                             queued.credit_returned_early);
+        } else if (!pending.head_only && pending.end_seen) {
+            write_end_block(executor, request_id);
+        } else {
+            start_streaming_head_write(executor, request_id, pending);
+        }
     }
 }
 
@@ -2161,25 +2209,26 @@ void ManagedListenerImpl::write_body_block(const std::shared_ptr<WorkerExecutor>
         }
         pending.cl_remaining -= bytes.size();
     }
+    const bool final_block = pending.end_seen && pending.body_queue.empty();
+    if (final_block && pending.cl_known && pending.cl_remaining > 0) {
+        // The worker ended the response short of its declared Content-Length.
+        fail_request(executor, request_id, pending.session);
+        return;
+    }
     pending.outgoing = std::move(bytes);
     pending.outgoing_credit_returned_early = credit_returned_early;
     pending.writing = true;
-    pending.response->body().data = pending.outgoing.data();
-    pending.response->body().size = pending.outgoing.size();
-    pending.response->body().more = true;
+    pending.stream->response.body().data = pending.outgoing.data();
+    pending.stream->response.body().size = pending.outgoing.size();
+    pending.stream->response.body().more = !final_block;
     arm_write_timer(request_id, pending);
     http::async_write(
-        pending.session->stream(), *pending.serializer,
-        [self = shared_from_this(), response = pending.response, serializer = pending.serializer,
-         session = pending.session, executor, request_id,
-         bytes = pending.outgoing.size()](beast::error_code ec, std::size_t) {
-            (void)response;
-            (void)serializer;
+        pending.session->stream(), *pending.stream->serializer,
+        [self = shared_from_this(), stream = pending.stream, session = pending.session, executor,
+         request_id, bytes = pending.outgoing.size(),
+         final_block](beast::error_code ec, std::size_t) {
+            (void)stream;
             (void)session;
-            // The client-bytes term is returned on the write completion
-            // regardless of the request state (a cancel erases the entry
-            // but the write still completes).
-            self->mailbox_->sub_client_bytes(executor->id(), bytes);
             auto it = self->requests_.find({executor->id(), request_id});
             if (it == self->requests_.end()) {
                 return;
@@ -2187,9 +2236,18 @@ void ManagedListenerImpl::write_body_block(const std::shared_ptr<WorkerExecutor>
             PendingRequest& pending = it->second;
             pending.writing = false;
             self->disarm_write_timer(pending);
-            if (ec && ec != http::error::need_buffer) {
+            if (final_block ? static_cast<bool>(ec) : (ec && ec != http::error::need_buffer)) {
                 self->fail_request(executor, request_id, pending.session);
                 return;
+            }
+            pending.head_sent = true;
+            pending.outgoing.clear();
+            if (final_block) {
+                self->finalize_request(executor, request_id, pending.session);
+                return;
+            }
+            if (pending.holds_streaming_permit && !pending.end_seen) {
+                self->arm_stream_idle_timer(executor, request_id, pending);
             }
             // need_buffer is the buffer_body serializer's normal signal that
             // the current block was fully written and more data is expected.
@@ -2205,7 +2263,6 @@ void ManagedListenerImpl::write_body_block(const std::shared_ptr<WorkerExecutor>
                 self->flush_pending_credit(executor, request_id, pending, force_credit);
             }
             pending.outgoing_credit_returned_early = false;
-            pending.outgoing.clear();
             if (!pending.body_queue.empty()) {
                 PendingRequest::QueuedBody queued = take_coalesced_response_body(
                     &pending.body_queue, &pending.body_queue_bytes, kResponseBodyWriteBatchLimit);
@@ -2242,21 +2299,16 @@ void ManagedListenerImpl::write_fixed_response(const std::shared_ptr<WorkerExecu
         return;
     }
     PendingRequest& pending = it->second;
-    pending.fixed_response->content_length(pending.fixed_body_expected);
-    pending.fixed_serializer =
-        std::make_shared<http::response_serializer<http::vector_body<std::uint8_t>>>(
-            *pending.fixed_response);
+    pending.fixed->response.content_length(pending.fixed_body_expected);
+    pending.fixed->serializer.emplace(pending.fixed->response);
     pending.fixed_write_started = true;
     pending.writing = true;
     arm_write_timer(request_id, pending);
-    const std::size_t bytes = pending.head_only ? 0 : pending.fixed_body_received;
-    const auto completion = [self = shared_from_this(), response = pending.fixed_response,
-                             serializer = pending.fixed_serializer, session = pending.session,
-                             executor, request_id, bytes](beast::error_code ec, std::size_t) {
-        (void)response;
-        (void)serializer;
+    const auto completion = [self = shared_from_this(), fixed = pending.fixed,
+                             session = pending.session, executor,
+                             request_id](beast::error_code ec, std::size_t) {
+        (void)fixed;
         (void)session;
-        self->mailbox_->sub_client_bytes(executor->id(), bytes);
         auto it = self->requests_.find({executor->id(), request_id});
         if (it == self->requests_.end()) {
             return;
@@ -2272,9 +2324,9 @@ void ManagedListenerImpl::write_fixed_response(const std::shared_ptr<WorkerExecu
         self->finalize_request(executor, request_id, pending.session);
     };
     if (pending.head_only) {
-        http::async_write_header(pending.session->stream(), *pending.fixed_serializer, completion);
+        http::async_write_header(pending.session->stream(), *pending.fixed->serializer, completion);
     } else {
-        http::async_write(pending.session->stream(), *pending.fixed_serializer, completion);
+        http::async_write(pending.session->stream(), *pending.fixed->serializer, completion);
     }
 }
 
@@ -2292,16 +2344,15 @@ void ManagedListenerImpl::write_end_block(const std::shared_ptr<WorkerExecutor>&
         return;
     }
     pending.writing = true;
-    pending.response->body().data = nullptr;
-    pending.response->body().size = 0;
-    pending.response->body().more = false;
+    pending.stream->response.body().data = nullptr;
+    pending.stream->response.body().size = 0;
+    pending.stream->response.body().more = false;
     arm_write_timer(request_id, pending);
-    http::async_write(pending.session->stream(), *pending.serializer,
-                      [self = shared_from_this(), response = pending.response,
-                       serializer = pending.serializer, session_ref = pending.session, executor,
+    http::async_write(pending.session->stream(), *pending.stream->serializer,
+                      [self = shared_from_this(), stream = pending.stream,
+                       session_ref = pending.session, executor,
                        request_id](beast::error_code ec, std::size_t) {
-                          (void)response;
-                          (void)serializer;
+                          (void)stream;
                           (void)session_ref;
                           auto it = self->requests_.find({executor->id(), request_id});
                           if (it == self->requests_.end()) {
@@ -2337,13 +2388,13 @@ bool ManagedListenerImpl::response_may_complete_early(std::uint64_t executor_id,
     if (it == requests_.end())
         return false;
     const PendingRequest& pending = it->second;
-    if (pending.fixed_response)
+    if (pending.fixed)
         return pending.end_seen && pending.fixed_body_received == pending.fixed_body_expected;
     if (pending.head_only)
         return pending.writing || pending.head_sent;
     if (pending.cl_known)
         return pending.cl_remaining == 0;
-    return pending.end_seen && pending.response && !pending.response->body().more;
+    return pending.end_seen && pending.stream && !pending.stream->response.body().more;
 }
 
 void ManagedListenerImpl::write_channel_metrics_line() {
@@ -2391,12 +2442,6 @@ void ManagedListenerImpl::cancel_request(const std::shared_ptr<WorkerExecutor>& 
         return;
     }
     release_streaming_permit(it->second);
-    // Queued response bytes never reach the wire; return their client-bytes
-    // accounting (the in-flight write returns its own on completion).
-    mailbox_->sub_client_bytes(exec_id, it->second.body_queue_bytes);
-    if (it->second.fixed_response && !it->second.fixed_write_started && !it->second.head_only) {
-        mailbox_->sub_client_bytes(exec_id, it->second.fixed_body_received);
-    }
     const std::shared_ptr<GenerationPool> pool = it->second.pool;
     requests_.erase(it);
     executor->mark_canceled(request_id);

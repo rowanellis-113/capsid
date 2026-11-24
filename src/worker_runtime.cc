@@ -92,6 +92,7 @@ void tjs__execute_jobs(JSContext* ctx);
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -527,6 +528,7 @@ struct RequestToken {
     uint64_t request_id;
     uint64_t deadline_ns;
     bool terminal;
+    bool registered;
     int refs;
     // Diagnostic ref breakdown: job_refs counts QuickJS job-context
     // captures, async_refs counts txiki async-resource captures
@@ -554,9 +556,9 @@ struct RequestToken {
     uint32_t inflight_binding_calls;
 
     RequestToken(uint64_t gen, uint64_t id, uint64_t deadline)
-        : generation(gen), request_id(id), deadline_ns(deadline), terminal(false), refs(1),
-          job_refs(0), async_refs(0), last_reclaim_refs_(0), reclaim_deadline_ns(0),
-          reclaim_grace(false), inflight_binding_calls(0) {}
+        : generation(gen), request_id(id), deadline_ns(deadline), terminal(false),
+          registered(false), refs(1), job_refs(0), async_refs(0), last_reclaim_refs_(0),
+          reclaim_deadline_ns(0), reclaim_grace(false), inflight_binding_calls(0) {}
 
     ~RequestToken() {
         if (promise_creation_scope) {
@@ -617,6 +619,7 @@ enum class WorkerPhase {
 };
 
 class WorkerRuntime {
+    using ResponseMap = std::unordered_map<uint64_t, ResponseState>;
     struct ConnectionEvent {
         const char* type = nullptr;
         std::shared_ptr<const capsid::ChannelMessage> message;
@@ -755,13 +758,15 @@ class WorkerRuntime {
           audit_window_count_(0), audit_repeat_count_(0), denied_module_() {
         std::memset(&poll_, 0, sizeof(poll_));
         std::memset(&deadline_timer_, 0, sizeof(deadline_timer_));
+        responses_.reserve(128);
+        head_frame_scratch_.payload.reserve(512);
+        http_tokens_by_request_id_.reserve(128);
     }
 
     ~WorkerRuntime() {
         if (ctx_) {
             clear_connections();
-            for (std::map<uint64_t, ResponseState>::iterator it = responses_.begin();
-                 it != responses_.end(); ++it) {
+            for (ResponseMap::iterator it = responses_.begin(); it != responses_.end(); ++it) {
                 reject_pending(it->second, "worker shutting down");
             }
             free_bridge_functions();
@@ -817,9 +822,10 @@ class WorkerRuntime {
             // freed by the runtime teardown. The JS side is gone by now;
             // free the survivors. A token released during teardown has
             // already removed itself from the registry.
-            for (std::map<uint64_t, RequestToken*>::iterator it = token_registry_.begin();
-                 it != token_registry_.end();) {
+            http_tokens_by_request_id_.clear();
+            for (auto it = token_registry_.begin(); it != token_registry_.end();) {
                 RequestToken* token = it->second;
+                token->registered = false;
                 token_registry_.erase(it++);
                 delete token;
             }
@@ -1630,6 +1636,7 @@ class WorkerRuntime {
         // Captured JS reactions can remain reachable after close (for example
         // a resolver retained by the application). They are inert, and own
         // only this context reference, not a live connection/registry lease.
+        token->registered = false;
         token_registry_.erase(token->generation);
         token->connection_retired = true;
         // Intrusive bookkeeping keeps cancellation allocation-free.
@@ -1820,7 +1827,14 @@ class WorkerRuntime {
         }
         retained_refs_ -= 1;
         if (--token->refs == 0) {
+            token->registered = false;
             token_registry_.erase(token->generation);
+            if (!token->connection_id && !token->connection_dial_id) {
+                auto http_it = http_tokens_by_request_id_.find(token->request_id);
+                if (http_it != http_tokens_by_request_id_.end() && http_it->second == token) {
+                    http_tokens_by_request_id_.erase(http_it);
+                }
+            }
             if (token->connection_retired) {
                 if (token->retired_previous)
                     token->retired_previous->retired_next = token->retired_next;
@@ -1876,8 +1890,7 @@ class WorkerRuntime {
             JS_ThrowInternalError(ctx, "request already settled");
             return NULL;
         }
-        std::map<uint64_t, RequestToken*>::iterator found = token_registry_.find(token->generation);
-        if (found == token_registry_.end() || found->second != token) {
+        if (!token->registered) {
             if (diag_enabled_) {
                 std::fprintf(stderr, "POISON SITE stale-token active=%llu\n",
                              static_cast<unsigned long long>(token->request_id));
@@ -1890,79 +1903,77 @@ class WorkerRuntime {
     }
 
     bool settle_request(uint64_t id) {
-        for (std::map<uint64_t, RequestToken*>::iterator it = token_registry_.begin();
-             it != token_registry_.end(); ++it) {
-            RequestToken* token = it->second;
-            if (token->connection_id == 0 && token->connection_dial_id == 0 &&
-                token->request_id == id) {
-                if (token->terminal) {
-                    return false; // double settle
-                }
-                try {
-                    const bool live_upgrade_origin = token->upgrade_source_channel &&
-                                                     origin_has_live_connection(token->generation);
-                    if (!live_upgrade_origin && !abandon_http_dials(token->generation)) {
-                        enter_poison("HTTP dial cancellation control budget exceeded");
-                        return false;
-                    }
-                } catch (const std::bad_alloc&) {
-                    enter_poison("HTTP dial cancellation allocation failed");
-                    return false;
-                }
-                // §6.4: settle ends the ResponseState owner ref. The
-                // post-drain reclaim then sees only the registry owner
-                // (refs==1 -> free) plus any surviving job/resource refs
-                // (poison). The response entry itself survives until the
-                // transport drains the terminal, so it must tolerate a
-                // NULL token (erase_response and the bridges do).
-                std::map<uint64_t, ResponseState>::iterator found = responses_.find(id);
-                if (found != responses_.end()) {
-                    release_token(found->second.token);
-                    found->second.token = NULL;
-                }
-                if (token->upgrade_source_channel) {
-                    // Keep the initial Promise/timer scope with the accepted
-                    // WebSocket origin after the HTTP terminal. A native
-                    // proxy alone has no application owner and still expires
-                    // at the next checkpoint. Ordinary HTTP stays terminal.
-                    token->connection_id = token->upgrade_source_channel;
-                    token->origin_generation = token->generation;
-                    token->connection_event_settled = true;
-                    token->deadline_ns = 0;
-                    if (token->promise_creation_scope && token->promise_creation_scope->refs > 1 &&
-                        !token->promise_creation_scope->holds_connection_token) {
-                        retain_token(token);
-                        token->promise_creation_scope->holds_connection_token = true;
-                    }
-                    request_reclaim(token);
-                    return true;
-                }
-                token->terminal = true;
-                // §7.4: the normal completion path runs no drain; the
-                // deadline tick performs the post-settle reclaim. The
-                // settle bridge runs inside the .finally continuation, so
-                // the finally promise's own adoption chain is still
-                // unwinding. Give the first reclaim round the same grace
-                // the cancel path uses: terminalized tokens make every
-                // capability call throw, so a one-round deferral cannot
-                // re-arm a continuation — it only lets the chain's
-                // post-settle promise reactions release before the leak
-                // decision.
-                token->last_reclaim_refs_ = token->refs;
-                token->reclaim_grace = true;
-                // §7.4: the normal completion path runs no drain; the
-                // deadline tick performs the post-settle reclaim.
-                request_reclaim(token);
-                if (diag_enabled_) {
-                    std::fprintf(
-                        stderr, "SETTLE request_id=%llu ctx=%p refs=%d job_refs=%d async_refs=%d\n",
-                        static_cast<unsigned long long>(id), static_cast<void*>(token), token->refs,
-                        token->job_refs, token->async_refs);
-                }
-                return true;
-            }
+        auto http_it = http_tokens_by_request_id_.find(id);
+        if (http_it == http_tokens_by_request_id_.end()) {
+            return false;
         }
-        return false;
+        RequestToken* token = http_it->second;
+        if (token->terminal) {
+            return false; // double settle
+        }
+        try {
+            const bool live_upgrade_origin =
+                token->upgrade_source_channel && origin_has_live_connection(token->generation);
+            if (!live_upgrade_origin && !abandon_http_dials(token->generation)) {
+                enter_poison("HTTP dial cancellation control budget exceeded");
+                return false;
+            }
+        } catch (const std::bad_alloc&) {
+            enter_poison("HTTP dial cancellation allocation failed");
+            return false;
+        }
+        // §6.4: settle ends the ResponseState owner ref. The post-drain reclaim
+        // then sees only the registry owner (refs==1 -> free) plus any surviving
+        // job/resource refs (poison). The response entry itself survives until
+        // the transport drains the terminal, so it must tolerate a NULL token
+        // (erase_response and the bridges do).
+        ResponseMap::iterator found = responses_.find(id);
+        if (found != responses_.end()) {
+            release_token(found->second.token);
+            found->second.token = NULL;
+        }
+        if (token->upgrade_source_channel) {
+            auto erase_it = http_tokens_by_request_id_.find(id);
+            if (erase_it != http_tokens_by_request_id_.end() && erase_it->second == token) {
+                http_tokens_by_request_id_.erase(erase_it);
+            }
+            // Keep the initial Promise/timer scope with the accepted WebSocket
+            // origin after the HTTP terminal. A native proxy alone has no
+            // application owner and still expires at the next checkpoint.
+            // Ordinary HTTP stays terminal.
+            token->connection_id = token->upgrade_source_channel;
+            token->origin_generation = token->generation;
+            token->connection_event_settled = true;
+            token->deadline_ns = 0;
+            if (token->promise_creation_scope && token->promise_creation_scope->refs > 1 &&
+                !token->promise_creation_scope->holds_connection_token) {
+                retain_token(token);
+                token->promise_creation_scope->holds_connection_token = true;
+            }
+            request_reclaim(token);
+            return true;
+        }
+        token->terminal = true;
+        // §7.4: the normal completion path runs no drain; the deadline tick
+        // performs the post-settle reclaim. The settle bridge runs inside the
+        // .finally continuation, so the finally promise's own adoption chain is
+        // still unwinding. Give the first reclaim round the same grace the
+        // cancel path uses: terminalized tokens make every capability call
+        // throw, so a one-round deferral cannot re-arm a continuation — it
+        // only lets the chain's post-settle promise reactions release before the
+        // leak decision.
+        token->last_reclaim_refs_ = token->refs;
+        token->reclaim_grace = true;
+        // §7.4: the normal completion path runs no drain; the deadline tick
+        // performs the post-settle reclaim.
+        request_reclaim(token);
+        if (diag_enabled_) {
+            std::fprintf(stderr,
+                         "SETTLE request_id=%llu ctx=%p refs=%d job_refs=%d async_refs=%d\n",
+                         static_cast<unsigned long long>(id), static_cast<void*>(token),
+                         token->refs, token->job_refs, token->async_refs);
+        }
+        return true;
     }
 
     // §6.4.3-5 + §7.4 poison state machine. Idempotent: the first reason
@@ -1983,8 +1994,7 @@ class WorkerRuntime {
         poison_started_ns_ = uv_hrtime();
         poison_deadline_ns_ = poison_started_ns_ + kPoisonGraceNs;
         std::fprintf(stderr, "WORKER POISONED: %s\n", reason != NULL ? reason : "unspecified");
-        for (std::map<uint64_t, ResponseState>::iterator it = responses_.begin();
-             it != responses_.end(); ++it) {
+        for (ResponseMap::iterator it = responses_.begin(); it != responses_.end(); ++it) {
             if (it->second.token != NULL && !it->second.token->terminal) {
                 it->second.token->terminal = true;
             }
@@ -2205,7 +2215,7 @@ class WorkerRuntime {
         return token != NULL && JS_IsJobPendingWithContext(JS_GetRuntime(ctx_), token) != 0;
     }
 
-    void erase_response(std::map<uint64_t, ResponseState>::iterator it) {
+    void erase_response(ResponseMap::iterator it) {
         if (it == responses_.end()) {
             return;
         }
@@ -2369,11 +2379,15 @@ class WorkerRuntime {
             if (!self->define_native(ctx, core, "capsidRequestCredit", js_bridge_forbidden, 2) ||
                 !self->define_native(ctx, core, "capsidResponseHead", js_bridge_forbidden, 4) ||
                 !self->define_native(ctx, core, "capsidResponseWrite", js_bridge_forbidden, 2) ||
+                !self->define_native(ctx, core, "capsidResponseWriteBuffer", js_bridge_forbidden,
+                                     4) ||
                 !self->define_native(ctx, core, "capsidResponseEnd", js_bridge_forbidden, 1) ||
                 !self->define_native(ctx, core, "capsidResponseError", js_bridge_forbidden, 2) ||
                 !self->define_native(ctx, core, "capsidResponseFinal", js_bridge_forbidden, 5) ||
                 !self->define_native(ctx, core, "capsidResponseFixed", js_bridge_forbidden, 5) ||
                 !self->define_native(ctx, core, "capsidRequestSettled", js_bridge_forbidden, 1) ||
+                !self->define_native(ctx, core, "capsidTryTakeFulfilledPromise",
+                                     js_bridge_forbidden, 1) ||
                 !self->install_channel_natives(ctx, core, true) ||
                 !self->define_native(ctx, core, "capsidLog", js_log, 2) ||
                 !self->define_native(ctx, core, "capsidFetchRequestBodyLimit",
@@ -2421,11 +2435,15 @@ class WorkerRuntime {
             !self->define_native(ctx, core, "capsidRequestCredit", js_request_credit, 2) ||
             !self->define_native(ctx, core, "capsidResponseHead", js_response_head, 4) ||
             !self->define_native(ctx, core, "capsidResponseWrite", js_response_write, 2) ||
+            !self->define_native(ctx, core, "capsidResponseWriteBuffer", js_response_write_buffer,
+                                 4) ||
             !self->define_native(ctx, core, "capsidResponseEnd", js_response_end, 1) ||
             !self->define_native(ctx, core, "capsidResponseError", js_response_error, 2) ||
             !self->define_native(ctx, core, "capsidResponseFinal", js_response_final, 5) ||
             !self->define_native(ctx, core, "capsidResponseFixed", js_response_fixed, 5) ||
             !self->define_native(ctx, core, "capsidRequestSettled", js_request_settled, 1) ||
+            !self->define_native(ctx, core, "capsidTryTakeFulfilledPromise",
+                                 js_try_take_fulfilled_promise, 1) ||
             !self->install_channel_natives(ctx, core, false) ||
             !self->define_native(ctx, core, "capsidFetchRequestBodyLimit",
                                  js_fetch_request_body_limit, 0) ||
@@ -2764,6 +2782,15 @@ class WorkerRuntime {
         return JS_ThrowInternalError(ctx, "cannot settle unknown request");
     }
 
+    static JSValue js_try_take_fulfilled_promise(JSContext* ctx, JSValueConst, int argc,
+                                                 JSValueConst* argv) {
+        if (argc < 1 || !JS_IsObject(argv[0]) ||
+            JS_PromiseState(ctx, argv[0]) != JS_PROMISE_FULFILLED) {
+            return JS_NULL;
+        }
+        return JS_PromiseResult(ctx, argv[0]);
+    }
+
     bool install_channel_natives(JSContext* ctx, JSValue core, bool binding) {
         return JS_DefinePropertyValueStr(ctx, core, "capsidUserRuntime", JS_NewBool(ctx, !binding),
                                          0) >= 0 &&
@@ -2910,7 +2937,7 @@ class WorkerRuntime {
         if (!g_worker->channels_->registry().find(id, &entry) || g_worker->connections_.count(id))
             return JS_ThrowTypeError(ctx, "WebSocket already transferred");
         capsid::protocol::Frame head;
-        if (!build_fixed_response_head(ctx, request_id, 101, argv[1], argv[2], &head))
+        if (!encode_response_head(ctx, request_id, 101, argv[1], argv[2], false, false, &head))
             return JS_ThrowTypeError(ctx, "invalid WebSocket response headers");
         head.version = capsid::protocol::kVersionV4;
         head.flags = capsid::protocol::kFlagResponseUpgrade;
@@ -3688,6 +3715,7 @@ class WorkerRuntime {
         JS_FreeValue(ctx, data[1]);
         if (JS_IsException(callback))
             return callback;
+        token->registered = true;
         g_worker->token_registry_.emplace(token->generation, token);
         allocation.release();
         g_worker->retained_refs_ += 1;
@@ -4223,6 +4251,7 @@ class WorkerRuntime {
             event.type &&
             (std::strcmp(event.type, "open") == 0 || std::strcmp(event.type, "fetchresponse") == 0);
         token->origin_generation = owner.origin_generation;
+        token->registered = true;
         token_registry_.emplace(token->generation, token);
         allocation.release();
         retained_refs_ += 1;
@@ -4679,7 +4708,7 @@ class WorkerRuntime {
         if (!g_worker->require_active_request(ctx, id, true, false, "js_request_credit")) {
             return JS_EXCEPTION;
         }
-        std::map<uint64_t, ResponseState>::iterator state = g_worker->responses_.find(id);
+        ResponseMap::iterator state = g_worker->responses_.find(id);
         if (state == g_worker->responses_.end() ||
             state->second.request_credit > g_worker->config_.initial_window ||
             credit > g_worker->config_.initial_window - state->second.request_credit) {
@@ -4690,134 +4719,214 @@ class WorkerRuntime {
         return JS_UNDEFINED;
     }
 
-    // The fixed-body path must hold its head until the exact UTF-8 body size
-    // is known. Ordinary responses use build_response_head below and retain
-    // the original head-first IPC pipeline.
-    static bool build_fixed_response_head(JSContext* ctx, uint64_t id, uint32_t status,
-                                          JSValueConst status_text_value,
-                                          JSValueConst headers_value,
-                                          capsid::protocol::Frame* out_frame) {
-        if (!out_frame) {
+    // Encodes ResponseHead from either flat [k0, v0, ...] arrays (HTTP hot path)
+    // or nested [[k, v], ...] pair arrays (101 upgrades) into `frame`.
+    static bool encode_response_head(JSContext* ctx, uint64_t id, uint32_t status,
+                                     JSValueConst status_text_value, JSValueConst headers_value,
+                                     bool flat_headers, bool reserve_fixed_slot,
+                                     capsid::protocol::Frame* frame) {
+        if (!frame) {
             return false;
         }
-        capsid::protocol::Frame frame;
-        frame.type = capsid::protocol::kResponseHead;
-        frame.flags = 0;
-        frame.request_id = id;
-        capsid::protocol::append_u16(&frame.payload, static_cast<uint16_t>(status));
-        const std::string status_text = to_string(ctx, status_text_value);
-        if (status_text.size() > std::numeric_limits<uint16_t>::max() ||
-            status_text.size() + sizeof(uint16_t) >
-                g_worker->config_.max_header_bytes - frame.payload.size()) {
+        frame->type = capsid::protocol::kResponseHead;
+        frame->flags = 0;
+        frame->request_id = id;
+        frame->version = g_worker->config_.protocol_version;
+        frame->payload.clear();
+        const size_t base_max = g_worker->config_.max_header_bytes;
+        const size_t max_bytes =
+            reserve_fixed_slot && base_max <= std::numeric_limits<size_t>::max() - sizeof(uint32_t)
+                ? base_max + sizeof(uint32_t)
+                : base_max;
+        capsid::protocol::append_u16(&frame->payload, static_cast<uint16_t>(status));
+        if (reserve_fixed_slot) {
+            frame->payload.resize(frame->payload.size() + sizeof(uint32_t), 0);
+        }
+        if (frame->payload.size() > max_bytes) {
             return false;
         }
-        append_string16(&frame.payload, reinterpret_cast<const uint8_t*>(status_text.data()),
-                        status_text.size());
+        size_t status_len = 0;
+        const char* status_text = JS_ToCStringLen(ctx, &status_len, status_text_value);
+        if (!status_text) {
+            return false;
+        }
+        if (status_len > std::numeric_limits<uint16_t>::max() ||
+            status_len + sizeof(uint16_t) > max_bytes - frame->payload.size()) {
+            JS_FreeCString(ctx, status_text);
+            return false;
+        }
+        append_string16(&frame->payload, reinterpret_cast<const uint8_t*>(status_text), status_len);
+        JS_FreeCString(ctx, status_text);
 
-        uint32_t count = 0;
+        uint32_t raw_len = 0;
         JSValue length_value = JS_GetPropertyStr(ctx, headers_value, "length");
-        if (JS_ToUint32(ctx, &count, length_value)) {
+        if (JS_ToUint32(ctx, &raw_len, length_value)) {
             JS_FreeValue(ctx, length_value);
             return false;
         }
         JS_FreeValue(ctx, length_value);
-        if (count > std::numeric_limits<uint16_t>::max()) {
+        if (flat_headers && (raw_len & 1u) != 0) {
             return false;
         }
-        capsid::protocol::append_u16(&frame.payload, static_cast<uint16_t>(count));
-        for (uint32_t i = 0; i < count; ++i) {
-            JSValue pair = JS_GetPropertyUint32(ctx, headers_value, i);
-            JSValue name_value = JS_GetPropertyUint32(ctx, pair, 0);
-            JSValue value_value = JS_GetPropertyUint32(ctx, pair, 1);
-            const std::string name = to_string(ctx, name_value);
-            const std::string value = to_string(ctx, value_value);
+        const uint32_t count = flat_headers ? (raw_len >> 1) : raw_len;
+        if (count > std::numeric_limits<uint16_t>::max() ||
+            sizeof(uint16_t) > max_bytes - frame->payload.size()) {
+            return false;
+        }
+        capsid::protocol::append_u16(&frame->payload, static_cast<uint16_t>(count));
+        const size_t overhead = sizeof(uint16_t) + sizeof(uint32_t);
+        const uint32_t step = flat_headers ? 2u : 1u;
+        for (uint32_t i = 0; i < raw_len; i += step) {
+            JSValue name_value;
+            JSValue value_value;
+            if (flat_headers) {
+                name_value = JS_GetPropertyUint32(ctx, headers_value, i);
+                value_value = JS_GetPropertyUint32(ctx, headers_value, i + 1);
+            } else {
+                JSValue pair = JS_GetPropertyUint32(ctx, headers_value, i);
+                name_value = JS_GetPropertyUint32(ctx, pair, 0);
+                value_value = JS_GetPropertyUint32(ctx, pair, 1);
+                JS_FreeValue(ctx, pair);
+            }
+            size_t name_len = 0;
+            const char* name = JS_ToCStringLen(ctx, &name_len, name_value);
+            size_t value_len = 0;
+            const char* value = name ? JS_ToCStringLen(ctx, &value_len, value_value) : NULL;
             JS_FreeValue(ctx, value_value);
             JS_FreeValue(ctx, name_value);
-            JS_FreeValue(ctx, pair);
-            if (name.size() > std::numeric_limits<uint16_t>::max() ||
-                value.size() > std::numeric_limits<uint32_t>::max()) {
+            if (!name || !value || name_len > std::numeric_limits<uint16_t>::max() ||
+                value_len > std::numeric_limits<uint32_t>::max() ||
+                frame->payload.size() > max_bytes || name_len > max_bytes - frame->payload.size() ||
+                overhead > max_bytes - frame->payload.size() - name_len ||
+                value_len > max_bytes - frame->payload.size() - name_len - overhead) {
+                if (value)
+                    JS_FreeCString(ctx, value);
+                if (name)
+                    JS_FreeCString(ctx, name);
                 return false;
             }
-            const size_t overhead = sizeof(uint16_t) + sizeof(uint32_t);
-            if (name.size() > g_worker->config_.max_header_bytes - frame.payload.size() ||
-                overhead >
-                    g_worker->config_.max_header_bytes - frame.payload.size() - name.size() ||
-                value.size() > g_worker->config_.max_header_bytes - frame.payload.size() -
-                                   name.size() - overhead) {
+            append_string16(&frame->payload, reinterpret_cast<const uint8_t*>(name), name_len);
+            append_string32(&frame->payload, reinterpret_cast<const uint8_t*>(value), value_len);
+            JS_FreeCString(ctx, value);
+            JS_FreeCString(ctx, name);
+        }
+        return frame->payload.size() <= max_bytes;
+    }
+
+    static bool decode_single_shot_body(JSContext* ctx, JSValueConst body_value,
+                                        const uint8_t** body_bytes_out, size_t* body_size_out,
+                                        const char** body_text_out,
+                                        std::vector<uint8_t>* normalized_body) {
+        *body_bytes_out = NULL;
+        *body_size_out = 0;
+        *body_text_out = NULL;
+        if (JS_IsNull(body_value) || JS_IsUndefined(body_value)) {
+            return true;
+        }
+        if (JS_IsString(body_value)) {
+            size_t size = 0;
+            const char* text = JS_ToCStringLen(ctx, &size, body_value);
+            if (!text) {
                 return false;
             }
-            append_string16(&frame.payload, reinterpret_cast<const uint8_t*>(name.data()),
-                            name.size());
-            append_string32(&frame.payload, reinterpret_cast<const uint8_t*>(value.data()),
-                            value.size());
+            *body_text_out = text;
+            *body_size_out = size;
+            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(text);
+            // JS_ToCStringLen preserves unmatched UTF-16 surrogate code points as
+            // three-byte UTF-8 encodings; Fetch requires U+FFFD replacement.
+            const size_t surrogate_search_size = size > 2 ? size - 2 : 0;
+            size_t search_offset = 0;
+            while (search_offset < surrogate_search_size) {
+                const void* found =
+                    std::memchr(bytes + search_offset, 0xed, surrogate_search_size - search_offset);
+                if (!found) {
+                    break;
+                }
+                const size_t i = static_cast<const uint8_t*>(found) - bytes;
+                if (bytes[i] == 0xed && bytes[i + 1] >= 0xa0 && bytes[i + 1] <= 0xbf &&
+                    bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf) {
+                    if (normalized_body->empty()) {
+                        normalized_body->assign(bytes, bytes + size);
+                    }
+                    (*normalized_body)[i] = 0xef;
+                    (*normalized_body)[i + 1] = 0xbf;
+                    (*normalized_body)[i + 2] = 0xbd;
+                }
+                search_offset = i + 1;
+            }
+            *body_bytes_out = normalized_body->empty() ? bytes : &(*normalized_body)[0];
+            return true;
         }
-        if (frame.payload.size() > g_worker->config_.max_header_bytes) {
-            return false;
-        }
-        *out_frame = std::move(frame);
+        *body_bytes_out = JS_GetUint8Array(ctx, body_size_out, body_value);
         return true;
     }
 
-    // Builds and queues the ordinary ResponseHead frame. Keep this hot path
-    // independent of the bounded fixed-response representation so large and
-    // streamed responses retain their original IPC overlap and code shape.
-    static bool build_response_head(JSContext* ctx, uint64_t id, uint32_t status,
-                                    JSValueConst status_text_value, JSValueConst headers_value) {
-        capsid::protocol::Frame frame;
-        frame.type = capsid::protocol::kResponseHead;
-        frame.flags = 0;
-        frame.request_id = id;
-        capsid::protocol::append_u16(&frame.payload, static_cast<uint16_t>(status));
-        const std::string status_text = to_string(ctx, status_text_value);
-        if (status_text.size() > std::numeric_limits<uint16_t>::max() ||
-            status_text.size() + sizeof(uint16_t) >
-                g_worker->config_.max_header_bytes - frame.payload.size()) {
-            return false;
+    static JSValue finish_single_shot_response(JSContext* ctx, uint64_t id, ResponseState* state,
+                                               const uint8_t* body_bytes, size_t body_size,
+                                               const char* body_text, bool settle) {
+        if (body_bytes != NULL && body_size > 0) {
+            size_t fast_sent = 0;
+            const EnqueueResult result =
+                g_worker->queue_response_bytes_fast(id, body_bytes, body_size, state, &fast_sent);
+            if (result == EnqueueResult::kFatal) {
+                if (body_text) {
+                    JS_FreeCString(ctx, body_text);
+                }
+                return JS_ThrowInternalError(ctx, "response output is wedged");
+            }
+            if (result == EnqueueResult::kWouldBlock) {
+                PendingWrite pending;
+                pending.data.assign(body_bytes + fast_sent, body_bytes + body_size);
+                pending.offset = 0;
+                pending.size = pending.data.size();
+                pending.resolve = JS_UNDEFINED;
+                pending.reject = JS_UNDEFINED;
+                state->pending.push_back(std::move(pending));
+                g_worker->enqueue_pump(id);
+            }
         }
-        append_string16(&frame.payload, reinterpret_cast<const uint8_t*>(status_text.data()),
-                        status_text.size());
+        if (body_text) {
+            JS_FreeCString(ctx, body_text);
+        }
+        TerminalPending terminal;
+        terminal.kind = TerminalPending::Kind::kResponseEnd;
+        terminal.error_flags = 0;
+        g_worker->queue_terminal_or_defer(id, terminal);
+        if (settle && !g_worker->settle_request(id)) {
+            return JS_ThrowInternalError(ctx, "cannot settle unknown request");
+        }
+        return JS_UNDEFINED;
+    }
 
-        uint32_t count = 0;
-        JSValue length_value = JS_GetPropertyStr(ctx, headers_value, "length");
-        if (JS_ToUint32(ctx, &count, length_value)) {
-            JS_FreeValue(ctx, length_value);
-            return false;
+    static JSValue finish_response_write(JSContext* ctx, uint64_t id, ResponseState* state,
+                                         const uint8_t* bytes, size_t size) {
+        // Contract #3: pressure must never raise RangeError. The blocked path
+        // returns a promise while the bytes await credit / wire space; the
+        // unblocked path returns undefined without allocating a promise (E13a).
+        size_t fast_sent = 0;
+        const EnqueueResult result =
+            g_worker->queue_response_bytes_fast(id, bytes, size, state, &fast_sent);
+        if (result == EnqueueResult::kQueued) {
+            return JS_UNDEFINED;
         }
-        JS_FreeValue(ctx, length_value);
-        if (count > std::numeric_limits<uint16_t>::max()) {
-            return false;
+        if (result == EnqueueResult::kFatal) {
+            return JS_ThrowInternalError(ctx, "response output is wedged");
         }
-        capsid::protocol::append_u16(&frame.payload, static_cast<uint16_t>(count));
-        for (uint32_t i = 0; i < count; ++i) {
-            JSValue pair = JS_GetPropertyUint32(ctx, headers_value, i);
-            JSValue name_value = JS_GetPropertyUint32(ctx, pair, 0);
-            JSValue value_value = JS_GetPropertyUint32(ctx, pair, 1);
-            const std::string name = to_string(ctx, name_value);
-            const std::string value = to_string(ctx, value_value);
-            JS_FreeValue(ctx, value_value);
-            JS_FreeValue(ctx, name_value);
-            JS_FreeValue(ctx, pair);
-            if (name.size() > std::numeric_limits<uint16_t>::max() ||
-                value.size() > std::numeric_limits<uint32_t>::max()) {
-                return false;
-            }
-            const size_t overhead = sizeof(uint16_t) + sizeof(uint32_t);
-            if (name.size() > g_worker->config_.max_header_bytes - frame.payload.size() ||
-                overhead >
-                    g_worker->config_.max_header_bytes - frame.payload.size() - name.size() ||
-                value.size() > g_worker->config_.max_header_bytes - frame.payload.size() -
-                                   name.size() - overhead) {
-                return false;
-            }
-            append_string16(&frame.payload, reinterpret_cast<const uint8_t*>(name.data()),
-                            name.size());
-            append_string32(&frame.payload, reinterpret_cast<const uint8_t*>(value.data()),
-                            value.size());
+        JSValue resolving[2];
+        JSValue promise = JS_NewPromiseCapability(ctx, resolving);
+        if (JS_IsException(promise)) {
+            return promise;
         }
-        if (frame.payload.size() > g_worker->config_.max_header_bytes) {
-            return false;
-        }
-        return g_worker->queue_response_head(frame);
+        PendingWrite pending;
+        pending.data.assign(bytes + fast_sent, bytes + size);
+        pending.offset = 0;
+        pending.size = pending.data.size();
+        pending.resolve = resolving[0];
+        pending.reject = resolving[1];
+        state->pending.push_back(std::move(pending));
+        g_worker->enqueue_pump(id);
+        g_worker->pump_one(id);
+        return promise;
     }
 
     static JSValue js_response_head(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -4830,13 +4939,14 @@ class WorkerRuntime {
         if (!g_worker->require_active_request(ctx, id, true, false, "js_response_head")) {
             return JS_EXCEPTION;
         }
-        std::map<uint64_t, ResponseState>::iterator head_state = g_worker->responses_.find(id);
+        ResponseMap::iterator head_state = g_worker->responses_.find(id);
         if (head_state == g_worker->responses_.end()) {
             return JS_UNDEFINED;
         }
         head_state->second.t_head_ns = uv_hrtime();
-
-        if (!build_response_head(ctx, id, status, argv[2], argv[3])) {
+        capsid::protocol::Frame& head = g_worker->head_frame_scratch_;
+        if (!encode_response_head(ctx, id, status, argv[2], argv[3], true, false, &head) ||
+            !g_worker->queue_response_head(head, &head_state->second)) {
             return JS_ThrowInternalError(ctx, "response head encoding failed");
         }
         return JS_UNDEFINED;
@@ -4852,99 +4962,37 @@ class WorkerRuntime {
             JS_ToUint32(ctx, &status, argv[1]) || id == 0 || status > 999) {
             return JS_EXCEPTION;
         }
+        bool settle = false;
+        if (argc >= 6) {
+            const int flag = JS_ToBool(ctx, argv[5]);
+            if (flag < 0) {
+                return JS_EXCEPTION;
+            }
+            settle = flag != 0;
+        }
         if (!g_worker->require_active_request(ctx, id, true, false, "js_response_final")) {
             return JS_EXCEPTION;
         }
-        std::map<uint64_t, ResponseState>::iterator state = g_worker->responses_.find(id);
+        ResponseMap::iterator state = g_worker->responses_.find(id);
         if (state == g_worker->responses_.end()) {
             return JS_UNDEFINED;
         }
         state->second.t_head_ns = uv_hrtime();
-        if (!build_response_head(ctx, id, status, argv[2], argv[3])) {
+        capsid::protocol::Frame& head = g_worker->head_frame_scratch_;
+        if (!encode_response_head(ctx, id, status, argv[2], argv[3], true, false, &head) ||
+            !g_worker->queue_response_head(head, &state->second)) {
             return JS_ThrowInternalError(ctx, "response head encoding failed");
         }
-        // Body: Uint8Array or string; both are encoded/read here, then
-        // pushed through the fast path with the remainder snapshotted
-        // for credit-driven advancement. Untouched string Responses arrive
-        // here as strings so the common ASCII case can use QuickJS's stable
-        // string storage directly, without a JS TextEncoder allocation and
-        // a second Uint8Array copy.
         size_t body_size = 0;
         const uint8_t* body_bytes = NULL;
         const char* body_text = NULL;
         std::vector<uint8_t> normalized_body;
-        if (!JS_IsNull(argv[4]) && !JS_IsUndefined(argv[4])) {
-            if (JS_IsString(argv[4])) {
-                body_text = JS_ToCStringLen(ctx, &body_size, argv[4]);
-                if (!body_text) {
-                    return JS_EXCEPTION;
-                }
-                body_bytes = reinterpret_cast<const uint8_t*>(body_text);
-
-                // JS_ToCStringLen preserves unmatched UTF-16 surrogate code
-                // points as their three-byte UTF-8 encodings. Fetch's
-                // TextEncoder semantics require each unmatched surrogate to
-                // become U+FFFD instead. Valid pairs have already become one
-                // four-byte scalar, so only the UTF-8 surrogate range needs
-                // rewriting; replacement is also three bytes and never
-                // changes the body length. Allocate only on this rare path.
-                const size_t surrogate_search_size = body_size > 2 ? body_size - 2 : 0;
-                size_t search_offset = 0;
-                while (search_offset < surrogate_search_size) {
-                    const void* found = std::memchr(body_bytes + search_offset, 0xed,
-                                                    surrogate_search_size - search_offset);
-                    if (!found) {
-                        break;
-                    }
-                    const size_t i = static_cast<const uint8_t*>(found) - body_bytes;
-                    if (body_bytes[i] == 0xed && body_bytes[i + 1] >= 0xa0 &&
-                        body_bytes[i + 1] <= 0xbf && body_bytes[i + 2] >= 0x80 &&
-                        body_bytes[i + 2] <= 0xbf) {
-                        if (normalized_body.empty()) {
-                            normalized_body.assign(body_bytes, body_bytes + body_size);
-                        }
-                        normalized_body[i] = 0xef;
-                        normalized_body[i + 1] = 0xbf;
-                        normalized_body[i + 2] = 0xbd;
-                    }
-                    search_offset = i + 1;
-                }
-                if (!normalized_body.empty()) {
-                    body_bytes = &normalized_body[0];
-                }
-            } else {
-                body_bytes = JS_GetUint8Array(ctx, &body_size, argv[4]);
-            }
+        if (!decode_single_shot_body(ctx, argv[4], &body_bytes, &body_size, &body_text,
+                                     &normalized_body)) {
+            return JS_EXCEPTION;
         }
-        if (body_bytes != NULL && body_size > 0) {
-            size_t fast_sent = 0;
-            const EnqueueResult result = g_worker->queue_response_bytes_fast(
-                id, body_bytes, body_size, &state->second, &fast_sent);
-            if (result == EnqueueResult::kFatal) {
-                if (body_text) {
-                    JS_FreeCString(ctx, body_text);
-                }
-                return JS_ThrowInternalError(ctx, "response output is wedged");
-            }
-            if (result == EnqueueResult::kWouldBlock) {
-                PendingWrite pending;
-                pending.data.assign(body_bytes + fast_sent, body_bytes + body_size);
-                pending.offset = 0;
-                pending.size = pending.data.size();
-                pending.resolve = JS_UNDEFINED;
-                pending.reject = JS_UNDEFINED;
-                state->second.pending.push_back(std::move(pending));
-                g_worker->enqueue_pump(id);
-            }
-        }
-        if (body_text) {
-            JS_FreeCString(ctx, body_text);
-        }
-        TerminalPending terminal;
-        terminal.kind = TerminalPending::Kind::kResponseEnd;
-        terminal.error_flags = 0;
-        g_worker->queue_terminal_or_defer(id, terminal);
-        return JS_UNDEFINED;
+        return finish_single_shot_response(ctx, id, &state->second, body_bytes, body_size,
+                                           body_text, settle);
     }
 
     // Bounded single-shot response. The JS bootstrap calls this entry only
@@ -4957,76 +5005,38 @@ class WorkerRuntime {
             JS_ToUint32(ctx, &status, argv[1]) || id == 0 || status > 999) {
             return JS_EXCEPTION;
         }
+        bool settle = false;
+        if (argc >= 6) {
+            const int flag = JS_ToBool(ctx, argv[5]);
+            if (flag < 0) {
+                return JS_EXCEPTION;
+            }
+            settle = flag != 0;
+        }
         if (!g_worker->require_active_request(ctx, id, true, false, "js_response_final")) {
             return JS_EXCEPTION;
         }
-        std::map<uint64_t, ResponseState>::iterator state = g_worker->responses_.find(id);
+        ResponseMap::iterator state = g_worker->responses_.find(id);
         if (state == g_worker->responses_.end()) {
             return JS_UNDEFINED;
         }
         state->second.t_head_ns = uv_hrtime();
-        capsid::protocol::Frame head;
-        if (!build_fixed_response_head(ctx, id, status, argv[2], argv[3], &head)) {
+        capsid::protocol::Frame& head = g_worker->head_frame_scratch_;
+        if (!encode_response_head(ctx, id, status, argv[2], argv[3], true, true, &head)) {
             return JS_ThrowInternalError(ctx, "response head encoding failed");
         }
-        // Body: Uint8Array or string; both are encoded/read here, then
-        // pushed through the fast path with the remainder snapshotted
-        // for credit-driven advancement. Untouched string Responses arrive
-        // here as strings so the common ASCII case can use QuickJS's stable
-        // string storage directly, without a JS TextEncoder allocation and
-        // a second Uint8Array copy.
         size_t body_size = 0;
         const uint8_t* body_bytes = NULL;
         const char* body_text = NULL;
         std::vector<uint8_t> normalized_body;
-        if (!JS_IsNull(argv[4]) && !JS_IsUndefined(argv[4])) {
-            if (JS_IsString(argv[4])) {
-                body_text = JS_ToCStringLen(ctx, &body_size, argv[4]);
-                if (!body_text) {
-                    return JS_EXCEPTION;
-                }
-                body_bytes = reinterpret_cast<const uint8_t*>(body_text);
-
-                // JS_ToCStringLen preserves unmatched UTF-16 surrogate code
-                // points as their three-byte UTF-8 encodings. Fetch's
-                // TextEncoder semantics require each unmatched surrogate to
-                // become U+FFFD instead. Valid pairs have already become one
-                // four-byte scalar, so only the UTF-8 surrogate range needs
-                // rewriting; replacement is also three bytes and never
-                // changes the body length. Allocate only on this rare path.
-                const size_t surrogate_search_size = body_size > 2 ? body_size - 2 : 0;
-                size_t search_offset = 0;
-                while (search_offset < surrogate_search_size) {
-                    const void* found = std::memchr(body_bytes + search_offset, 0xed,
-                                                    surrogate_search_size - search_offset);
-                    if (!found) {
-                        break;
-                    }
-                    const size_t i = static_cast<const uint8_t*>(found) - body_bytes;
-                    if (body_bytes[i] == 0xed && body_bytes[i + 1] >= 0xa0 &&
-                        body_bytes[i + 1] <= 0xbf && body_bytes[i + 2] >= 0x80 &&
-                        body_bytes[i + 2] <= 0xbf) {
-                        if (normalized_body.empty()) {
-                            normalized_body.assign(body_bytes, body_bytes + body_size);
-                        }
-                        normalized_body[i] = 0xef;
-                        normalized_body[i + 1] = 0xbf;
-                        normalized_body[i + 2] = 0xbd;
-                    }
-                    search_offset = i + 1;
-                }
-                if (!normalized_body.empty()) {
-                    body_bytes = &normalized_body[0];
-                }
-            } else {
-                body_bytes = JS_GetUint8Array(ctx, &body_size, argv[4]);
-            }
+        if (!decode_single_shot_body(ctx, argv[4], &body_bytes, &body_size, &body_text,
+                                     &normalized_body)) {
+            return JS_EXCEPTION;
         }
         const bool fixed_body =
             body_size <= capsid::protocol::kMaxFixedBodySize && body_size <= state->second.credit;
         if (fixed_body) {
-            if (g_worker->config_.max_header_bytes < sizeof(uint32_t) ||
-                head.payload.size() > g_worker->config_.max_header_bytes - sizeof(uint32_t)) {
+            if (head.payload.size() > g_worker->config_.max_header_bytes) {
                 if (body_text) {
                     JS_FreeCString(ctx, body_text);
                 }
@@ -5034,49 +5044,27 @@ class WorkerRuntime {
             }
             head.flags = capsid::protocol::kFlagResponseFixedBody;
             const uint32_t size = static_cast<uint32_t>(body_size);
-            head.payload.insert(head.payload.begin() + 2, 4, 0);
             head.payload[2] = static_cast<uint8_t>(size);
             head.payload[3] = static_cast<uint8_t>(size >> 8);
             head.payload[4] = static_cast<uint8_t>(size >> 16);
             head.payload[5] = static_cast<uint8_t>(size >> 24);
+        } else {
+            head.payload.erase(head.payload.begin() + 2, head.payload.begin() + 6);
+            if (head.payload.size() > g_worker->config_.max_header_bytes) {
+                if (body_text) {
+                    JS_FreeCString(ctx, body_text);
+                }
+                return JS_ThrowInternalError(ctx, "response head encoding failed");
+            }
         }
-        if (!g_worker->queue_response_head(head)) {
+        if (!g_worker->queue_response_head(head, &state->second)) {
             if (body_text) {
                 JS_FreeCString(ctx, body_text);
             }
             return JS_ThrowInternalError(ctx, "response head encoding failed");
         }
-        if (body_bytes != NULL && body_size > 0) {
-            size_t fast_sent = 0;
-            const EnqueueResult result = g_worker->queue_response_bytes_fast(
-                id, body_bytes, body_size, &state->second, &fast_sent);
-            if (result == EnqueueResult::kFatal) {
-                if (body_text) {
-                    JS_FreeCString(ctx, body_text);
-                }
-                return JS_ThrowInternalError(ctx, "response output is wedged");
-            }
-            if (result == EnqueueResult::kWouldBlock) {
-                PendingWrite pending;
-                pending.data.assign(body_bytes + fast_sent, body_bytes + body_size);
-                pending.offset = 0;
-                pending.size = pending.data.size();
-                pending.resolve = JS_UNDEFINED;
-                pending.reject = JS_UNDEFINED;
-                state->second.pending.push_back(std::move(pending));
-                g_worker->enqueue_pump(id);
-            }
-        }
-        if (body_text) {
-            JS_FreeCString(ctx, body_text);
-        }
-        // End terminal: waits for the body to drain, then sends the
-        // ResponseEnd frame (existing machinery).
-        TerminalPending terminal;
-        terminal.kind = TerminalPending::Kind::kResponseEnd;
-        terminal.error_flags = 0;
-        g_worker->queue_terminal_or_defer(id, terminal);
-        return JS_UNDEFINED;
+        return finish_single_shot_response(ctx, id, &state->second, body_bytes, body_size,
+                                           body_text, settle);
     }
 
     static JSValue js_response_write(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -5088,7 +5076,7 @@ class WorkerRuntime {
         if (!g_worker->require_active_request(ctx, id, true, false, "js_response_write")) {
             return JS_EXCEPTION;
         }
-        std::map<uint64_t, ResponseState>::iterator state = g_worker->responses_.find(id);
+        ResponseMap::iterator state = g_worker->responses_.find(id);
         if (state == g_worker->responses_.end()) {
             return JS_UNDEFINED;
         }
@@ -5099,48 +5087,37 @@ class WorkerRuntime {
         if (size == 0) {
             return JS_UNDEFINED;
         }
+        return finish_response_write(ctx, id, &state->second, bytes, size);
+    }
 
-        // Contract #3: pressure must never raise RangeError. The blocked
-        // path returns a promise that stays pending while the bytes await
-        // credit / wire space and resolves once the whole chunk has been
-        // accepted. The unblocked path returns undefined: the chunk was
-        // accepted synchronously, so the bootstrap skips the promise
-        // capability, the resolve call and the await hop entirely
-        // (E13a — the common case pays no promise machinery per chunk).
-        size_t fast_sent = 0;
-        const EnqueueResult result =
-            g_worker->queue_response_bytes_fast(id, bytes, size, &state->second, &fast_sent);
-        if (result == EnqueueResult::kQueued) {
+    static JSValue js_response_write_buffer(JSContext* ctx, JSValueConst, int argc,
+                                            JSValueConst* argv) {
+        uint64_t id = 0;
+        if (!g_worker || argc < 4 || JS_ToBigUint64(ctx, &id, argv[0]) || id == 0) {
+            return JS_EXCEPTION;
+        }
+        if (!g_worker->require_active_request(ctx, id, true, false, "js_response_write")) {
+            return JS_EXCEPTION;
+        }
+        ResponseMap::iterator state = g_worker->responses_.find(id);
+        if (state == g_worker->responses_.end()) {
             return JS_UNDEFINED;
         }
-        if (result == EnqueueResult::kFatal) {
-            return JS_ThrowInternalError(ctx, "response output is wedged");
+        size_t buf_size = 0;
+        uint8_t* buf = JS_GetArrayBuffer(ctx, &buf_size, argv[1]);
+        uint64_t offset = 0;
+        uint64_t byte_length = 0;
+        if (!buf || JS_ToIndex(ctx, &offset, argv[2]) || JS_ToIndex(ctx, &byte_length, argv[3])) {
+            return JS_EXCEPTION;
         }
-        // kWouldBlock: the promise capability is created only here, then
-        // snapshot the bytes in the JS heap (design §3.2) so the
-        // application mutating the source array while the promise is
-        // pending cannot change the response bytes; the snapshot also
-        // keeps the data alive without GC pressure on the caller's
-        // buffer. The pump advances segments from the snapshot.
-        // Snapshot only the unsent remainder (call-time copy): the
-        // fast path already accepted the first `fast_sent` bytes into
-        // the wire queue, and copying the rest once is cheaper than a
-        // JS API call per pump advance.
-        JSValue resolving[2];
-        JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-        if (JS_IsException(promise)) {
-            return promise;
+        if (offset > buf_size || byte_length > buf_size - offset) {
+            return JS_ThrowRangeError(ctx, "slice out of range");
         }
-        PendingWrite pending;
-        pending.data.assign(bytes + fast_sent, bytes + size);
-        pending.offset = 0;
-        pending.size = pending.data.size();
-        pending.resolve = resolving[0];
-        pending.reject = resolving[1];
-        state->second.pending.push_back(std::move(pending));
-        g_worker->enqueue_pump(id);
-        g_worker->pump_one(id);
-        return promise;
+        if (byte_length == 0) {
+            return JS_UNDEFINED;
+        }
+        return finish_response_write(ctx, id, &state->second, buf + static_cast<size_t>(offset),
+                                     static_cast<size_t>(byte_length));
     }
 
     static JSValue js_response_end(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -5148,10 +5125,18 @@ class WorkerRuntime {
         if (!g_worker || argc < 1 || JS_ToBigUint64(ctx, &id, argv[0]) || id == 0) {
             return JS_EXCEPTION;
         }
+        bool settle = false;
+        if (argc >= 2) {
+            const int flag = JS_ToBool(ctx, argv[1]);
+            if (flag < 0) {
+                return JS_EXCEPTION;
+            }
+            settle = flag != 0;
+        }
         if (!g_worker->require_active_request(ctx, id, true, false, "js_response_end")) {
             return JS_EXCEPTION;
         }
-        std::map<uint64_t, ResponseState>::iterator state = g_worker->responses_.find(id);
+        ResponseMap::iterator state = g_worker->responses_.find(id);
         if (state == g_worker->responses_.end()) {
             return JS_UNDEFINED;
         }
@@ -5163,6 +5148,9 @@ class WorkerRuntime {
         terminal.kind = TerminalPending::Kind::kResponseEnd;
         terminal.error_flags = 0;
         g_worker->queue_terminal_or_defer(id, terminal);
+        if (settle && !g_worker->settle_request(id)) {
+            return JS_ThrowInternalError(ctx, "cannot settle unknown request");
+        }
         return JS_UNDEFINED;
     }
 
@@ -5174,7 +5162,7 @@ class WorkerRuntime {
         if (!g_worker->require_active_request(ctx, id, true, false, "js_response_error")) {
             return JS_EXCEPTION;
         }
-        std::map<uint64_t, ResponseState>::iterator state = g_worker->responses_.find(id);
+        ResponseMap::iterator state = g_worker->responses_.find(id);
         if (state == g_worker->responses_.end()) {
             return JS_UNDEFINED;
         }
@@ -5367,6 +5355,10 @@ class WorkerRuntime {
             return false;
         }
         config_ = startup_state_.config();
+        std::string injected_fail_end;
+        fail_request_end_bridge_ = config_.capability_policy.env_value(
+                                       "CAPSID_TEST_FAIL_REQUEST_END_BRIDGE", &injected_fail_end) &&
+                                   injected_fail_end == "1";
         if (frame.type == capsid::protocol::kHello &&
             config_.protocol_version == capsid::protocol::kVersionV4) {
             capsid::ChannelRegistry::Options options;
@@ -8248,6 +8240,52 @@ class WorkerRuntime {
         return queue_output(response);
     }
 
+    static bool is_canonical_header_token_char(unsigned char c) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            return true;
+        }
+        switch (c) {
+        case '!':
+        case '#':
+        case '$':
+        case '%':
+        case '&':
+        case '\'':
+        case '*':
+        case '+':
+        case '-':
+        case '.':
+        case '^':
+        case '_':
+        case '`':
+        case '|':
+        case '~':
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static bool
+    headers_are_canonical_ascii(const std::vector<capsid::WorkerRequestHeader>& headers) {
+        for (const auto& header : headers) {
+            if (header.name.empty()) {
+                return false;
+            }
+            for (const unsigned char c : header.name) {
+                if (!is_canonical_header_token_char(c)) {
+                    return false;
+                }
+            }
+            for (const unsigned char c : header.value) {
+                if (!(c == '\t' || (c >= 0x20 && c <= 0x7e))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     bool begin_request(const capsid::protocol::Frame& frame) {
         if (poisoned_) {
             // §7.4: reject new RequestHead frames. The error terminal plus
@@ -8267,16 +8305,55 @@ class WorkerRuntime {
             return false;
         }
 
+        const bool canonical_ascii = headers_are_canonical_ascii(decoded.headers);
         JSValue headers = JS_NewArray(ctx_);
         for (size_t i = 0; i < decoded.headers.size(); ++i) {
-            JSValue pair = JS_NewArray(ctx_);
-            JS_SetPropertyUint32(ctx_, pair, 0,
-                                 JS_NewStringLen(ctx_, decoded.headers[i].name.data(),
-                                                 decoded.headers[i].name.size()));
-            JS_SetPropertyUint32(ctx_, pair, 1,
-                                 JS_NewStringLen(ctx_, decoded.headers[i].value.data(),
-                                                 decoded.headers[i].value.size()));
-            JS_SetPropertyUint32(ctx_, headers, static_cast<uint32_t>(i), pair);
+            const std::string& raw_name = decoded.headers[i].name;
+            const std::string& raw_value = decoded.headers[i].value;
+            JSValue name_val;
+            JSValue val_val;
+            if (canonical_ascii) {
+                bool has_upper = false;
+                for (const char ch : raw_name) {
+                    if (ch >= 'A' && ch <= 'Z') {
+                        has_upper = true;
+                        break;
+                    }
+                }
+                if (!has_upper) {
+                    name_val = JS_NewStringLen(ctx_, raw_name.data(), raw_name.size());
+                } else if (raw_name.size() <= 128) {
+                    char lower_buf[128];
+                    for (size_t k = 0; k < raw_name.size(); ++k) {
+                        const char ch = raw_name[k];
+                        lower_buf[k] =
+                            (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch;
+                    }
+                    name_val = JS_NewStringLen(ctx_, lower_buf, raw_name.size());
+                } else {
+                    std::string lower(raw_name);
+                    for (char& ch : lower) {
+                        if (ch >= 'A' && ch <= 'Z') {
+                            ch = static_cast<char>(ch - 'A' + 'a');
+                        }
+                    }
+                    name_val = JS_NewStringLen(ctx_, lower.data(), lower.size());
+                }
+                size_t begin = 0;
+                size_t end = raw_value.size();
+                while (begin < end && (raw_value[begin] == ' ' || raw_value[begin] == '\t')) {
+                    ++begin;
+                }
+                while (end > begin && (raw_value[end - 1] == ' ' || raw_value[end - 1] == '\t')) {
+                    --end;
+                }
+                val_val = JS_NewStringLen(ctx_, raw_value.data() + begin, end - begin);
+            } else {
+                name_val = JS_NewStringLen(ctx_, raw_name.data(), raw_name.size());
+                val_val = JS_NewStringLen(ctx_, raw_value.data(), raw_value.size());
+            }
+            JS_SetPropertyUint32(ctx_, headers, static_cast<uint32_t>(i * 2), name_val);
+            JS_SetPropertyUint32(ctx_, headers, static_cast<uint32_t>(i * 2 + 1), val_val);
         }
 
         ResponseState response;
@@ -8302,7 +8379,9 @@ class WorkerRuntime {
         // must capture the token. Never defer this to a JS-side enter.
         RequestToken* token =
             new RequestToken(next_token_generation_++, frame.request_id, response.deadline_ns);
+        token->registered = true;
         token_registry_[token->generation] = token;
+        http_tokens_by_request_id_[token->request_id] = token;
         // Registry owner ref, balanced by the final release_token; keeps
         // retained_refs_ == sum(refs) over live tokens (reaches zero on
         // a clean worker exit).
@@ -8316,49 +8395,30 @@ class WorkerRuntime {
         retain_token(token);
         responses_[frame.request_id] = response;
         pump_order_.push_back(frame.request_id);
-        JSValue arguments[6] = {
+        const int flags = (decoded.bodyless ? 1 : 0) | (canonical_ascii ? 2 : 0);
+        JSValue arguments[7] = {
             JS_DupValue(ctx_, application_handler_),
             JS_DupValue(ctx_, application_handler_this_),
             JS_NewBigUint64(ctx_, frame.request_id),
             JS_NewStringLen(ctx_, decoded.method.data(), decoded.method.size()),
             JS_NewStringLen(ctx_, decoded.url.data(), decoded.url.size()),
             headers,
+            JS_NewInt32(ctx_, flags),
         };
         RequestToken* saved_token = current_token_;
         current_token_ = token;
-        const bool called = call_bridge(begin_request_, 6, arguments);
+        const bool called = call_bridge(begin_request_, 7, arguments);
         current_token_ = saved_token;
-        for (size_t i = 0; i < 6; ++i) {
+        for (size_t i = 0; i < 7; ++i) {
             JS_FreeValue(ctx_, arguments[i]);
         }
         if (called && !decoded.bodyless) {
             // Bodyless requests get no request-direction window update.
             send_window_update(frame.request_id, config_.initial_window);
         }
-        if (called && decoded.bodyless) {
-            // Notify the JS side that the request direction ended
-            // immediately, matching the request-end frame semantics. A
-            // bridge failure propagates exactly like the standalone
-            // request-end frame path: fail closed.
-            //
-            // CAPSID_TEST_FAIL_REQUEST_END_BRIDGE (test-only injection via
-            // the host-provided environment snapshot): the app layer cannot
-            // make the request-end bridge fail — tjs:internal/* is
-            // capability-forbidden for apps and the bootstrap requestEnd
-            // early-returns for bodyless requests — so the frozen RED
-            // (worker_bodyless_end_failure) injects the failure through the
-            // snapshot and asserts the fused begin propagates it.
-            std::string injected;
-            // Presence alone must not trigger: only the exact value "1"
-            // arms the injection, so a stray snapshot entry cannot flip
-            // production behavior.
-            const bool fail_end = config_.capability_policy.env_value(
-                                      "CAPSID_TEST_FAIL_REQUEST_END_BRIDGE", &injected) &&
-                                  injected == "1";
-            const bool end_ok = fail_end ? false : call_id_bridge(request_end_, frame.request_id);
-            if (!end_ok) {
-                return false;
-            }
+        if (called && decoded.bodyless && fail_request_end_bridge_) {
+            // Preserve test injection for worker_bodyless_end_failure.
+            return false;
         }
         return called;
     }
@@ -8367,7 +8427,7 @@ class WorkerRuntime {
         if (frame.request_id == 0) {
             return false;
         }
-        std::map<uint64_t, ResponseState>::iterator state = responses_.find(frame.request_id);
+        ResponseMap::iterator state = responses_.find(frame.request_id);
         if (state == responses_.end()) {
             // A late request-body frame for a request whose response already
             // ended is an idempotent no-op (see remember_terminal); ids that
@@ -8398,7 +8458,7 @@ class WorkerRuntime {
         if (id == 0) {
             return false;
         }
-        std::map<uint64_t, ResponseState>::iterator state = responses_.find(id);
+        ResponseMap::iterator state = responses_.find(id);
         if (state == responses_.end()) {
             // A late request-end for a request whose response already ended
             // is an idempotent no-op (see remember_terminal); ids that never
@@ -8437,7 +8497,7 @@ class WorkerRuntime {
         }
         // §5.2: cancel/deadline aborts every binding call of the request.
         cancel_binding_calls(id);
-        std::map<uint64_t, ResponseState>::iterator state = responses_.find(id);
+        ResponseMap::iterator state = responses_.find(id);
         if (state == responses_.end()) {
             return true;
         }
@@ -8486,7 +8546,7 @@ class WorkerRuntime {
     }
 
     bool add_response_credit(const capsid::protocol::Frame& frame) {
-        std::map<uint64_t, ResponseState>::iterator state_it = responses_.find(frame.request_id);
+        ResponseMap::iterator state_it = responses_.find(frame.request_id);
         if (frame.payload.size() != sizeof(uint32_t)) {
             return false;
         }
@@ -8550,8 +8610,7 @@ class WorkerRuntime {
     void expire_requests() {
         const uint64_t now = uv_hrtime();
         std::vector<uint64_t> expired;
-        for (std::map<uint64_t, ResponseState>::const_iterator it = responses_.begin();
-             it != responses_.end(); ++it) {
+        for (ResponseMap::const_iterator it = responses_.begin(); it != responses_.end(); ++it) {
             // kOpen and kEndPending both keep a live deadline: deferring
             // a ResponseEnd must not silently cancel the timeout. Once a
             // timeout or error moved the request to kFailurePending the
@@ -8565,7 +8624,7 @@ class WorkerRuntime {
         }
         for (size_t index = 0; index < expired.size(); ++index) {
             const uint64_t id = expired[index];
-            std::map<uint64_t, ResponseState>::iterator state = responses_.find(id);
+            ResponseMap::iterator state = responses_.find(id);
             if (state == responses_.end()) {
                 continue;
             }
@@ -8792,7 +8851,7 @@ class WorkerRuntime {
     // immediately when possible; otherwise the terminal is deferred and
     // the pump completes it (contract #5/#6).
     void queue_terminal_or_defer(uint64_t id, const TerminalPending& terminal) {
-        std::map<uint64_t, ResponseState>::iterator state_it = responses_.find(id);
+        ResponseMap::iterator state_it = responses_.find(id);
         if (state_it == responses_.end()) {
             return;
         }
@@ -8823,7 +8882,7 @@ class WorkerRuntime {
     // credit-driven progress, which is per-request O(1) — a global pass
     // per credit frame would multiply the cost by the concurrency.
     void pump_one(uint64_t id) {
-        std::map<uint64_t, ResponseState>::iterator it = responses_.find(id);
+        ResponseMap::iterator it = responses_.find(id);
         if (it == responses_.end()) {
             return;
         }
@@ -8867,7 +8926,7 @@ class WorkerRuntime {
             }
             const uint64_t id = pump_order_.front();
             pump_order_.pop_front();
-            std::map<uint64_t, ResponseState>::iterator it = responses_.find(id);
+            ResponseMap::iterator it = responses_.find(id);
             if (it == responses_.end()) {
                 // Completed/erased since enqueue: drop from the rotation.
                 continue;
@@ -8896,7 +8955,7 @@ class WorkerRuntime {
             pump_order_.push_back(id);
         }
         for (std::vector<uint64_t>::const_iterator id = done.begin(); id != done.end(); ++id) {
-            std::map<uint64_t, ResponseState>::iterator it = responses_.find(*id);
+            ResponseMap::iterator it = responses_.find(*id);
             if (it != responses_.end()) {
                 erase_response(it);
                 remember_terminal(*id);
@@ -8916,7 +8975,7 @@ class WorkerRuntime {
 
     void send_error(uint64_t id, const std::string& message, uint32_t flags = 0) {
         if (id != 0) {
-            std::map<uint64_t, ResponseState>::iterator state_it = responses_.find(id);
+            ResponseMap::iterator state_it = responses_.find(id);
             if (state_it != responses_.end()) {
                 // Discard the unsent body, then guarantee the error
                 // terminal (defer when the queue is full).
@@ -8960,12 +9019,20 @@ class WorkerRuntime {
         queue_output(frame);
     }
 
-    bool queue_response_head(const capsid::protocol::Frame& frame) {
-        const auto found = responses_.find(frame.request_id);
-        if (found == responses_.end() || found->second.head_pending ||
-            frame.payload.size() > config_.max_queued_bytes ||
-            capsid::protocol::kHeaderSize > config_.max_queued_bytes - frame.payload.size())
+    bool queue_response_head(const capsid::protocol::Frame& frame,
+                             ResponseState* direct_state = NULL) {
+        ResponseState* target_state = direct_state;
+        if (!target_state) {
+            const auto found = responses_.find(frame.request_id);
+            if (found == responses_.end()) {
+                return false;
+            }
+            target_state = &found->second;
+        }
+        if (target_state->head_pending || frame.payload.size() > config_.max_queued_bytes ||
+            capsid::protocol::kHeaderSize > config_.max_queued_bytes - frame.payload.size()) {
             return false;
+        }
         if (has_output_capacity(capsid::protocol::kHeaderSize + frame.payload.size()))
             return queue_output(frame);
         if (channels_) {
@@ -8981,8 +9048,8 @@ class WorkerRuntime {
             if (!error.empty())
                 return false;
         }
-        found->second.pending_head = frame;
-        found->second.head_pending = true;
+        target_state->pending_head = frame;
+        target_state->head_pending = true;
         enqueue_pump(frame.request_id);
         return true;
     }
@@ -8991,9 +9058,11 @@ class WorkerRuntime {
         if (channels_ && frame.type == capsid::protocol::kResponseHead &&
             !(frame.flags & capsid::protocol::kFlagResponseUpgrade)) {
             std::string error;
+            if (frame.version != 0) {
+                return channels_->transmit(frame, raw_output_writer, this, &error);
+            }
             capsid::protocol::Frame explicit_frame = frame;
-            if (!explicit_frame.version)
-                explicit_frame.version = config_.protocol_version;
+            explicit_frame.version = config_.protocol_version;
             return channels_->transmit(explicit_frame, raw_output_writer, this, &error);
         }
         return queue_output_bytes(frame.type, frame.flags, frame.request_id,
@@ -9330,7 +9399,9 @@ class WorkerRuntime {
     // True while TJS_NewRuntimeOptions bootstraps the Binding Runtime, so
     // the shared bootstrap() switches to the bridge-less native shape.
     bool bootstrapping_binding_runtime_;
-    std::map<uint64_t, ResponseState> responses_;
+    bool fail_request_end_bridge_ = false;
+    ResponseMap responses_;
+    capsid::protocol::Frame head_frame_scratch_;
     // Round-robin rotation order for pump_response_output (design §3.4):
     // a request is enqueued on begin and rotated to the back after each
     // pass, so the pump cursor persists across passes.
@@ -9351,6 +9422,7 @@ class WorkerRuntime {
     JSValue microtask_error_reporter_;
     uint64_t next_token_generation_;
     std::map<uint64_t, RequestToken*> token_registry_;
+    std::unordered_map<uint64_t, RequestToken*> http_tokens_by_request_id_;
     RequestToken* retired_connection_tokens_ = nullptr;
     RequestToken* current_token_;
     // §7.4 poison state machine. Idempotent: the first reason wins

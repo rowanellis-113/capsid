@@ -1,26 +1,9 @@
 const NativeURLSearchParams = globalThis.URLSearchParams;
 const nativePrototype = NativeURLSearchParams.prototype;
+const strToWellFormed = String.prototype.toWellFormed;
 
 function toUSVString(value) {
-  const string = String(value);
-
-  return string.replace(/[\uD800-\uDFFF]/g, (codeUnit, index) => {
-    const code = codeUnit.charCodeAt(0);
-
-    if (code <= 0xdbff) {
-      const next = string.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        return codeUnit;
-      }
-    } else {
-      const previous = string.charCodeAt(index - 1);
-      if (previous >= 0xd800 && previous <= 0xdbff) {
-        return codeUnit;
-      }
-    }
-
-    return '\uFFFD';
-  });
+  return strToWellFormed.call(typeof value === 'string' ? value : String(value));
 }
 
 function normalizeSequence(init) {

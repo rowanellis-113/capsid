@@ -133,7 +133,13 @@ WorkerExecutor::WorkerExecutor()
     : id_([] {
           static std::atomic<std::uint64_t> g_next_executor_id{1};
           return g_next_executor_id.fetch_add(1, std::memory_order_relaxed);
-      }()) {}
+      }()) {
+    canceled_.reserve(128);
+    retire_pending_.reserve(128);
+    inflight_ids_.reserve(128);
+    batch_events_.reserve(64);
+    batch_canceled_ids_.reserve(32);
+}
 void WorkerExecutor::set_channel_budget(std::shared_ptr<ServiceChannelBudget> budget) {
     if (started_)
         throw std::logic_error("channel budget must be set before worker startup");
@@ -273,7 +279,8 @@ bool WorkerExecutor::submit_command(Command command, bool from_dispatch) {
                                 hw, size, std::memory_order_relaxed)) {
         }
     }
-    cv_.notify_one();
+    if (!ready_)
+        cv_.notify_one();
     return true;
 }
 
@@ -321,7 +328,8 @@ bool WorkerExecutor::try_submit_channel(Command command) {
     channel_command_bytes_ += charge;
     if (was_empty)
         source_.wake();
-    cv_.notify_one();
+    if (!ready_)
+        cv_.notify_one();
     return true;
 }
 
@@ -338,6 +346,7 @@ void WorkerExecutor::submit_probe(const std::string& url) {
         if (exit_event_queued_ || destroying_ || exited_)
             return;
         probe_in_flight_ = true;
+        probe_active_.store(true, std::memory_order_release);
         probe_complete_ = false;
     }
     submit(std::move(probe));
@@ -390,6 +399,7 @@ void WorkerExecutor::retire_terminal_request(std::uint64_t request_id) {
                                    }),
                     commands_.end());
     retire_pending_.insert(request_id);
+    has_retire_pending_.store(true, std::memory_order_release);
 }
 
 void WorkerExecutor::set_event_notifier(EventNotifier notifier) { notifier_ = std::move(notifier); }
@@ -462,6 +472,7 @@ capsid::WorkerExitStatus WorkerExecutor::exit_status() const {
 }
 
 void WorkerExecutor::worker_thread_main() {
+    bool initial_notify_sent = false;
     for (;;) {
         // Drain command wake bytes before swapping: a command pushed before
         // this drain is either already in the queue (the swap picks it up)
@@ -469,20 +480,42 @@ void WorkerExecutor::worker_thread_main() {
         // and wakes the poll below). Draining first keeps both orderings
         // safe.
         source_.drain_wake_bytes();
+        std::optional<SteadyClock::time_point> until;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             std::deque<Command> local;
             local.swap(commands_);
-            if (shutdown_deadline_.has_value() && SteadyClock::now() >= *shutdown_deadline_) {
+            until = shutdown_deadline_;
+            if (until.has_value() && SteadyClock::now() >= *until) {
                 if (worker_) {
                     capsid_worker_terminate(worker_);
                 }
             }
             lock.unlock();
+            size_t total_charge = 0;
+            bool notify_after_batch = !initial_notify_sent;
+            initial_notify_sent = true;
+            bool saw_shutdown = false;
             while (!local.empty()) {
                 Command command = std::move(local.front());
                 local.pop_front();
+                const CommandType command_type = command.type;
                 const size_t charge = command.channel_charge;
+                if (charge > 0 || command_type == CommandType::kProbeRequest ||
+                    command_type == CommandType::kProbeCancel ||
+                    command_type == CommandType::kChannelData ||
+                    command_type == CommandType::kChannelGrant ||
+                    command_type == CommandType::kChannelClose ||
+                    command_type == CommandType::kChannelCancel ||
+                    command_type == CommandType::kChannelConfirm ||
+                    command_type == CommandType::kDialAccept ||
+                    command_type == CommandType::kDialReject) {
+                    notify_after_batch = true;
+                }
+                if (command_type == CommandType::kShutdown) {
+                    saw_shutdown = true;
+                    notify_after_batch = true;
+                }
                 command_would_block_ = false;
                 if (!execute_command(std::move(command))) {
                     // A closed or wedged worker: fail every pending request
@@ -494,12 +527,13 @@ void WorkerExecutor::worker_thread_main() {
                     std::unique_lock<std::mutex> retry_lock(mutex_);
                     commands_.insert(commands_.begin() + 1, std::make_move_iterator(local.begin()),
                                      std::make_move_iterator(local.end()));
+                    if (total_charge > 0) {
+                        channel_command_bytes_ -= total_charge;
+                        total_charge = 0;
+                    }
                     break;
                 }
-                if (charge) {
-                    std::unique_lock<std::mutex> charge_lock(mutex_);
-                    channel_command_bytes_ -= charge;
-                }
+                total_charge += charge;
             }
             // Batch flush: every queued frame reaches the worker in one
             // write syscall instead of one per command.
@@ -507,23 +541,36 @@ void WorkerExecutor::worker_thread_main() {
                 queue_worker_exit_event();
                 goto worker_exit;
             }
-            if (notifier_)
-                notifier_(); // channel capacity may have returned without a byte event
+            if (notify_after_batch && notifier_)
+                notifier_(); // probes and channel commands can complete without worker events
             // The owner has observed these Runtime-terminal requests and
             // promised not to submit another frame for them. Clearing after
             // the local batch also covers stale commands that were swapped
             // out before the acknowledgement.
-            {
-                std::unique_lock<std::mutex> retire_lock(mutex_);
-                for (const std::uint64_t request_id : retire_pending_) {
-                    canceled_.erase(request_id);
+            if (total_charge > 0 || saw_shutdown ||
+                has_retire_pending_.load(std::memory_order_acquire)) {
+                std::unique_lock<std::mutex> post_lock(mutex_);
+                if (total_charge > 0) {
+                    channel_command_bytes_ -= total_charge;
                 }
-                retire_pending_.clear();
+                if (!retire_pending_.empty()) {
+                    for (const std::uint64_t request_id : retire_pending_) {
+                        canceled_.erase(request_id);
+                    }
+                    retire_pending_.clear();
+                }
+                has_retire_pending_.store(false, std::memory_order_release);
+                if (saw_shutdown) {
+                    until = shutdown_deadline_;
+                }
             }
         }
 
         // Drain every pending event; next_event returns WOULD_BLOCK when the
-        // IPC channel is idle.
+        // IPC channel is idle. Batch events across the full drain loop so the
+        // owner wakes and acquires mutex_ once per batch instead of once per frame.
+        batching_events_ = true;
+        batch_saw_activity_ = false;
         bool worker_exited = false;
         for (;;) {
             // struct_size is the size-negotiation contract of the Runtime
@@ -543,10 +590,14 @@ void WorkerExecutor::worker_thread_main() {
                 break;
             }
             // The IPC channel is closed or corrupt: the worker is gone.
+            batching_events_ = false;
+            flush_event_batch();
             queue_worker_exit_event();
             worker_exited = true;
             break;
         }
+        batching_events_ = false;
+        flush_event_batch();
         if (worker_exited) {
             goto worker_exit;
         }
@@ -555,13 +606,6 @@ void WorkerExecutor::worker_thread_main() {
         // arrives, or the shutdown deadline passes. The owner thread's wake
         // byte keeps command pickup latency at poll latency instead of a
         // polling period; the worker thread never busy-polls.
-        std::optional<SteadyClock::time_point> until;
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            if (shutdown_deadline_.has_value()) {
-                until = shutdown_deadline_;
-            }
-        }
         const bool waited = ipc_write_pending_ ? source_.wait_writable_or_wake(until) !=
                                                      WorkerEventSource::WakeResult::kError
                                                : source_.wait(until);
@@ -593,6 +637,7 @@ worker_exit:
         // sees in_flight=false/complete=false and treats the probe as
         // failed (the pool owns the instability decision).
         probe_in_flight_ = false;
+        probe_active_.store(false, std::memory_order_release);
         probe_complete_ = false;
     }
     source_.set_worker(nullptr);
@@ -946,6 +991,7 @@ bool WorkerExecutor::execute_command(Command command) {
             std::unique_lock<std::mutex> lock(mutex_);
             probe_id_ = command.probe_id;
             probe_in_flight_ = true;
+            probe_active_.store(true, std::memory_order_release);
             probe_complete_ = false;
             probe_status_ = 0;
             probe_body_bytes_ = 0;
@@ -957,6 +1003,7 @@ bool WorkerExecutor::execute_command(Command command) {
             // not a data-plane request and the listener would reject it.
             std::unique_lock<std::mutex> lock(mutex_);
             probe_in_flight_ = false;
+            probe_active_.store(false, std::memory_order_release);
             lock.unlock();
             if (result == CAPSID_CLOSED) {
                 return false; // the worker is gone; the exit path reaps it
@@ -970,6 +1017,7 @@ bool WorkerExecutor::execute_command(Command command) {
         std::unique_lock<std::mutex> lock(mutex_);
         const bool outstanding = probe_in_flight_;
         probe_in_flight_ = false;
+        probe_active_.store(false, std::memory_order_release);
         probe_complete_ = false;
         const std::uint64_t probe_id = probe_id_;
         lock.unlock();
@@ -1036,35 +1084,46 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
     // worker thread. The probe id is from the reserved high range, so no
     // data-plane event can match it; a terminal verdict or the fixed body
     // cap completes the probe without a data-plane event.
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (probe_in_flight_ && event.request_id == probe_id_) {
-            switch (event.type) {
-            case CAPSID_EVENT_RESPONSE_HEAD:
-                probe_status_ = static_cast<std::int32_t>(event.status);
-                break;
-            case CAPSID_EVENT_RESPONSE_BODY:
-                probe_body_bytes_ += event.payload.size;
-                if (probe_body_bytes_ > kProbeResponseBodyCap) {
-                    // §7.4: the fixed small response cap is a protocol
-                    // failure; the verdict fails and the supervisor
-                    // cancels the outstanding request.
+    if (probe_active_.load(std::memory_order_acquire)) {
+        bool probe_event = false;
+        bool notify_probe_complete = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (probe_in_flight_ && event.request_id == probe_id_) {
+                probe_event = true;
+                const bool was_complete = probe_complete_;
+                switch (event.type) {
+                case CAPSID_EVENT_RESPONSE_HEAD:
+                    probe_status_ = static_cast<std::int32_t>(event.status);
+                    break;
+                case CAPSID_EVENT_RESPONSE_BODY:
+                    probe_body_bytes_ += event.payload.size;
+                    if (probe_body_bytes_ > kProbeResponseBodyCap) {
+                        // §7.4: the fixed small response cap is a protocol
+                        // failure; the verdict fails and the supervisor
+                        // cancels the outstanding request.
+                        probe_complete_ = true;
+                        probe_healthy_ = false;
+                    }
+                    break;
+                case CAPSID_EVENT_RESPONSE_END:
+                    probe_complete_ = true;
+                    probe_healthy_ = probe_status_ >= 200 && probe_status_ <= 299 &&
+                                     probe_body_bytes_ <= kProbeResponseBodyCap;
+                    break;
+                case CAPSID_EVENT_REQUEST_TIMEOUT:
                     probe_complete_ = true;
                     probe_healthy_ = false;
+                    break;
+                default:
+                    break;
                 }
-                break;
-            case CAPSID_EVENT_RESPONSE_END:
-                probe_complete_ = true;
-                probe_healthy_ = probe_status_ >= 200 && probe_status_ <= 299 &&
-                                 probe_body_bytes_ <= kProbeResponseBodyCap;
-                break;
-            case CAPSID_EVENT_REQUEST_TIMEOUT:
-                probe_complete_ = true;
-                probe_healthy_ = false;
-                break;
-            default:
-                break;
+                notify_probe_complete = !was_complete && probe_complete_;
             }
+        }
+        if (probe_event) {
+            if (notify_probe_complete && notifier_)
+                notifier_();
             return true;
         }
     }
@@ -1136,7 +1195,9 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         worker_event.channel_id = worker_event.upgrade ? event.credit : 0;
         if (worker_event.upgrade)
             mark_canceled(event.request_id);
-        refresh_channels();
+        if (worker_event.upgrade || !live_channel_ids_.empty() || !outbound_dial_ids_.empty()) {
+            refresh_channels();
+        }
         worker_event.fixed_body = (event.flags & CAPSID_RESPONSE_HEAD_FLAG_FIXED_BODY) != 0;
         worker_event.fixed_body_size = worker_event.fixed_body ? event.credit : 0;
         std::size_t count = 0;
@@ -1298,12 +1359,20 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         }
 #endif
         refresh_channels();
-        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
+        if (batching_events_) {
+            batch_saw_activity_ = true;
+        } else {
+            last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
+        }
         queue_worker_event(std::move(output));
         return true;
     }
     case CAPSID_EVENT_RESPONSE_BODY: {
-        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
+        if (batching_events_) {
+            batch_saw_activity_ = true;
+        } else {
+            last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
+        }
         WorkerEvent worker_event;
         worker_event.type = WorkerEvent::Type::kResponseBody;
         worker_event.request_id = event.request_id;
@@ -1312,7 +1381,11 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         return true;
     }
     case CAPSID_EVENT_RESPONSE_END: {
-        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
+        if (batching_events_) {
+            batch_saw_activity_ = true;
+        } else {
+            last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
+        }
         // The Runtime erased this request when it sent RESPONSE_END, so any
         // command still queued for it (a response-credit grant most likely)
         // would be rejected by the Runtime ABI as an invalid frame and logged
@@ -1322,7 +1395,11 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         // owner's kResponseEnd handler acknowledges the terminal event. The
         // worker thread removes the tombstone only after its current command
         // batch has drained. The inflight slot is released exactly once.
-        mark_canceled(event.request_id);
+        if (batching_events_) {
+            batch_canceled_ids_.push_back(event.request_id);
+        } else {
+            mark_canceled(event.request_id);
+        }
         WorkerEvent worker_event;
         worker_event.type = WorkerEvent::Type::kResponseEnd;
         worker_event.request_id = event.request_id;
@@ -1355,7 +1432,11 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         // event is delivered: the worker has already erased the request, so
         // any late command for it must be dropped before it reaches the IPC
         // channel or the worker rejects it as an invalid frame.
-        mark_canceled(event.request_id);
+        if (batching_events_) {
+            batch_canceled_ids_.push_back(event.request_id);
+        } else {
+            mark_canceled(event.request_id);
+        }
         WorkerEvent worker_event;
         worker_event.type = WorkerEvent::Type::kRequestTimeout;
         worker_event.request_id = event.request_id;
@@ -1363,6 +1444,10 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         return true;
     }
     case CAPSID_EVENT_EXIT:
+        if (batching_events_) {
+            batching_events_ = false;
+            flush_event_batch();
+        }
         queue_worker_exit_event();
         return false;
     default:
@@ -1380,6 +1465,10 @@ void WorkerExecutor::queue_worker_event(WorkerEvent event) {
         std::unique_lock<std::mutex> lock(mutex_);
         channel_event_bytes_ -= event.channel_charge;
 #endif
+        return;
+    }
+    if (batching_events_) {
+        batch_events_.push_back(std::move(event));
         return;
     }
     bool need_notify = false;
@@ -1413,6 +1502,61 @@ void WorkerExecutor::queue_worker_event(WorkerEvent event) {
     // Only notify when the queue was empty — the owner drains everything
     // in one call. New events that arrive while the drain is running will
     // see the (now-empty) queue and schedule their own notify.
+    if (need_notify && notifier_) {
+        notifier_();
+    }
+}
+
+void WorkerExecutor::flush_event_batch() {
+    if (batch_saw_activity_) {
+        last_active_at_ms_.store(steady_now_ms(), std::memory_order_release);
+        batch_saw_activity_ = false;
+    }
+    if (batch_events_.empty() && batch_canceled_ids_.empty()) {
+        return;
+    }
+    bool need_notify = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (const std::uint64_t request_id : batch_canceled_ids_) {
+            canceled_.insert(request_id);
+            if (inflight_ids_.erase(request_id) == 1) {
+                inflight_.fetch_sub(1, std::memory_order_acq_rel);
+                request_claims_.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }
+        batch_canceled_ids_.clear();
+        for (WorkerEvent& event : batch_events_) {
+            if (event.type == WorkerEvent::Type::kChannelCredit) {
+                bool coalesced = false;
+                for (auto& queued : events_) {
+                    if (queued.type == event.type && queued.channel_id == event.channel_id &&
+                        event.channel_credit <=
+                            std::numeric_limits<std::uint64_t>::max() - queued.channel_credit) {
+                        queued.channel_credit += event.channel_credit;
+                        coalesced = true;
+                        break;
+                    }
+                }
+                if (coalesced) {
+                    continue;
+                }
+            }
+            if (metrics_enabled_.load(std::memory_order_relaxed)) {
+                metrics_.events_queued.fetch_add(1, std::memory_order_relaxed);
+                const std::uint64_t size = static_cast<std::uint64_t>(events_.size() + 1);
+                std::uint64_t hw = metrics_.event_queue_high_water.load(std::memory_order_relaxed);
+                while (hw < size && !metrics_.event_queue_high_water.compare_exchange_weak(
+                                        hw, size, std::memory_order_relaxed)) {
+                }
+            }
+            if (events_.empty()) {
+                need_notify = true;
+            }
+            events_.push_back(std::move(event));
+        }
+        batch_events_.clear();
+    }
     if (need_notify && notifier_) {
         notifier_();
     }

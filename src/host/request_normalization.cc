@@ -588,9 +588,10 @@ WebSocketUpgradeRejection websocket_upgrade_rejection(WebSocketUpgradeCheck chec
     return {400, "invalid WebSocket handshake"};
 }
 
-RequestNormalizationResult
-normalize_public_request(const RequestRoutingPolicy& policy, std::string_view target,
-                         std::span<const PublicRequestHeaderView> headers) {
+static RequestNormalizationResult
+normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_view target,
+                              std::span<const PublicRequestHeaderView> headers,
+                              bool policy_prevalidated) {
     RequestNormalizationResult result;
 
     // Resource limits first: header count and total header bytes.
@@ -609,7 +610,7 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
         return result;
     }
 
-    if (!validate_policy(policy, result.error)) {
+    if (!policy_prevalidated && !validate_policy(policy, result.error)) {
         return result;
     }
     if (!validate_target(target, result.error)) {
@@ -893,6 +894,18 @@ normalize_public_request(const RequestRoutingPolicy& policy, std::string_view ta
     result.request.application = std::move(application);
     result.request.url = std::move(url);
     return result;
+}
+
+RequestNormalizationResult
+normalize_public_request(const RequestRoutingPolicy& policy, std::string_view target,
+                         std::span<const PublicRequestHeaderView> headers) {
+    return normalize_public_request_impl(policy, target, headers, /*policy_prevalidated=*/false);
+}
+
+RequestNormalizationResult
+normalize_validated_public_request(const RequestRoutingPolicy& policy, std::string_view target,
+                                   std::span<const PublicRequestHeaderView> headers) {
+    return normalize_public_request_impl(policy, target, headers, /*policy_prevalidated=*/true);
 }
 
 } // namespace capsid::host

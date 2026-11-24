@@ -137,6 +137,12 @@ RequestNormalizationResult
 normalize_public_request(const RequestRoutingPolicy& policy, std::string_view target,
                          std::span<const PublicRequestHeaderView> headers);
 
+// Variant for callers that already validated `policy` with
+// is_valid_routing_policy() (for example ManagedListenerImpl after start()).
+RequestNormalizationResult
+normalize_validated_public_request(const RequestRoutingPolicy& policy, std::string_view target,
+                                   std::span<const PublicRequestHeaderView> headers);
+
 } // namespace capsid::host
 
 #endif

@@ -52,6 +52,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -413,6 +414,7 @@ class WorkerExecutor {
     bool batch_flush();
     bool handle_worker_protocol_event(const capsid_event& event);
     void queue_worker_event(WorkerEvent event);
+    void flush_event_batch();
     void queue_worker_exit_event();
     bool report_runtime_failure(std::uint64_t request_id, capsid_result result,
                                 const char* operation);
@@ -463,15 +465,17 @@ class WorkerExecutor {
     // Tombstones for requests the Runtime already erased (worker thread)
     // or the owner cancelled (owner thread): any queued frame for them is
     // dropped before it reaches the IPC channel.
-    std::set<std::uint64_t> canceled_;
+    std::unordered_set<std::uint64_t> canceled_;
     // Terminal-event tombstones acknowledged by the owner. These are
     // cleared only on the worker thread after its current command batch,
     // so an already-swapped stale grant/write cannot race their removal.
-    std::set<std::uint64_t> retire_pending_;
+    std::unordered_set<std::uint64_t> retire_pending_;
+    std::atomic<bool> has_retire_pending_{false};
     // M2 item 6: probe state (worker thread writes, supervisor reads).
     // next_probe_id_ is the owner-thread allocator for the reserved high
     // range; the rest lives under mutex_.
     std::atomic<std::uint64_t> next_probe_id_ = kProbeRequestIdBase;
+    std::atomic<bool> probe_active_{false};
     bool probe_in_flight_ = false;
     bool probe_complete_ = false;
     bool probe_healthy_ = false;
@@ -481,7 +485,7 @@ class WorkerExecutor {
     // Inflight accounting: every begun request id, erased exactly once at
     // its terminal point. Guards the inflight_ counter against double
     // decrements (a cancel racing an already-queued RESPONSE_END).
-    std::set<std::uint64_t> inflight_ids_;
+    std::unordered_set<std::uint64_t> inflight_ids_;
     std::atomic<std::uint64_t> inflight_ = 0;
     std::atomic<std::uint64_t> pending_dispatches_{0};
     // Single continuous occupancy counter covering pending_dispatches_ +
@@ -502,6 +506,12 @@ class WorkerExecutor {
     bool exit_event_queued_ = false;
     capsid_worker* worker_ = nullptr;
     WorkerEventSource source_;
+    // Worker-thread-only event batch buffer: accumulates all events from one
+    // capsid_worker_next_event drain loop and publishes them under one mutex_.
+    bool batching_events_ = false;
+    bool batch_saw_activity_ = false;
+    std::vector<WorkerEvent> batch_events_;
+    std::vector<std::uint64_t> batch_canceled_ids_;
     std::string log_application_id_;
     std::string log_generation_digest_;
     std::optional<std::chrono::steady_clock::time_point> shutdown_deadline_;

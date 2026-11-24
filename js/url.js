@@ -1,35 +1,10 @@
 const NativeURL = globalThis.URL;
 const fallbackStates = new WeakMap();
 let hasFallbackStates = false;
-
-function toUSVStringSlow(string) {
-  return string.replace(/[\uD800-\uDFFF]/g, (codeUnit, index) => {
-    const code = codeUnit.charCodeAt(0);
-    if (code <= 0xdbff) {
-      const next = string.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        return codeUnit;
-      }
-    } else {
-      const previous = string.charCodeAt(index - 1);
-      if (previous >= 0xd800 && previous <= 0xdbff) {
-        return codeUnit;
-      }
-    }
-    return '\uFFFD';
-  });
-}
+const strToWellFormed = String.prototype.toWellFormed;
 
 function toUSVString(value) {
-  const string = typeof value === 'string' ? value : String(value);
-  const length = string.length;
-  for (let i = 0; i < length; i++) {
-    const code = string.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdfff) {
-      return toUSVStringSlow(string);
-    }
-  }
-  return string;
+  return strToWellFormed.call(typeof value === 'string' ? value : String(value));
 }
 
 function parseInvalidAsciiIdna(input) {

@@ -24,8 +24,10 @@ import {
   configureFetchLimits,
   createIncomingRequest,
   bridgeResponseHeaders,
+  bridgeResponseHeadersFlat,
+  clearBridgeFlatScratch,
   bridgeResponseHadContentLength,
-  getFastResponseBody,
+  consumeFastResponseBody,
   getFastStreamResponseBody,
   isNullFastResponseBody,
 } from './fetch.js';
@@ -38,10 +40,16 @@ import 'txiki-polyfills/wasm.js';
 import './wasm.js';
 
 import core from 'tjs:internal/core';
-import { transferWebSocket } from './websocket.js';
+import { transferWebSocket, isFetchChannelStream, getNativeDefaultStreamOps } from './websocket.js';
 import { profileGlobalNames } from './profile-manifest.js';
 
 configureFetchLimits(core.capsidFetchRequestBodyLimit(), core.capsidFetchResponseBodyLimit());
+const readableStreamProto = ReadableStream.prototype;
+const wrappedStreamGetReader = readableStreamProto.getReader;
+const defaultReaderProto = ReadableStreamDefaultReader.prototype;
+const wrappedReaderRead = defaultReaderProto.read;
+const { nativeGetReader, nativeRead } = getNativeDefaultStreamOps();
+const intrinsicCall = Function.prototype.call.bind(Function.prototype.call);
 const fixedResponseBodyLimit = Number(core.capsidFixedResponseBodyLimit());
 
 const nativeCrypto = globalThis.crypto;
@@ -449,7 +457,8 @@ function pullRequestBody(state) {
 }
 
 const IntrinsicPromise = Promise;
-const intrinsicPromiseThen = Promise.prototype.then;
+const intrinsicPromisePrototype = IntrinsicPromise.prototype;
+const intrinsicPromiseThen = intrinsicPromisePrototype.then;
 const intrinsicPromiseResolve = Promise.resolve;
 const enqueueMicrotask = globalThis.queueMicrotask;
 const intrinsicApply = Reflect.apply;
@@ -457,12 +466,20 @@ const funcProto = Function.prototype;
 const funcCall = funcProto.call;
 const responsePrototype = Response.prototype;
 const getObjectPrototype = Object.getPrototypeOf;
+const objectHasOwn = Object.hasOwn;
 
 function promiseThen(promise, onFulfilled, onRejected) {
   if (funcProto.call === funcCall) {
     return intrinsicPromiseThen.call(promise, onFulfilled, onRejected);
   }
   return intrinsicApply(intrinsicPromiseThen, promise, [onFulfilled, onRejected]);
+}
+
+function markRequestSettledJS(state) {
+  if (state.active) {
+    state.active = false;
+    requests.delete(state.id);
+  }
 }
 
 function settleRequest(state) {
@@ -499,11 +516,10 @@ async function finishResponseAsync(state, response) {
     throw new TypeError('application fetch handler must return a Response');
   }
 
-  const headers = bridgeResponseHeaders(response);
-  const hasContentLength = bridgeResponseHadContentLength();
   if (response.status === 101) {
+    const upgradeHeaders = bridgeResponseHeaders(response);
     try {
-      await transferWebSocket(id, response, headers);
+      await transferWebSocket(id, response, upgradeHeaders);
     } catch (error) {
       // Origin/negotiation failures precede 101. The transfer
       // path owns post-commit coupling errors and aborts their
@@ -519,6 +535,8 @@ async function finishResponseAsync(state, response) {
     return;
   }
 
+  const headers = bridgeResponseHeadersFlat(response);
+  const hasContentLength = bridgeResponseHadContentLength();
   const body = response.body;
   if (body && !(body instanceof ReadableStream)) {
     let bytes = null;
@@ -539,16 +557,24 @@ async function finishResponseAsync(state, response) {
         (typeof bytes === 'string'
           ? bytes.length <= fixedResponseBodyLimit
           : bytes.byteLength <= fixedResponseBodyLimit);
-      if (fixedCandidate) {
-        core.capsidResponseFixed(id, response.status, response.statusText, headers, bytes);
-      } else {
-        core.capsidResponseFinal(id, response.status, response.statusText, headers, bytes);
+      try {
+        if (fixedCandidate) {
+          core.capsidResponseFixed(id, response.status, response.statusText, headers, bytes);
+        } else {
+          core.capsidResponseFinal(id, response.status, response.statusText, headers, bytes);
+        }
+      } finally {
+        clearBridgeFlatScratch();
       }
       return;
     }
   }
 
-  core.capsidResponseHead(id, response.status, response.statusText, headers);
+  try {
+    core.capsidResponseHead(id, response.status, response.statusText, headers);
+  } finally {
+    clearBridgeFlatScratch();
+  }
 
   if (body) {
     const reader = body.getReader();
@@ -580,9 +606,20 @@ async function finishResponseAsync(state, response) {
 
 function pumpStreamResponse(state, response, body) {
   const id = state.id;
-  const headers = bridgeResponseHeaders(response);
-  core.capsidResponseHead(id, response.status, response.statusText, headers);
-  const reader = body.getReader();
+  const headers = bridgeResponseHeadersFlat(response);
+  try {
+    core.capsidResponseHead(id, response.status, response.statusText, headers);
+  } finally {
+    clearBridgeFlatScratch();
+  }
+  const useNativeReader =
+    nativeGetReader !== null &&
+    !isFetchChannelStream(body) &&
+    getObjectPrototype(body) === readableStreamProto &&
+    !objectHasOwn(body, 'getReader') &&
+    readableStreamProto.getReader === wrappedStreamGetReader &&
+    defaultReaderProto.read === wrappedReaderRead;
+  const reader = useNativeReader ? intrinsicCall(nativeGetReader, body) : body.getReader();
   state.responseReader = reader;
 
   const onError = (error) => {
@@ -592,20 +629,26 @@ function pumpStreamResponse(state, response, body) {
     failRequest(state, error);
   };
 
+  const finishStream = () => {
+    if (state.responseReader === reader) {
+      state.responseReader = null;
+    }
+    if (!state.cancelled) {
+      try {
+        core.capsidResponseEnd(id, true);
+      } catch (error) {
+        failRequest(state, error);
+        return;
+      }
+      markRequestSettledJS(state);
+      return;
+    }
+    settleRequest(state);
+  };
+
   const onChunk = (result) => {
     if (result.done || state.cancelled) {
-      if (state.responseReader === reader) {
-        state.responseReader = null;
-      }
-      if (!state.cancelled) {
-        try {
-          core.capsidResponseEnd(id);
-        } catch (error) {
-          failRequest(state, error);
-          return;
-        }
-      }
-      settleRequest(state);
+      finishStream();
       return;
     }
     let pending;
@@ -616,31 +659,111 @@ function pumpStreamResponse(state, response, body) {
       return;
     }
     if (pending !== undefined) {
-      promiseThen(pending, readNext, onError);
+      promiseThen(pending, drainReads, onError);
       return;
     }
-    readNext();
+    drainReads();
   };
 
-  const readNext = () => {
-    if (state.cancelled) {
-      if (state.responseReader === reader) {
-        state.responseReader = null;
+  const drainReads = () => {
+    while (true) {
+      if (state.cancelled) {
+        if (state.responseReader === reader) {
+          state.responseReader = null;
+        }
+        settleRequest(state);
+        return;
       }
-      settleRequest(state);
+      if (useNativeReader && body._state === 'readable') {
+        const ctrl = body._readableStreamController;
+        if (
+          ctrl !== undefined &&
+          ctrl !== null &&
+          objectHasOwn(ctrl, '_controlledReadableByteStream') &&
+          ctrl._closeRequested === true &&
+          ctrl._queueTotalSize > 0 &&
+          ctrl._pendingPullIntos.length === 0 &&
+          reader._readRequests.length === 0
+        ) {
+          try {
+            while (ctrl._queueTotalSize > 0 && ctrl._queue.length > 0) {
+              if (state.cancelled) {
+                if (state.responseReader === reader) {
+                  state.responseReader = null;
+                }
+                settleRequest(state);
+                return;
+              }
+              const entry = ctrl._queue.shift();
+              ctrl._queueTotalSize -= entry.byteLength;
+              body._disturbed = true;
+              const pending = core.capsidResponseWriteBuffer(
+                id,
+                entry.buffer,
+                entry.byteOffset,
+                entry.byteLength,
+              );
+              if (pending !== undefined) {
+                promiseThen(pending, drainReads, onError);
+                return;
+              }
+            }
+          } catch (error) {
+            onError(error);
+            return;
+          }
+          ctrl._pullAlgorithm = undefined;
+          ctrl._cancelAlgorithm = undefined;
+          body._state = 'closed';
+          if (reader._closedPromise_resolve !== undefined) {
+            reader._closedPromise_resolve(undefined);
+            reader._closedPromise_resolve = undefined;
+            reader._closedPromise_reject = undefined;
+          }
+          finishStream();
+          return;
+        }
+      }
+      let readPromise;
+      try {
+        readPromise = useNativeReader ? intrinsicCall(nativeRead, reader) : reader.read();
+      } catch (error) {
+        onError(error);
+        return;
+      }
+      if (
+        readPromise !== null &&
+        typeof readPromise === 'object' &&
+        intrinsicPromisePrototype.then === intrinsicPromiseThen &&
+        getObjectPrototype(readPromise) === intrinsicPromisePrototype &&
+        !objectHasOwn(readPromise, 'then')
+      ) {
+        const syncResult = core.capsidTryTakeFulfilledPromise(readPromise);
+        if (syncResult !== null) {
+          if (syncResult.done || state.cancelled) {
+            finishStream();
+            return;
+          }
+          let pending;
+          try {
+            pending = core.capsidResponseWrite(id, syncResult.value);
+          } catch (error) {
+            onError(error);
+            return;
+          }
+          if (pending !== undefined) {
+            promiseThen(pending, drainReads, onError);
+            return;
+          }
+          continue;
+        }
+      }
+      promiseThen(readPromise, onChunk, onError);
       return;
     }
-    let readPromise;
-    try {
-      readPromise = reader.read();
-    } catch (error) {
-      onError(error);
-      return;
-    }
-    promiseThen(readPromise, onChunk, onError);
   };
 
-  readNext();
+  drainReads();
 }
 
 function completeResponse(state, response) {
@@ -655,28 +778,34 @@ function completeResponse(state, response) {
         return;
       }
       if (response.status !== 101) {
-        const fastBody = getFastResponseBody(response);
+        const fastBody = consumeFastResponseBody(response);
         if (fastBody !== null) {
-          const headers = bridgeResponseHeaders(response);
+          const headers = bridgeResponseHeadersFlat(response);
           const length = typeof fastBody === 'string' ? fastBody.length : fastBody.byteLength;
-          if (length <= fixedResponseBodyLimit && !bridgeResponseHadContentLength()) {
-            core.capsidResponseFixed(
-              state.id,
-              response.status,
-              response.statusText,
-              headers,
-              fastBody,
-            );
-          } else {
-            core.capsidResponseFinal(
-              state.id,
-              response.status,
-              response.statusText,
-              headers,
-              fastBody,
-            );
+          try {
+            if (length <= fixedResponseBodyLimit && !bridgeResponseHadContentLength()) {
+              core.capsidResponseFixed(
+                state.id,
+                response.status,
+                response.statusText,
+                headers,
+                fastBody,
+                true,
+              );
+            } else {
+              core.capsidResponseFinal(
+                state.id,
+                response.status,
+                response.statusText,
+                headers,
+                fastBody,
+                true,
+              );
+            }
+          } finally {
+            clearBridgeFlatScratch();
           }
-          settleRequest(state);
+          markRequestSettledJS(state);
           return;
         }
         const streamBody = getFastStreamResponseBody(response);
@@ -685,10 +814,14 @@ function completeResponse(state, response) {
           return;
         }
         if (isNullFastResponseBody(response)) {
-          const headers = bridgeResponseHeaders(response);
-          core.capsidResponseHead(state.id, response.status, response.statusText, headers);
-          core.capsidResponseEnd(state.id);
-          settleRequest(state);
+          const headers = bridgeResponseHeadersFlat(response);
+          try {
+            core.capsidResponseHead(state.id, response.status, response.statusText, headers);
+          } finally {
+            clearBridgeFlatScratch();
+          }
+          core.capsidResponseEnd(state.id, true);
+          markRequestSettledJS(state);
           return;
         }
       }
@@ -706,19 +839,21 @@ function completeResponse(state, response) {
   );
 }
 
-const beginRequest = (handler, handlerThis, id, method, url, headerEntries) => {
+const beginRequest = (handler, handlerThis, id, method, url, headerEntries, flags = 0) => {
   if (requests.size !== 0 && requests.has(id)) {
     throw new TypeError(`duplicate request id ${id}`);
   }
 
   const hasBody = method !== 'GET' && method !== 'HEAD';
+  const bodyless = (flags & 1) !== 0;
+  const canonicalHeaders = (flags & 2) !== 0;
   const state = {
     id,
     active: true,
     abortController: null,
     chunks: hasBody ? [] : null,
     controller: null,
-    ended: !hasBody,
+    ended: !hasBody || bodyless,
     waiting: false,
     cancelled: false,
     cancelReason: null,
@@ -743,7 +878,15 @@ const beginRequest = (handler, handlerThis, id, method, url, headerEntries) => {
     });
   }
 
-  const request = createIncomingRequest(url, method, headerEntries, body, hasBody, state);
+  const request = createIncomingRequest(
+    url,
+    method,
+    headerEntries,
+    body,
+    hasBody,
+    state,
+    canonicalHeaders,
+  );
 
   // WP-02 §6.2: request identity rides the job-context token captured at
   // enqueue; no JS-side enter/leave is needed (or trusted) anymore.

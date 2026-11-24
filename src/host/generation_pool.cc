@@ -1367,7 +1367,7 @@ bool GenerationPool::settle_evicted_slot_elastic_locked(Slot& victim) {
 bool GenerationPool::forward_executor_events_locked(
     const std::shared_ptr<WorkerExecutor>& executor) {
     bool exited = false;
-    for (const WorkerEvent& event : executor->drain_events()) {
+    for (WorkerEvent& event : executor->drain_events()) {
         if (event.type == WorkerEvent::Type::kExit) {
             // Each executor queues one exit. Deliver it even if a health recycle
             // already removed this executor from the READY set.
@@ -1376,9 +1376,10 @@ bool GenerationPool::forward_executor_events_locked(
                 options_.on_worker_exited(executor.get());
         }
         if (options_.event_sink)
-            options_.event_sink(executor.get(), event);
+            options_.event_sink(executor.get(),
+                                options_.shared_event_sink ? event : std::move(event));
         if (options_.shared_event_sink)
-            options_.shared_event_sink(executor, event);
+            options_.shared_event_sink(executor, std::move(event));
     }
     return exited;
 }

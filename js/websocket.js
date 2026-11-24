@@ -27,7 +27,8 @@ const handlerErrorDefineProperty = Object.defineProperty;
 const handlerErrorPromise = Promise;
 const createHttpGzipDecoder = core.createHttpGzipDecoder;
 const intrinsicLowerCase = Function.prototype.call.bind(String.prototype.toLowerCase);
-let fetchReadableStream, fetchNativeGetReader, fetchNativeBYOBRead;
+const intrinsicCall = Function.prototype.call.bind(Function.prototype.call);
+let fetchReadableStream, fetchNativeGetReader, fetchNativeDefaultRead, fetchNativeBYOBRead;
 const fetchStreamContexts = new WeakMap();
 const ordinaryFetchBodyTag = Symbol('ordinary fetch body');
 const fetchReaderContexts = new WeakMap();
@@ -200,6 +201,7 @@ export function configureFetchChannelStreams(constructor) {
     },
   });
   fetchNativeGetReader = nativeGetReader;
+  fetchNativeDefaultRead = nativeRead;
   const nativeCancel = readerPrototype.cancel,
     nativeReleaseLock = readerPrototype.releaseLock;
   const closed = Object.getOwnPropertyDescriptor(readerPrototype, 'closed');
@@ -319,14 +321,17 @@ export function configureFetchChannelStreams(constructor) {
   });
   Object.defineProperty(streamPrototype, 'getReader', {
     ...Object.getOwnPropertyDescriptor(streamPrototype, 'getReader'),
-    value: function getReader(...args) {
-      const reader = intrinsicApply(nativeGetReader, this, args);
+    value: function getReader() {
+      const reader =
+        arguments.length === 0
+          ? intrinsicCall(nativeGetReader, this)
+          : intrinsicApply(nativeGetReader, this, arguments);
       return associateReader(this, reader, intrinsicGetPrototypeOf(reader) === byobPrototype);
     },
   });
   Object.defineProperty(readerPrototype, 'read', {
     ...Object.getOwnPropertyDescriptor(readerPrototype, 'read'),
-    value: function read(...args) {
+    value: function read() {
       const info = fetchReaderContext(this, false);
       if (info) {
         let pending = false;
@@ -347,8 +352,12 @@ export function configureFetchChannelStreams(constructor) {
           return foreignRead(info, error);
         }
       }
-      const result = observeStreamPromise(intrinsicApply(nativeRead, this, args));
-      if (!info) return observeStreamPromise(result);
+      const result = observeStreamPromise(
+        arguments.length === 0
+          ? intrinsicCall(nativeRead, this)
+          : intrinsicApply(nativeRead, this, arguments),
+      );
+      if (!info) return result;
       if (!core.capsidFetchReadPending(result)) return adoptNativeRead(result);
       const record = { promise: result, cancelled: false, reason: undefined };
       intrinsicSetAdd(info.pending, record);
@@ -1379,6 +1388,12 @@ export function isOrdinaryFetchBody(stream) {
 }
 export function isFetchChannelStream(stream) {
   return intrinsicWeakGet(fetchStreamContexts, stream) !== undefined;
+}
+export function getNativeDefaultStreamOps() {
+  return {
+    nativeGetReader: fetchNativeGetReader,
+    nativeRead: fetchNativeDefaultRead,
+  };
 }
 export function inheritFetchChannelStream(source, destination) {
   const context = intrinsicWeakGet(fetchStreamContexts, source);
