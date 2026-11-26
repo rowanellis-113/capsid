@@ -1105,6 +1105,7 @@ int main(int argc, char** argv) {
 
     if (const std::string* mode = optional_value("mode")) {
         if (*mode == "managed") {
+#if defined(__linux__)
             const auto require = [&values](const std::string& name) -> std::string {
                 auto it = values.find(name);
                 if (it == values.end()) {
@@ -1112,7 +1113,6 @@ int main(int argc, char** argv) {
                 }
                 return it->second;
             };
-#if defined(__linux__)
             // Strict managed CLI: only --host-config and --worker are allowed.
             for (const std::pair<const std::string, std::string>& entry : values) {
                 if (entry.first != "mode" && entry.first != "host-config" &&
