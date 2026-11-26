@@ -50,21 +50,22 @@ struct RestoreEnvironment {
         SetEnvironmentVariableW(name, previous.empty() ? nullptr : previous.data());
     }
 };
-void actual_worker(const char* path, uint16_t wire) {
+void actual_worker(const char* path, bool enable_channels) {
     capsid_worker_config config;
     capsid_worker_config_init(&config);
     config.worker_path = path;
     config.strict_sandbox = 0;
-    capsid_protocol_options options;
-    require(capsid_protocol_options_init(&options, sizeof(options)) == CAPSID_OK,
-            "protocol options");
-    options.wire_version = wire;
-    if (wire == 4) {
+    capsid_protocol_options options{};
+    const capsid_protocol_options* options_ptr = nullptr;
+    if (enable_channels) {
+        require(capsid_protocol_options_init(&options, sizeof(options)) == CAPSID_OK,
+                "protocol options");
         options.capabilities = 31;
         options.max_channels = 2;
+        options_ptr = &options;
     }
     Worker worker;
-    require(capsid_worker_spawn_ex(&config, &options, &worker.value) == CAPSID_OK,
+    require(capsid_worker_spawn_ex(&config, options_ptr, &worker.value) == CAPSID_OK,
             "actual Worker spawn");
     const char bundle[] = "export default {fetch(){return new Response('ok')}};";
     require(capsid_worker_load_bundle(worker.value, reinterpret_cast<const uint8_t*>(bundle),
@@ -94,7 +95,7 @@ void actual_worker(const char* path, uint16_t wire) {
                     "no terminal or unexpected application event");
     }
     require(started && ended && body == "ok", "actual response completes with exact bytes");
-    std::printf("actual Worker wire=%u: READY and request passed\n", unsigned(wire));
+    std::printf("actual Worker channels=%u: READY and request passed\n", enable_channels ? 1u : 0u);
 }
 
 // This self-launched peer inspects only the physical process environment.
@@ -181,8 +182,8 @@ int main(int argc, char** argv) {
                 "poison only this test process SystemRoot");
         require(SetEnvironmentVariableW(L"CAPSID_NATIVE_ENV_SENTINEL", L"must-not-inherit") != 0,
                 "set only this test process sentinel");
-        actual_worker(argv[1], 3);
-        actual_worker(argv[1], 4);
+        actual_worker(argv[1], false);
+        actual_worker(argv[1], true);
         char self[MAX_PATH + 1];
         const DWORD size = GetModuleFileNameA(nullptr, self, MAX_PATH + 1);
         require(size > 0 && size <= MAX_PATH, "environment probe executable path");
