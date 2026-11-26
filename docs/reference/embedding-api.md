@@ -8,7 +8,7 @@ integration specification (threading/event loop/backpressure/ABI upgrades).
 
 - The public interface is authoritative in [`include/capsid/runtime.h`](../../include/capsid/runtime.h);
   the full symbols and field comments are defined by the public header.
-- The current `CAPSID_ABI_VERSION == 7`; every config structure must be initialized
+- The current `CAPSID_ABI_VERSION == 8`; every config structure must be initialized
   with the corresponding `*_init()` first. Do not zero-fill by hand or guess the
   structure size.
 - Capsid Runtime only provides isolated workers and the C ABI; it does not implement
@@ -324,7 +324,7 @@ queueing (or in the pump loop) as the existing API contract requires.
 - Verify request/response credit, slow clients, SSE, cancellation, and gateway shutdown;
 - Verify worker crash, protocol errors, soft/hard timeout, and replacement policy;
 - Observe the worker PID's cgroup memory/CPU/PID limits separately from gateway resources;
-- Keep release evidence for old header/new library, full Release tests, and delegated sandbox.
+- Keep release evidence for ABI v8 consumer builds, full Release tests, and delegated sandbox.
 
 ## Minimal configuration example
 

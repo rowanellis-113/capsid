@@ -106,7 +106,7 @@
       "reviewed": true,
       "hashMode": "canonical-lf-text",
       "sha256": "44d32a8180f72c41213db83f9e41e1dbec700022670d5dc5fb301fc5f2a87791",
-      "review": "Library/distribution/Host split, ABI7, default v3/explicit v4, bounded Host-owned channels and native/strict boundaries."
+      "review": "Library/distribution/Host split, ABI v8, FetchRPC v4-only with HTTP-only NULL options default, bounded Host-owned channels and native/strict boundaries."
     },
     {
       "path": "docs/evidence/v0.3.0/2026-11-12-byob-density/qualification-before.md",
@@ -714,8 +714,8 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "7c74ff9d45eef1dbddd6f4a927448a95de0c056e8d9eed45fbbd8e165403a8ff",
-      "review": "Public ABI7 request/event/callback/spawn lifecycle, additive protocol options and channel result/terminal confirmation; default strict off."
+      "sha256": "523b3308a520f56059bc05dbc3945771bf9121722a3eca8a4df8d34d2d1b1ebe",
+      "review": "Public ABI v8 request/event/callback/spawn_ex lifecycle, FetchRPC v4-only options with HTTP-only NULL default and channel result/terminal confirmation; default strict off."
     },
     {
       "path": "docs/reference/fetchrpc-v4.md",
@@ -723,7 +723,7 @@
       "reviewed": true,
       "hashMode": "canonical-lf-text",
       "sha256": "33c70e91ac0120bc6910178e84969581d70720a7b37a7e632f1a8afc71484f0f",
-      "review": "Current immutable wire/base+A2 contract, no silent default-v4 upgrade, unsupported half-close/lifetime limits; exact old source retained.",
+      "review": "Current FetchRPC v4-only wire/base+A2 contract, HTTP-only zero-capability default with explicit channel negotiation, unsupported half-close/lifetime limits; exact old source retained.",
       "archivedSource": "docs/history/archives/2026-11-17/fetchrpc-v4.md.txt"
     },
     {

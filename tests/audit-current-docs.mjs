@@ -396,6 +396,15 @@ for (const [label, release] of [
 const sdkHeader = await readFile(path.join(root, 'include/capsid/runtime.h'), 'utf8');
 const abiVersion = sdkHeader.match(/^#define CAPSID_ABI_VERSION (\d+)u$/m)[1];
 assert.ok(readme.includes(`v0.3.2 development SDK uses C ABI v${abiVersion}.`));
+const embeddingApi = documents.get('docs/reference/embedding-api.md');
+assert.ok(
+  embeddingApi.includes(`The v0.3.2 SDK uses ABI v${abiVersion},`),
+  `docs/reference/embedding-api.md banner must match CAPSID_ABI_VERSION=${abiVersion}`,
+);
+assert.ok(
+  embeddingApi.includes(`The current \`CAPSID_ABI_VERSION == ${abiVersion}\``),
+  `docs/reference/embedding-api.md must state CAPSID_ABI_VERSION == ${abiVersion}`,
+);
 const { repository } = JSON.parse(
   await readFile(path.join(root, 'docs/data/release-status.json'), 'utf8'),
 );

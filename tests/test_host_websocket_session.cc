@@ -1,7 +1,9 @@
+#include "host/metrics.h"
 #include "host/websocket_session.h"
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <string>
 
 namespace {
 namespace asio = boost::asio;
@@ -31,14 +33,19 @@ struct Pump {
     asio::io_context io;
     std::shared_ptr<WebSocketSession::Network> network =
         std::make_shared<WebSocketSession::Network>();
-    std::shared_ptr<capsid::host::ServiceChannelBudget> budget =
-        std::make_shared<capsid::host::ServiceChannelBudget>();
+    std::shared_ptr<capsid::host::ServiceChannelBudget> budget;
+    uint32_t id = 1;
     std::shared_ptr<WebSocketSession> session;
     WebSocketSession::Completion read_done, write_done;
     std::vector<std::vector<uint8_t>> wire;
     std::vector<Command> commands;
     unsigned closes = 0, completions = 0, confirms = 0;
-    explicit Pump(uint64_t write_timeout = 1000) {
+    explicit Pump(uint64_t write_timeout = 1000,
+                  std::shared_ptr<capsid::host::ServiceChannelBudget> shared_budget = nullptr,
+                  uint32_t channel_id = 1)
+        : budget(shared_budget ? std::move(shared_budget)
+                               : std::make_shared<capsid::host::ServiceChannelBudget>()),
+          id(channel_id) {
         network->executor = io.get_executor();
         network->read = [this](asio::mutable_buffer, WebSocketSession::Completion done) {
             require(!read_done, "at most one read in flight");
@@ -55,11 +62,11 @@ struct Pump {
         limits.close_timeout_ms = 100;
         auto reservation = std::make_shared<Reservation>(budget);
         session = std::make_shared<WebSocketSession>(
-            network, reservation, 1, limits, write_timeout,
+            network, reservation, id, limits, write_timeout,
             [this](Command command) {
                 if (command.type == CommandType::kChannelConfirm) {
                     require(closes == 1, "terminal ACK follows actual socket teardown");
-                    require(command.channel_id == 1 && command.channel_flags == 2,
+                    require(command.channel_id == id && command.channel_flags == 2,
                             "final Close confirms transport termination exactly");
                     ++confirms;
                 }
@@ -249,10 +256,117 @@ void inbound_anchor_lifetime() {
     require(observed.expired(),
             "accepted stream anchor is released when no session or I/O can refer to it");
 }
+void shared_service_queue_budget_rejection() {
+    auto service = std::make_shared<capsid::host::ServiceChannelBudget>(
+        capsid::host::ChannelBudgetLimits{4, 4, 1200});
+    auto alpha = std::make_shared<capsid::host::ServiceChannelBudget>(
+        capsid::host::ChannelBudgetLimits{4, 4, 1024}, service);
+    auto beta = std::make_shared<capsid::host::ServiceChannelBudget>(
+        capsid::host::ChannelBudgetLimits{4, 4, 1024}, service);
+    capsid::host::MetricsRegistry metrics;
+    metrics.observe_channel_budget(service);
+    metrics.observe_channel_budget(alpha, "alpha");
+    metrics.observe_channel_budget(beta, "beta");
+
+    Pump first(1000, alpha, 1);
+    Pump second(1000, beta, 2);
+    // WebSocketSession charges payload.size() + 270 = 770 B per frame: each frame
+    // fits within per-channel (4 MiB) and listener (1024 B) caps, so holding the
+    // first write in flight forces the second session onto the shared parent cap.
+    const std::string payload(500, 'x');
+    first.data(payload);
+    require(first.wire.size() == 1 && first.closes == 0 && bool(first.write_done),
+            "first session frame stays in flight within shared service budget");
+    require(service->queued_bytes() == 770 && alpha->queued_bytes() == 770 &&
+                service->snapshot().queue.rejected == 0,
+            "first write charges both listener and parent service budget");
+
+    second.data(payload);
+    require(second.wire.empty() && second.closes == 1 && second.completions == 1 &&
+                second.confirms == 0,
+            "parent queue rejection closes second session without writing wire bytes");
+    bool canceled = false;
+    for (const auto& cmd : second.commands) {
+        if (cmd.type == CommandType::kChannelCancel && cmd.channel_id == 2 &&
+            cmd.channel_flags == CAPSID_CANCEL_REASON_DISCONNECT)
+            canceled = true;
+    }
+    require(canceled, "parent queue rejection notifies worker with channel cancel");
+    const auto after_refusal = service->snapshot();
+    require(after_refusal.queue.rejected == 1 && beta->snapshot().queue.rejected == 1 &&
+                alpha->snapshot().queue.rejected == 0,
+            "service and denying listener increment queue_bytes rejection counter");
+    require(after_refusal.queue.used == 770 && after_refusal.queue.high_water == 770 &&
+                after_refusal.queue.high_water <= after_refusal.queue.limit,
+            "service occupancy and high-water stay within parent queue ceiling");
+    require(beta->queued_bytes() == 0 && beta->channels() == 0 && beta->snapshot().active == 0,
+            "rejected session rolls back listener queue charge and returns channel slot");
+    require(first.closes == 0 && alpha->channels() == 1,
+            "service refusal on second session does not disrupt in-flight first session");
+    const std::string prom_after_refusal = metrics.render_prometheus_text();
+    require(
+        prom_after_refusal.find(
+            "capsid_channel_budget_rejections_total{resource=\"queue_bytes\",scope=\"service\",listener=\"\"} 1\n") !=
+            std::string::npos,
+        "Prometheus renders service queue_bytes rejection counter increment");
+    require(
+        prom_after_refusal.find(
+            "capsid_channel_budget_rejections_total{resource=\"queue_bytes\",scope=\"listener\",listener=\"beta\"} 1\n") !=
+            std::string::npos,
+        "Prometheus renders listener beta queue_bytes rejection counter increment");
+    require(
+        prom_after_refusal.find(
+            "capsid_channel_budget_high_water{resource=\"queue_bytes\",scope=\"service\",listener=\"\"} 770\n") !=
+            std::string::npos,
+        "Prometheus renders bounded service queue high-water");
+
+    first.wrote();
+    require(service->queued_bytes() == 0 && alpha->queued_bytes() == 0,
+            "completed write releases shared service queue bytes");
+
+    Pump third(1000, beta, 3);
+    third.data(payload);
+    require(third.wire.size() == 1 && third.closes == 0 && service->queued_bytes() == 770,
+            "subsequent session succeeds after shared service budget drains");
+    third.wrote();
+    require(service->queued_bytes() == 0, "subsequent write returns shared service bytes");
+    capsid::host::ws::StreamDecoder decoder(1024, capsid::host::ws::kServer);
+    capsid::host::ws::StreamDecoder::Item item;
+    size_t used = 0;
+    require(decoder.consume(third.wire[0].data(), third.wire[0].size(), &used, 65536, &item) ==
+                    capsid::host::ws::StreamDecoder::ItemReady &&
+                used == third.wire[0].size() && item.opcode == capsid::host::ws::kText &&
+                item.payload == std::vector<uint8_t>(payload.begin(), payload.end()),
+            "subsequent session delivers exact WebSocket frame payload");
+
+    first.close();
+    first.wrote();
+    first.terminal();
+    third.close();
+    third.wrote();
+    third.terminal();
+    if (second.read_done) {
+        auto done = std::move(second.read_done);
+        done(asio::error::operation_aborted, 0);
+    }
+    second.io.restart();
+    second.io.poll();
+
+    const auto final_snap = service->snapshot();
+    require(final_snap.queue.used == 0 && final_snap.queue.high_water == 770 &&
+                final_snap.queue.rejected == 1 && final_snap.channels.used == 0 &&
+                final_snap.active == 0,
+            "all shared service queue and channel resources drain to zero");
+    const std::string prom_final = metrics.render_prometheus_text();
+    require(prom_final.find("capsid_channel_queue_bytes{scope=\"service\",listener=\"\"} 0\n") !=
+                std::string::npos,
+            "Prometheus confirms service queue occupancy returns to zero");
+}
 }
 int main() {
     abort_with_retained_write();
     inbound_anchor_lifetime();
+    shared_service_queue_budget_rejection();
     flush_then_finish();
     empty_close();
     write_failure(false);
