@@ -917,9 +917,9 @@ bool discover_sibling_worker_path(std::string* out_path) {
     if (_NSGetExecutablePath(buf.data(), &size) != 0) {
         return false;
     }
-    std::error_code ec;
-    self_path = std::filesystem::weakly_canonical(std::filesystem::path(buf.c_str()), ec);
-    if (ec) {
+    std::error_code canonical_ec;
+    self_path = std::filesystem::weakly_canonical(std::filesystem::path(buf.c_str()), canonical_ec);
+    if (canonical_ec) {
         self_path = std::filesystem::path(buf.c_str());
     }
     const std::filesystem::path candidate = self_path.parent_path() / "capsid-worker";
