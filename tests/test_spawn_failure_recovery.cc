@@ -424,7 +424,7 @@ int main(int argc, char** argv) {
     config.worker_path = missing_worker.c_str();
     for (int i = 0; i < 5; ++i) {
         capsid_worker* worker = reinterpret_cast<capsid_worker*>(0x1);
-        const capsid_result result = capsid_worker_spawn(&config, &worker);
+        const capsid_result result = capsid_worker_spawn_ex(&config, NULL, &worker);
         if (result != CAPSID_CHILD_ERROR || worker != nullptr) {
             fail("nonexistent path must be CHILD_ERROR, got " +
                  std::string(capsid_result_string(result)));
@@ -852,7 +852,7 @@ int main(int argc, char** argv) {
         config.worker_path = missing.c_str();
         for (int i = 0; i < 5; ++i) {
             capsid_worker* worker = reinterpret_cast<capsid_worker*>(0x1);
-            const auto result = capsid_worker_spawn(&config, &worker);
+            const auto result = capsid_worker_spawn_ex(&config, NULL, &worker);
             require(result == CAPSID_CHILD_ERROR && worker == nullptr,
                     "nonexistent executable must fail without output worker");
             no_residue(baseline, "failed CreateProcess");

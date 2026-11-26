@@ -640,7 +640,6 @@ bool read_secret_literal(const std::string& secrets_dir, const std::string& key_
 HostPolicy make_permissive_local_host(const AppRequest& app, bool strict_sandbox,
                                       std::uint32_t max_workers) {
     HostPolicy host;
-    host.is_v2 = app.is_v2;
     host.strict_sandbox = strict_sandbox;
     host.module_allowlist = app.modules;
     for (const AppRequest::EnvRequest& request : app.env) {
@@ -1088,12 +1087,7 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
             read_dir_file_safe(app_dir_guard, json_filename, capsid_label, kMaxLocalConfigBytes,
                                "1 MiB capsid.json cap", &capsid_bytes, &read_error);
         if (outcome == ReadOutcome::kMissing) {
-            if (options_.capsid_json_required) {
-                return fail_start(error, "cannot find " + capsid_label);
-            }
-            static constexpr std::string_view kDefaultAppV2 =
-                R"json({"apiVersion":"capsid/app-v2"})json";
-            capsid_bytes.assign(kDefaultAppV2.begin(), kDefaultAppV2.end());
+            return fail_start(error, "cannot find " + capsid_label);
         } else if (outcome != ReadOutcome::kOk) {
             return fail_start(error, read_error);
         }
@@ -1422,21 +1416,6 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
     if (compiled.effective.js_heap_bytes > 0) {
         spec->config.js_heap_limit = compiled.effective.js_heap_bytes;
     }
-#if defined(CAPSID_ASAN_BUILD) || defined(CAPSID_TSAN_BUILD) || defined(__SANITIZE_ADDRESS__) ||   \
-    defined(__SANITIZE_THREAD__)
-    const bool forward_address_space_limit = false;
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-    const bool forward_address_space_limit = false;
-#else
-    const bool forward_address_space_limit = true;
-#endif
-#else
-    const bool forward_address_space_limit = true;
-#endif
-    if (forward_address_space_limit && compiled.effective.process_address_bytes > 0) {
-        spec->config.process_memory_limit = compiled.effective.process_address_bytes;
-    }
     if (compiled.effective.file_descriptors > 0) {
         if (compiled.effective.file_descriptors > std::numeric_limits<std::uint32_t>::max()) {
             return fail_start(error, "file descriptor limit exceeds worker range");
@@ -1514,12 +1493,7 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
     pool_options.recovery = recovery_resolved.policy;
     pool_options.max_inflight_per_worker = compiled.effective.requests_per_worker;
     pool_options.max_queued_requests = compiled.effective.queue_requests;
-    pool_options.queue_header_bytes = compiled.effective.queue_header_bytes;
     pool_options.queue_timeout_ms = compiled.effective.queue_timeout_ms;
-    pool_options.max_streaming_inflight_per_worker =
-        compiled.effective.max_streaming_inflight_per_worker;
-    pool_options.stream_idle_timeout_ms = compiled.effective.stream_idle_timeout_ms;
-    pool_options.write_timeout_ms = compiled.effective.write_timeout_ms;
     pool_options.max_request_body_bytes = body_limit;
     pool_options.replace_exited_workers = options_.replace_exited_workers;
     pool_options.round_robin_tie_break = true;
@@ -1589,13 +1563,6 @@ bool LocalDevHostImpl::start(const std::vector<std::uint8_t>* inline_bundle, std
     }
 
     if (!has_host_config && !options_.listener_override.has_value()) {
-        // Inherit compiled listener-facing limits when no host.json configured them.
-        if (listener_cfg.limits.stream_idle_timeout_ms == 0) {
-            listener_cfg.limits.stream_idle_timeout_ms = compiled.effective.stream_idle_timeout_ms;
-        }
-        if (listener_cfg.limits.write_timeout_ms == 0) {
-            listener_cfg.limits.write_timeout_ms = compiled.effective.write_timeout_ms;
-        }
         if (options_.channel_listener_limits.channels != 0) {
             listener_cfg.limits.channels = options_.channel_listener_limits.channels;
         }

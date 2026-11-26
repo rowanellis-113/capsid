@@ -54,7 +54,6 @@ struct LocalDevHostOptions {
     // validating documents through validate_config_json + compile_policy.
     std::string capsid_json_path;
     std::optional<std::string> capsid_json_text;
-    bool capsid_json_required = true;
     std::string source_name;
     std::optional<ListenerConfig> listener_override;
     std::optional<std::uint64_t> max_request_body_bytes_override;

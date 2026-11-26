@@ -23,6 +23,7 @@
 #include <cctype>
 #include <cstring>
 #include <fcntl.h>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -235,7 +236,15 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
         return false;
     }
     static const std::set<std::string> kAllowedFields = {
-        "active", "app", "tenant", "version", "generation",
+        "active",
+        "app",
+        "tenant",
+        "version",
+        "generation",
+        "evictions",
+        "rejections",
+        "lastEvictionReason",
+        "lastRejectionReason",
     };
     const char* key = nullptr;
     json_t* value = nullptr;
@@ -250,6 +259,10 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
     json_t* tenant_json = json_object_get(root, "tenant");
     json_t* version_json = json_object_get(root, "version");
     json_t* generation_json = json_object_get(root, "generation");
+    json_t* evictions_json = json_object_get(root, "evictions");
+    json_t* rejections_json = json_object_get(root, "rejections");
+    json_t* last_eviction_json = json_object_get(root, "lastEvictionReason");
+    json_t* last_rejection_json = json_object_get(root, "lastRejectionReason");
     if (!json_is_boolean(active_json)) {
         json_decref(root);
         return false;
@@ -297,6 +310,72 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
             }
         }
     }
+    std::map<std::string, std::uint64_t> evictions_map;
+    if (evictions_json != nullptr) {
+        if (!json_is_object(evictions_json)) {
+            json_decref(root);
+            return false;
+        }
+        const char* reason_key = nullptr;
+        json_t* count_val = nullptr;
+        json_object_foreach(evictions_json, reason_key, count_val) {
+            const std::string_view reason_view(reason_key);
+            if (!is_valid_pool_eviction_reason(reason_view) || !json_is_integer(count_val) ||
+                json_integer_value(count_val) <= 0) {
+                json_decref(root);
+                return false;
+            }
+            evictions_map[std::string(reason_view)] =
+                static_cast<std::uint64_t>(json_integer_value(count_val));
+        }
+    }
+    std::string last_eviction_reason;
+    if (last_eviction_json != nullptr) {
+        if (!json_is_string(last_eviction_json)) {
+            json_decref(root);
+            return false;
+        }
+        const std::string_view reason_view(json_string_value(last_eviction_json),
+                                           json_string_length(last_eviction_json));
+        if (!is_valid_pool_eviction_reason(reason_view)) {
+            json_decref(root);
+            return false;
+        }
+        last_eviction_reason.assign(reason_view);
+    }
+    std::map<std::string, std::uint64_t> rejections_map;
+    if (rejections_json != nullptr) {
+        if (!json_is_object(rejections_json)) {
+            json_decref(root);
+            return false;
+        }
+        const char* reason_key = nullptr;
+        json_t* count_val = nullptr;
+        json_object_foreach(rejections_json, reason_key, count_val) {
+            const std::string_view reason_view(reason_key);
+            if (!is_valid_pool_rejection_reason(reason_view) || !json_is_integer(count_val) ||
+                json_integer_value(count_val) <= 0) {
+                json_decref(root);
+                return false;
+            }
+            rejections_map[std::string(reason_view)] =
+                static_cast<std::uint64_t>(json_integer_value(count_val));
+        }
+    }
+    std::string last_rejection_reason;
+    if (last_rejection_json != nullptr) {
+        if (!json_is_string(last_rejection_json)) {
+            json_decref(root);
+            return false;
+        }
+        const std::string_view reason_view(json_string_value(last_rejection_json),
+                                           json_string_length(last_rejection_json));
+        if (!is_valid_pool_rejection_reason(reason_view)) {
+            json_decref(root);
+            return false;
+        }
+        last_rejection_reason.assign(reason_view);
+    }
     if (app_out != nullptr) {
         *app_out = app_json != nullptr
                        ? std::string(json_string_value(app_json), json_string_length(app_json))
@@ -326,6 +405,36 @@ bool parse_app_status_document(const std::string& json, std::string* canonical,
             << json_escape(std::string(json_string_value(generation_json),
                                        json_string_length(generation_json)))
             << '"';
+    }
+    if (!evictions_map.empty()) {
+        out << ",\"evictions\":{";
+        bool first = true;
+        for (const auto& [reason_key, count_val] : evictions_map) {
+            if (!first) {
+                out << ',';
+            }
+            first = false;
+            out << '"' << json_escape(reason_key) << "\":" << count_val;
+        }
+        out << '}';
+    }
+    if (!last_eviction_reason.empty()) {
+        out << ",\"lastEvictionReason\":\"" << json_escape(last_eviction_reason) << '"';
+    }
+    if (!rejections_map.empty()) {
+        out << ",\"rejections\":{";
+        bool first = true;
+        for (const auto& [reason_key, count_val] : rejections_map) {
+            if (!first) {
+                out << ',';
+            }
+            first = false;
+            out << '"' << json_escape(reason_key) << "\":" << count_val;
+        }
+        out << '}';
+    }
+    if (!last_rejection_reason.empty()) {
+        out << ",\"lastRejectionReason\":\"" << json_escape(last_rejection_reason) << '"';
     }
     out << '}';
     json_decref(root);

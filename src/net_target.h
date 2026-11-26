@@ -40,10 +40,6 @@ bool parse_net_host(const std::string& text, CanonicalNetHost* out);
 // also matched by `manifest_host`.
 bool net_host_contained(const std::string& app_host, const std::string& manifest_host);
 
-// Parses "host[:port | :start-end | :*]" and returns true iff `app` is a subset
-// of `manifest` in both host/CIDR/wildcard and port dimensions.
-bool net_target_contained(const std::string& app, const std::string& manifest);
-
 } // namespace capsid
 
 #endif

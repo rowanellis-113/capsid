@@ -9,7 +9,7 @@ Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in
 <p>
   <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2"><img src="https://img.shields.io/badge/stable-v0.2.2-2563EB?style=flat-square" alt="Stable v0.2.2" /></a>
   <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1"><img src="https://img.shields.io/badge/prerelease-v0.3.1--beta.1-7C3AED?style=flat-square" alt="Prerelease v0.3.1-beta.1" /></a>
-  <a href="docs/reference/embedding-api.md"><img src="https://img.shields.io/badge/C_ABI-v7_frozen-0F766E?style=flat-square" alt="Public C ABI v7" /></a>
+  <a href="docs/reference/embedding-api.md"><img src="https://img.shields.io/badge/C_ABI-v8-0F766E?style=flat-square" alt="Public C ABI v8" /></a>
   <a href="docs/reference/benchmarks.md"><img src="https://img.shields.io/badge/engine-quickjs--turbo_Zero--JIT-D97706?style=flat-square" alt="quickjs-turbo Zero-JIT" /></a>
   <a href="https://rowanellis-113.github.io/capsid/"><img src="https://img.shields.io/badge/benchmarks-interactive_charts-059669?style=flat-square" alt="Interactive Benchmarks" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-475569?style=flat-square" alt="Apache-2.0 License" /></a>
@@ -72,7 +72,7 @@ Running untrusted tenant or AI-generated JavaScript usually forces an uncomforta
 | **2 GiB warm density** | `571` cells (10 KiB app) | Dozens | **`705` warm OS workers** (10 KiB app; `500` @ 100 KiB, `135` @ 1 MiB) |
 | **Cold start (10 KiB)** | `17.44 ms` / `58.8 MiB` | `100 ms – 1 s+` | **`8.88 ms` / `7.4 MiB`** (bytecode) &middot; `9.87 ms` (source) |
 | **JIT / RWX attack surface** | Active JIT compiler | Runtime-dependent | **Zero-JIT** (`quickjs-turbo` native register-frame VM) |
-| **Deployment model** | Standalone server | Orchestrated fleet | **Standalone Linux Host** or **Embeddable C/C++ SDK (ABI v7)** |
+| **Deployment model** | Standalone server | Orchestrated fleet | **Standalone Linux Host** or **Embeddable C/C++ SDK (ABI v8)** |
 
 ### Built for
 
@@ -186,13 +186,13 @@ flowchart LR
     end
     Client <-->|"HTTP / SSE / WS"| Router
     Policy -. "enforces limits & grants" .-> Worker
-    Router <-->|"FetchRPC v3 / v4 (Byte-Credit Backpressure)"| AppHeap
+    Router <-->|"FetchRPC v4 (Byte-Credit Backpressure)"| AppHeap
 ```
 
 | Subsystem | How it works | Reference |
 | :--- | :--- | :--- |
 | **Lazy property inline caches** | `quickjs-turbo` runs a zero-JIT bytecode interpreter. Capsid purges property lookup caches built during module initialization before the worker reports `READY`; hot request paths re-warm naturally without bloating idle worker memory. | [`src/worker_main.cc`](src/worker_main.cc) &middot; [`src/worker_runtime.cc`](src/worker_runtime.cc) |
-| **Credit-based IPC backpressure** | FetchRPC places explicit byte credits on the Host&ndash;worker boundary so slow consumers never exhaust IPC buffers. Hosts can opt into negotiated FetchRPC v4 for duplex channels and WebSocket upgrades on the same frozen C ABI. | [Embedding API](docs/reference/embedding-api.md) &middot; [FetchRPC v4](docs/reference/fetchrpc-v4.md) |
+| **Credit-based IPC backpressure** | FetchRPC places explicit byte credits on the Host&ndash;worker boundary so slow consumers never exhaust IPC buffers. Hosts can request duplex channels and WebSocket upgrades through v4 capability negotiation. | [Embedding API](docs/reference/embedding-api.md) &middot; [FetchRPC v4](docs/reference/fetchrpc-v4.md) |
 | **Zero-cost Trusted Bindings** | Credentials and native handles stay outside untrusted JS. A Trusted Binding runs in its own isolated JS heap inside the worker behind an explicitly granted async method and bounded queue. Workers with zero Bindings allocate no Binding heap. | [Binding v1 architecture](docs/design/bindings-v1.md) |
 | **Scale-to-zero &amp; tenant `memory.max`** | On **`dev/v0.3.2`**, idle apps scale to zero. Under Linux delegated `cgroup v2`, one tenant's `memory.max` covers sibling apps and overlapping rolling generations (e.g., an open SSE stream pinning the old generation while the new generation starts, both sharing the same 384 MiB ceiling in the rollout test). | [Config v2 design](docs/design/config-v2.md) &middot; [v0.3.2 review &amp; release gates](docs/history/v0.3.2/README.md) |
 
@@ -215,7 +215,7 @@ curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-bet
 
 ### Embed `libcapsid_runtime` in C or C++
 
-Public C ABI v7. Embed `libcapsid_runtime` through `<capsid/runtime.h>` (C11) or `<capsid/runtime.hpp>` (C++11 RAII). On POSIX, register `capsid_worker_fd()` with your event loop and drain `capsid_worker_next_event()` as events arrive.
+The v0.3.2 development SDK uses C ABI v8. Embed `libcapsid_runtime` through `<capsid/runtime.h>` (C11) or `<capsid/runtime.hpp>` (C++11 RAII). On POSIX, register `capsid_worker_fd()` with your event loop and drain `capsid_worker_next_event()` as events arrive.
 
 ```cpp
 #include <capsid/runtime.hpp>

@@ -689,6 +689,52 @@ void test_startup_permit_coordinator_stop_interrupts_and_withdraws() {
     coordinator.release_grant();
 }
 
+void test_startup_permit_refusal_backoff_and_jitter() {
+    const WorkerRecoveryPolicy test_policy = policy(2);
+    GenerationRecoveryState state = recovery_state();
+
+    // Consecutive startup-permit refusals escalate backoff with jitter without
+    // spending the rolling crash budget.
+    const StartupPermitRefusalDecision first =
+        record_startup_permit_refusal(state, test_policy, 100, -2000);
+    require(first.ok && first.error.code == WorkerRecoveryErrorCode::kNone &&
+                first.retry_delay_ms == 200 && first.state.replacement_attempts_since_stable == 1 &&
+                first.state.instability_events_ms.empty(),
+            "first permit refusal did not apply negative jitter or spent crash budget");
+
+    const StartupPermitRefusalDecision second =
+        record_startup_permit_refusal(first.state, test_policy, 300, 0);
+    require(second.ok && second.retry_delay_ms == 500 &&
+                second.state.replacement_attempts_since_stable == 2 &&
+                second.state.instability_events_ms.empty(),
+            "second permit refusal did not double backoff without consuming crash budget");
+
+    const StartupPermitRefusalDecision third =
+        record_startup_permit_refusal(second.state, test_policy, 800, 2000);
+    require(third.ok && third.retry_delay_ms == 1200 &&
+                third.state.replacement_attempts_since_stable == 3 &&
+                third.state.instability_events_ms.empty(),
+            "third permit refusal did not apply positive jitter on exponential step");
+
+    // Out-of-range jitter fails closed without mutating state.
+    const StartupPermitRefusalDecision bad_jitter =
+        record_startup_permit_refusal(third.state, test_policy, 900, 2001);
+    require(!bad_jitter.ok && bad_jitter.error.code == WorkerRecoveryErrorCode::kInvalidJitter &&
+                bad_jitter.retry_delay_ms == 0,
+            "out-of-range jitter was accepted for startup permit refusal");
+
+    // Continuous stability resets the refusal backoff back to initial.
+    const WorkerStabilityResult reset =
+        observe_worker_stability(third.state, test_policy, 800, 800 + test_policy.stable_reset_ms);
+    require(reset.ok && reset.backoff_reset && reset.state.replacement_attempts_since_stable == 0,
+            "stability window did not reset permit refusal backoff");
+    const StartupPermitRefusalDecision after_reset =
+        record_startup_permit_refusal(reset.state, test_policy, 70000, 0);
+    require(after_reset.ok && after_reset.retry_delay_ms == test_policy.backoff_initial_ms &&
+                after_reset.state.replacement_attempts_since_stable == 1,
+            "permit refusal backoff did not restart from initial delay after stability reset");
+}
+
 } // namespace
 
 int main() {
@@ -703,5 +749,6 @@ int main() {
     test_startup_permit_coordinator_queue_limit_rejects_fail_closed();
     test_startup_permit_coordinator_replacement_singleflight_rejects();
     test_startup_permit_coordinator_stop_interrupts_and_withdraws();
+    test_startup_permit_refusal_backoff_and_jitter();
     return 0;
 }

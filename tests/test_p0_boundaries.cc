@@ -106,7 +106,7 @@ capsid_worker* spawn_loaded(const char* worker_path, const std::string& bundle,
     config.request_timeout_ms = 2000;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "load bundle");
@@ -142,7 +142,7 @@ void test_strict_sandbox_fails_closed(const char* worker_path, const std::string
     config.strict_sandbox = 1;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "strict spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "strict spawn");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "strict load");
@@ -194,7 +194,7 @@ void test_bundle_enqueue_is_atomic(const char* worker_path) {
     config.max_queued_bytes = 512;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "atomic spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "atomic spawn");
     const std::vector<uint8_t> oversized(1024, 'x');
     require(capsid_worker_load_bundle(worker, &oversized[0], oversized.size()) ==
                 CAPSID_WOULD_BLOCK,
@@ -219,7 +219,7 @@ void test_named_bundle_crosses_frame_boundary(const char* worker_path) {
     bundle.append("*/");
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "named bundle spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "named bundle spawn");
     require_result(
         capsid_worker_load_bundle_named(worker, reinterpret_cast<const uint8_t*>(bundle.data()),
                                         bundle.size(), "https://example.test/application.js"),
@@ -236,60 +236,60 @@ void test_invalid_config_is_rejected(const char* worker_path) {
 
     capsid_worker* worker = NULL;
     config.js_heap_limit = static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "unrepresentable QuickJS heap limit rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.strict_sandbox = 0;
     config.process_memory_limit = config.js_heap_limit - 1;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "process memory limit below JS heap rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.strict_sandbox = 0;
     config.max_header_bytes = 64u * 1024u + 1;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "header limit beyond protocol capacity rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.strict_sandbox = 0;
     config.max_queued_bytes = 4u * 1024u * 1024u + 1;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "queue limit beyond parser capacity rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.strict_sandbox = 2;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "invalid strict sandbox boolean rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.sandbox_required_features = CAPSID_SANDBOX_FEATURE_STRICT_BASE;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "required sandbox features without strict mode rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.strict_sandbox = 1;
     config.sandbox_required_features = CAPSID_SANDBOX_FEATURE_CGROUP_V2;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "required cgroup feature without path rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.strict_sandbox = 1;
     config.sandbox_cgroup_path = "relative/cgroup";
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "relative cgroup path rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.sandbox_reserved = 1;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "nonzero sandbox reserved field rejected");
 
     capsid_resource_limits limits;
@@ -298,7 +298,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "unknown resource limit field rejected");
 
     capsid_resource_limits_init(&limits);
@@ -306,7 +306,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "nonzero resource limit reserved field rejected");
 
     capsid_resource_limits_init(&limits);
@@ -314,7 +314,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "undersized resource limit descriptor rejected");
 
     capsid_resource_limits_init(&limits);
@@ -323,7 +323,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "file descriptor limit below IPC requirement rejected");
 
     capsid_resource_limits_init(&limits);
@@ -333,7 +333,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "cgroup resource limits without strict cgroup rejected");
 
     capsid_resource_limits_init(&limits);
@@ -345,7 +345,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     config.strict_sandbox = 1;
     config.sandbox_cgroup_path = "/sys/fs/cgroup/capsid-invalid";
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "zero cgroup CPU quota rejected before spawn");
 
     capsid_resource_limits_init(&limits);
@@ -357,7 +357,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     config.strict_sandbox = 1;
     config.sandbox_cgroup_path = "/sys/fs/cgroup/capsid-invalid";
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "cgroup CPU period below kernel minimum rejected before spawn");
 
     capsid_resource_limits_init(&limits);
@@ -368,26 +368,26 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     config.strict_sandbox = 1;
     config.sandbox_cgroup_path = "/sys/fs/cgroup/capsid-invalid";
     config.resource_limits = &limits;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "cgroup CPU weight outside kernel range rejected before spawn");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     const std::string oversized_ca_path(4097, 'a');
     config.tls_ca_bundle_path = oversized_ca_path.c_str();
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "oversized TLS CA bundle path rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.max_fetch_request_body_bytes = UINT64_C(9007199254740991) + 1;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "Fetch request body limit beyond exact JS integer range rejected");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.max_fetch_response_body_bytes = UINT64_C(9007199254740991) + 1;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "Fetch response body limit beyond exact JS integer range rejected");
 
     capsid_egress_policy egress_policy;
@@ -396,7 +396,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.egress_policy = &egress_policy;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "undersized egress policy descriptor rejected");
 
     capsid_egress_policy_init(&egress_policy);
@@ -404,7 +404,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.egress_policy = &egress_policy;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "egress policy with missing rules rejected");
 
     capsid_egress_rule egress_rule;
@@ -417,7 +417,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.egress_policy = &egress_policy;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "non-canonical egress CIDR rejected before spawn");
 
     const std::string maximum_hostname = std::string(63, 'a') + "." + std::string(63, 'b') + "." +
@@ -434,14 +434,14 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = "/capsid/nonexistent-worker";
     config.egress_policy = &egress_policy;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "oversized HELLO egress policy rejected before spawn");
 
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.strict_sandbox = 1;
     config.sandbox_required_features = CAPSID_SANDBOX_FEATURE_NETWORK_NAMESPACE;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "required network namespace without descriptor rejected");
 
 #if defined(__linux__)
@@ -450,7 +450,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     config.sandbox_network_namespace_fd = network_namespace;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "network namespace descriptor without strict mode rejected");
     close(network_namespace);
 
@@ -460,7 +460,7 @@ void test_invalid_config_is_rejected(const char* worker_path) {
     config.worker_path = worker_path;
     config.strict_sandbox = 1;
     config.sandbox_network_namespace_fd = regular_file;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT,
             "non-network-namespace descriptor rejected");
     close(regular_file);
 #endif
@@ -474,7 +474,7 @@ void test_inflight_limit(const char* worker_path, const std::string& bundle) {
     config.max_inflight_requests = 1;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "inflight spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "inflight spawn");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "inflight load");

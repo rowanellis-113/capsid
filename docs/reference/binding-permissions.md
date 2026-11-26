@@ -135,8 +135,7 @@ and Binding operations consult only the current Binding policy.
 
 ### Network
 
-`permissions.net.allow` contains host, IP, or CIDR targets with one exact
-port:
+`permissions.net.allow` in a Binding manifest grants a host, IP, or CIDR and one exact port per entry:
 
 ```text
 db.example.com:27017
@@ -146,8 +145,9 @@ db.example.com:27017
 *:27017
 ```
 
-The App rule must be statically provable as a subset of a manifest rule. DNS
-results are not used to prove that subset. A wildcard is intentionally broad,
+An App may request several ports in one entry, such as `db.example.com:443,8443`.
+The Host checks each port and its host against the manifest grants. One uncovered
+endpoint rejects the deployment. The check uses the configured names and CIDR prefixes. A wildcard is intentionally broad,
 including private, loopback, link-local, metadata, and IPv6 destinations;
 deployments should prefer narrow targets and use network namespaces/firewalls
 as an additional boundary.

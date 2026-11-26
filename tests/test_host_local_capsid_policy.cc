@@ -167,15 +167,13 @@ capsid::host::LocalDevHostOptions make_options(const char* worker_path, int read
     return options;
 }
 
-std::shared_ptr<const capsid::host::BindingRegistrySnapshot> make_echo_binding_registry() {
+std::shared_ptr<const capsid::host::BindingRegistrySnapshot>
+make_binding_registry(std::string manifest, std::string source) {
     auto registry = std::make_shared<capsid::host::BindingRegistrySnapshot>();
     capsid::host::BindingPackageSnapshot package;
     package.id = "echo";
-    package.manifest_json =
-        R"json({"apiVersion":"capsid/binding-v1","permissions":{"modules":[]}})json";
-    package.source = "export default ({ config }) => ({"
-                     "  echo(input) { return config.prefix + input; }"
-                     "});";
+    package.manifest_json = std::move(manifest);
+    package.source = std::move(source);
     package.manifest_digest = capsid::host::compute_binding_manifest_digest(package.manifest_json);
     package.source_digest = capsid::host::sha256_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(package.source.data()), package.source.size()));
@@ -212,8 +210,7 @@ const std::string kEnvWorkerSource =
     "  }"
     "};";
 
-// A worker with no module imports: the only one that can run under the
-// absent-default deny-all baseline (any import would be unauthorized).
+// A worker with no imports runs with the minimal manifest and no grants.
 const std::string kPlainWorkerSource = "export default { fetch: () => new Response('plain-ok') };";
 
 // Binds a loopback listener on a kernel-assigned port, then answers the
@@ -282,9 +279,7 @@ void run_success_scenario(
     const std::string& expected_body,
     std::shared_ptr<const capsid::host::BindingRegistrySnapshot> binding_registry = {}) {
     const std::string json_path = "capsid-test-" + name + ".json";
-    if (!capsid_json.empty()) {
-        write_json_file(json_path, capsid_json);
-    }
+    write_json_file(json_path, capsid_json);
     std::string source = worker_source;
     if (loopback_port != 0) {
         const std::string marker = "__CAPSID_LOOPBACK_PORT__";
@@ -298,7 +293,7 @@ void run_success_scenario(
     require(capsid::win32::create_socket_pair(ready), "cannot create READY pipe");
     capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
     options.capsid_json_path = json_path;
-    options.capsid_json_required = !capsid_json.empty();
+
     options.binding_registry = std::move(binding_registry);
     capsid::host::LocalDevHost server(std::move(options));
     std::string error;
@@ -312,17 +307,14 @@ void run_success_scenario(
             name + ": expected \"" + expected_body + "\" in \"" + body + "\"");
     server.request_stop();
     require(server.wait(&error), name + ": wait failed: " + error);
-    if (!capsid_json.empty()) {
-        remove(json_path.c_str());
-    }
+    remove(json_path.c_str());
     std::cout << "ok " << name << std::endl;
 }
 
 // Failure scenario: startup must fail closed with the expected error
-// fragment. An empty capsid_json means the referenced file does not exist
-// (explicit --capsid-json semantics via capsid_json_required below).
+// fragment. An empty capsid_json leaves the required manifest absent.
 void run_failure_scenario(
-    const char* worker_path, const std::string& name, const std::string& capsid_json, bool required,
+    const char* worker_path, const std::string& name, const std::string& capsid_json,
     const std::string& expected_error,
     std::shared_ptr<const capsid::host::BindingRegistrySnapshot> binding_registry = {}) {
     const std::string json_path = "capsid-test-" + name + ".json";
@@ -336,7 +328,7 @@ void run_failure_scenario(
 
     capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
     options.capsid_json_path = json_path;
-    options.capsid_json_required = required;
+
     options.binding_registry = std::move(binding_registry);
     capsid::host::LocalDevHost server(std::move(options));
     std::string error;
@@ -386,7 +378,7 @@ void run_reparse_app_dir_rejected(const char* worker_path) {
     capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
     options.app_dir = link_dir.string();
     options.capsid_json_path.clear();
-    options.capsid_json_required = true;
+
     capsid::host::LocalDevHost server(std::move(options));
     std::string error;
     const bool started = server.start(&error);
@@ -461,7 +453,7 @@ void run_concurrent_dir_swap_atomic(const char* worker_path) {
         capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
         options.app_dir = dir_a_str;
         options.capsid_json_path.clear();
-        options.capsid_json_required = true;
+
         capsid::host::LocalDevHost server(std::move(options));
         std::string error;
         const bool started = server.start(&error);
@@ -501,7 +493,7 @@ void run_concurrent_dir_swap_atomic(const char* worker_path) {
         capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
         options.app_dir = dir_a.string();
         options.capsid_json_path.clear();
-        options.capsid_json_required = true;
+
         capsid::host::LocalDevHost server(std::move(options));
         std::string error;
         const bool started = server.start(&error);
@@ -538,7 +530,7 @@ void run_concurrent_dir_swap_atomic(const char* worker_path) {
         capsid::host::LocalDevHostOptions options = make_options(worker_path, ready[1]);
         options.app_dir = dir_a.string();
         options.capsid_json_path.clear();
-        options.capsid_json_required = true;
+
         capsid::host::LocalDevHost server(std::move(options));
         std::string error;
         require(server.start(&error), "post-swap start failed: " + error);
@@ -561,13 +553,13 @@ void run_concurrent_dir_swap_atomic(const char* worker_path) {
 int main(int argc, char** argv) {
     require(argc == 2, "expected capsid-worker path");
 
-    const std::string pool = "\"pool\":{\"minReady\":1,\"maxWorkers\":1}";
+    const std::string pool = "\"pool\":{\"workers\":1}";
 
     // 1. An env grant in the local document reaches the worker: the module
     //    and the exact env name are both authorized through the permissive
     //    host mirror, and the literal value arrives through capsid:env.
     run_success_scenario(argv[1], "env-grant",
-                         "{\"apiVersion\":\"capsid/app-v1\","
+                         "{\"apiVersion\":\"capsid/app-v2\","
                          "\"permissions\":{\"modules\":[\"capsid:env\"],"
                          "\"env\":{\"CAPSID_TEST_VAR\":{\"value\":\"granted-value\"}}}," +
                              pool + "}",
@@ -577,23 +569,20 @@ int main(int argc, char** argv) {
     //    the module is usable, but reading the variable is denied (the
     //    runtime throws "environment access denied").
     run_success_scenario(argv[1], "env-denied",
-                         "{\"apiVersion\":\"capsid/app-v1\","
+                         "{\"apiVersion\":\"capsid/app-v2\","
                          "\"permissions\":{\"modules\":[\"capsid:env\"]}," +
                              pool + "}",
                          kEnvWorkerSource, 0, "/@capsid/orders/env", "denied");
 
-    // 3. An absent default file (no capsid.json next to the server) is the
-    //    pre-v0.1.3 no-policy case: startup succeeds and the server serves
-    //    (a plain worker without module imports runs; any import would be
-    //    unauthorized under the deny-all baseline).
-    run_success_scenario(argv[1], "absent-default-noop", "", kPlainWorkerSource, 0,
-                         "/@capsid/orders/env", "plain-ok");
+    // A minimal v2 manifest uses the deny-all baseline.
+    run_success_scenario(argv[1], "minimal-manifest", R"({"apiVersion":"capsid/app-v2"})",
+                         kPlainWorkerSource, 0, "/@capsid/orders/env", "plain-ok");
 
     // 4. A fetch egress grant is honored end-to-end against a loopback
     //    listener (permissive host mirror -> egress descriptors -> worker).
     {
         LoopbackFixture fixture = start_loopback_fixture("fetch-ok");
-        const std::string capsid_json = "{\"apiVersion\":\"capsid/app-v1\","
+        const std::string capsid_json = "{\"apiVersion\":\"capsid/app-v2\","
                                         "\"permissions\":{\"modules\":[\"capsid:env\"],"
                                         "\"fetch\":{\"allow\":[\"127.0.0.1:" +
                                         std::to_string(fixture.port) + "\"]}}," + pool + "}";
@@ -612,39 +601,41 @@ int main(int argc, char** argv) {
     // 6. env valueFrom without --secrets-dir fails closed instead of
     //    degrading to an empty value.
     run_failure_scenario(argv[1], "value-from-rejected",
-                         "{\"apiVersion\":\"capsid/app-v1\","
+                         "{\"apiVersion\":\"capsid/app-v2\","
                          "\"permissions\":{\"modules\":[\"capsid:env\"],"
                          "\"env\":{\"CAPSID_TEST_VAR\":{\"valueFrom\":\"capsid-test-secret\"}}}," +
                              pool + "}",
-                         false, "valueFrom is unavailable in local mode");
+                         "valueFrom is unavailable in local mode");
 
-    // 7. An explicit --capsid-json that is missing is an operator error.
-    run_failure_scenario(argv[1], "explicit-missing-required", "", true, "cannot find");
+    // Startup requires an application manifest.
+    run_failure_scenario(argv[1], "missing-required", "", "cannot find");
 
-    // 8. The frozen schema still runs first: an unknown field fails closed.
+    // 8. The schema still runs first: an unknown field fails closed.
     run_failure_scenario(argv[1], "unknown-field-rejected",
-                         "{\"apiVersion\":\"capsid/app-v1\",\"permissions\":{},"
+                         "{\"apiVersion\":\"capsid/app-v2\",\"permissions\":{},"
                          "\"notAField\":true," +
                              pool + "}",
-                         false, "rejected at");
+                         "rejected at");
 
     // 9. `entry` is honored locally when the bundle is supplied inline.
     run_success_scenario(argv[1], "entry-overridden-by-explicit-bundle",
-                         "{\"apiVersion\":\"capsid/app-v1\",\"entry\":\"bundle.mjs\","
+                         "{\"apiVersion\":\"capsid/app-v2\",\"entry\":\"bundle.mjs\","
                          "\"permissions\":{}," +
                              pool + "}",
                          kPlainWorkerSource, 0, "/@capsid/orders/env", "plain-ok");
 
     // 10. pool.queue* arms the bounded admission queue locally.
     run_success_scenario(argv[1], "pool-queue-armed",
-                         "{\"apiVersion\":\"capsid/app-v1\",\"permissions\":{},"
-                         "\"pool\":{\"minReady\":1,\"maxWorkers\":1,"
+                         "{\"apiVersion\":\"capsid/app-v2\",\"permissions\":{},"
+                         "\"pool\":{\"workers\":1,"
                          "\"queueRequests\":8}}",
                          kPlainWorkerSource, 0, "/@capsid/orders/env", "plain-ok");
 
     // 11. Binding development uses the same app-v2 declaration and
     //     capsid:binding/<id> facade as managed mode.
-    const auto echo_registry = make_echo_binding_registry();
+    const auto echo_registry = make_binding_registry(
+        R"({"apiVersion":"capsid/binding-v1","permissions":{"modules":[]}})",
+        "export default ({config}) => ({echo(input) {return config.prefix + input;}});");
     run_success_scenario(
         argv[1], "binding-call",
         R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"binding:"}}}})json",
@@ -654,18 +645,45 @@ int main(int argc, char** argv) {
         "} };",
         0, "/@capsid/orders/binding", "binding:ok", echo_registry);
 
+    // One app port list must reach both endpoints authorized by separate manifest rules.
+    {
+        auto first = start_loopback_fixture("first");
+        auto second = start_loopback_fixture("second");
+        const std::string first_port = std::to_string(first.port);
+        const std::string second_port = std::to_string(second.port);
+        const auto registry = make_binding_registry(
+            R"({"apiVersion":"capsid/binding-v1","sandbox":{"requires":["network-client"]},)"
+            R"("permissions":{"modules":[],"net":{"allow":["127.0.0.1:)" +
+                first_port + R"(","127.0.0.1:)" + second_port + R"("]}}})",
+            R"(export default () => ({async read(port) {
+                   const response = await fetch('http://127.0.0.1:' + port);
+                   return await response.text();
+               }});)");
+        const std::string manifest =
+            R"({"apiVersion":"capsid/app-v2","bindings":{"echo":{"permissions":{"net":{"allow":["127.0.0.1:)" +
+            first_port + "," + second_port + R"("]}}}}})";
+        const std::string source =
+            "import echo from 'capsid:binding/echo'; export default {async fetch() {"
+            "return new Response(await echo.read(" +
+            first_port + ") + await echo.read(" + second_port + "));}};";
+        run_success_scenario(argv[1], "binding-port-list", manifest, source, 0,
+                             "/@capsid/orders/binding", "firstsecond", registry);
+        first.thread.join();
+        second.thread.join();
+    }
+
     // 12. A Binding declaration without a Host Registry / --bindings-dir fails
     //     closed instead of using a global search path.
     run_failure_scenario(
         argv[1], "binding-registry-required",
         R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"config":{"prefix":"binding:"}}}})json",
-        false, "bindings require --bindings-dir", {});
+        "bindings require --bindings-dir", {});
 
     // 13. Binding secret references without --secrets-dir fail closed.
     run_failure_scenario(
         argv[1], "binding-secret-rejected",
         R"json({"apiVersion":"capsid/app-v2","permissions":{},"bindings":{"echo":{"secrets":{"password":{"valueFrom":"echo-password"}}}}})json",
-        false, "binding secrets are unavailable in local mode", echo_registry);
+        "binding secrets are unavailable in local mode", echo_registry);
 
     // 14. Symlink / NTFS directory junction app_dir is rejected (P2 #12).
     run_reparse_app_dir_rejected(argv[1]);

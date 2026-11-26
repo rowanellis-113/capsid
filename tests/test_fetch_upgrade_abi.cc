@@ -47,7 +47,7 @@ ptrdiff_t write_bytes(int fd, const void* bytes, size_t size) {
 }
 struct Peer {
     int fd;
-    p::Parser parser{p::kVersionV4};
+    p::Parser parser;
     explicit Peer(int descriptor) : fd(descriptor) {}
     p::Frame next(uint16_t type) {
         p::Frame value;
@@ -67,11 +67,11 @@ struct Peer {
     }
     void send(uint16_t type, const std::vector<uint8_t>& payload) {
         p::Frame value;
-        value.version = p::kVersionV4;
+        value.version = p::kVersion;
         value.type = type;
         value.payload = payload;
         std::vector<uint8_t> wire;
-        require(p::encode_versioned(p::kVersionV4, value, &wire), "peer wire encode");
+        require(p::encode_versioned(p::kVersion, value, &wire), "peer wire encode");
         for (size_t at = 0; at < wire.size();) {
             const auto count = write_bytes(fd, wire.data() + at, wire.size() - at);
             require(count > 0, "peer writes actual IPC bytes");

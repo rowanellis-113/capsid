@@ -1,8 +1,6 @@
 # Host Embedding and Integration Specification
 
-> Reviewed against the 0.3.0-beta public headers/source on 2026-11-18.
-> ABI v7 remains frozen; the additive v4 APIs below do not imply ABI v8.
-> [Current status](release-status.md) separates this API baseline from measured snapshots.
+> The v0.3.2 SDK uses ABI v8, FetchRPC v4, Build Info v2 and Capability Policy v2. [Release status](release-status.md)
 
 This document is for gateways, servers, worker pools, and other embedders that link
 `libcapsid_runtime.a` directly. It combines the embedding interface (C ABI) with the
@@ -21,7 +19,7 @@ integration specification (threading/event loop/backpressure/ABI upgrades).
 A typical host flow is:
 
 1. After `capsid_worker_config_init()`, fill in `worker_path`, resource, and security policy;
-2. `capsid_worker_spawn()` creates a worker (it synchronously validates and deep-copies
+2. `capsid_worker_spawn_ex()` creates a worker (it synchronously validates and deep-copies
    all nested config strings, rules, and policies; after it returns, the host may free
    the original config memory; changing policy requires creating a new worker);
 3. `capsid_worker_load_bundle()` or `capsid_worker_load_bundle_named()` loads a source bundle;
@@ -35,10 +33,7 @@ After creation, the bundle must be sent first, then the host waits for
 
 ### Protocol selection (`capsid_worker_spawn_ex`)
 
-`capsid_worker_spawn()` is frozen at the published ABI v7 wire behavior
-(FetchRPC v3). Hosts that need FetchRPC v4 negotiate it through a
-separate, independently versioned descriptor instead of growing the
-frozen config struct:
+The default spawn uses FetchRPC v4 with zero channel capabilities. To enable channels, pass an initialized options descriptor to `capsid_worker_spawn_ex()`.
 
 ```c
 capsid_protocol_options options;
@@ -64,7 +59,7 @@ only, not permission to call channel APIs. Add optional HALF_CLOSE,
 FETCH_UPGRADE or CONNECTION_LIFETIME only when the Host implements their
 contracts and verifies the effective bits.
 
-`options == NULL` is exactly the legacy v3 entry. Every option field is
+`options == NULL` selects ordinary v4 transport with zero channel capabilities. Every option field is
 validated **before** any process, socketpair, or handle is created, so
 a rejected spawn (unknown descriptor version, unknown capability bit,
 nonzero reserved word, unsupported limit) leaves no resources behind
@@ -114,7 +109,7 @@ Do not block on a shared reactor waiting for a single worker. Startup, requests,
 shutdown should all have host deadlines; the worker's built-in deadline is a second
 boundary and does not replace the gateway deadline.
 
-`capsid_worker_fd()` is the ABI v7 integration surface and should not be
+`capsid_worker_fd()` is the ABI v8 integration surface and should not be
 interpreted as a permanent cross-platform abstraction. On POSIX it returns a
 non-blocking Unix socket fd; on Windows it returns a CRT fd backed by a loopback
 TCP socket. Cross-platform hosts should therefore keep the platform-specific
@@ -268,34 +263,14 @@ across every worker.
 
 ## ABI version policy
 
-The current ABI is v7. The compatibility rules are:
-
-- The same ABI version does not change existing struct fields, sizes, alignment, enum
-  values, or function signatures;
-- Independent functions and new event enum values may be added, but old hosts must
-  treat unknown events as explicit errors and must not silently interpret them;
-- Extending an existing struct requires an ABI version bump unless that struct defined
-  both-sides-verified size negotiation from the start;
-- Existing exported symbols are not removed or renamed within the same ABI version;
-- Frozen v7 structs require their full declared allocation and matching `*_init()`;
-  separately sized descriptors/views honor the explicit caller size and never
-  write outside that range. Do not assume an uninitialized `struct_size` controls
-  the ordinary frozen config initializer;
-- The library must pass the `abi_v7_current_header_current_library` test compiled and
-  linked against the frozen v7 header.
-
-When upgrading a host, first deploy a gateway that recognizes the new events, then
-enable the feature that produces them. Diagnostic-class new events appear only when the
-host explicitly requests them, so they do not affect v7 hosts that have not called the
-new functions.
+Build embedders with the ABI v8 header and library and deploy a matching worker. The runtime requires a full, initialized Build Info v2 descriptor and Capability Policy v2 descriptor when supplied. A rejected descriptor returns `CAPSID_INVALID_ARGUMENT`. The protocol-options and event-view APIs document their caller-size bounds separately.
 
 ## Channel ABI (FetchRPC v4 A2, frozen 2026-10-12)
 
 Channel operations require `capsid_worker_spawn_ex` at wire version 4
 with the negotiated `CAPSID_PROTOCOL_CAP_DUPLEX_CHANNEL |
 CAPSID_PROTOCOL_CAP_CHANNEL_LAYOUT_A2` bits; on connections without
-them every entry point answers `CAPSID_PROTOCOL_ERROR` (a plain
-`capsid_worker_spawn` worker can never produce a channel event).
+them every entry point answers `CAPSID_PROTOCOL_ERROR`.
 
 | entry point | direction | notes |
 | --- | --- | --- |
@@ -334,7 +309,7 @@ next `capsid_worker_next_event` on the same worker; ids, credit, and
 close codes are decoded copies.
 
 READY adaptation: the client splits and strips the v4 capability tail
-itself, so `CAPSID_EVENT_READY.payload` is exactly the v3-shaped
+itself, so `CAPSID_EVENT_READY.payload` is the
 compatibility/proof bytes; the negotiated state (wire version, both
 bitsets, effective intersection) is read from
 `capsid_worker_get_protocol_info`, never by parsing the tail by hand.
@@ -360,7 +335,7 @@ config.worker_path = "/path/to/capsid-worker";
 config.request_timeout_ms = 1000;
 
 capsid_worker *worker = NULL;
-capsid_result result = capsid_worker_spawn(&config, &worker);
+capsid_result result = capsid_worker_spawn_ex(&config, NULL, &worker);
 if (result != CAPSID_OK) {
     /* Log capsid_result_string(result); this startup failed. */
 }

@@ -260,7 +260,7 @@ void orphaned_http_dials(const char* worker_path) {
     std::puts(
         "orphan dials: 20 HTTP terminals, crossed results, two-slot reuse and no callbacks PASS");
 }
-void response_head_pressure(const char* worker_path, uint16_t version) {
+void response_head_pressure(const char* worker_path) {
     capsid_worker_config config;
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
@@ -268,8 +268,7 @@ void response_head_pressure(const char* worker_path, uint16_t version) {
     config.request_timeout_ms = 10000;
     capsid_protocol_options options;
     capsid_protocol_options_init(&options, sizeof(options));
-    options.wire_version = version;
-    options.capabilities = version == 4 ? 27 : 0;
+    options.capabilities = 27;
     Peer peer;
     ok(capsid_worker_spawn_ex(&config, &options, &peer.worker), "head pressure spawn");
     ok(capsid_worker_load_bundle(peer.worker, reinterpret_cast<const uint8_t*>(bundle),
@@ -328,9 +327,8 @@ void response_head_pressure(const char* worker_path, uint16_t version) {
     check(bodies[16] == "released:16", "release response completes under the same pressure");
     peer.begin(52, "/healthy");
     check(peer.response(52) == "healthy", "worker remains healthy after all seventeen terminals");
-    std::printf(
-        "response head pressure v%u: 16-owner progress barrier, 4096-byte wire queue, mixed large/fixed/empty/stream bodies and terminals PASS\n",
-        unsigned(version));
+    std::puts(
+        "response head pressure v4: 16-owner progress barrier, 4096-byte wire queue, mixed large/fixed/empty/stream bodies and terminals PASS");
 }
 
 void result_ack_pressure_case(const char* worker_path, unsigned delay_before_accept_ms) {
@@ -491,11 +489,8 @@ int run_main(int argc, char** argv) {
         result_ack_pressure(argv[1]);
         return 0;
     }
-    if (std::string(argv[2]) == "head-pressure-v3" || std::string(argv[2]) == "head-pressure-v4") {
-        const std::string scenario = argv[2];
-        check(scenario == "head-pressure-v3" || scenario == "head-pressure-v4",
-              "known pressure scenario");
-        response_head_pressure(argv[1], scenario == "head-pressure-v3" ? 3 : 4);
+    if (std::string(argv[2]) == "head-pressure-v4") {
+        response_head_pressure(argv[1]);
         return 0;
     }
     capsid_worker_config config;

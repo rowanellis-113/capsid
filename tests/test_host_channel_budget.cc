@@ -139,30 +139,29 @@ void concurrent_capacity() {
 void config_projection() {
 #ifndef _WIN32
     const std::string json =
-        R"({"apiVersion":"capsid/host-v1","applicationsRoot":"/srv/apps","stateRoot":"/var/lib/capsid","secretRootTemplate":"/var/lib/capsid/secrets/{application}","admin":{"unix":"/run/capsid/admin.sock","mode":"0600"},"isolation":{"mode":"strict","required":[]},"capacity":{"channelsTotal":3,"pendingDialsTotal":2,"channelQueueBytesTotal":"64KiB"},"listeners":[{"name":"public","tcp":"127.0.0.1:0","limits":{"channels":2,"channelQueueBytes":"32KiB"}}]})";
+        R"({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"isolation":{"mode":"strict","required":[]},"capacity":{"channelsTotal":3,"maxChannelMessageSize":"2MiB"},"listeners":[{"name":"public","tcp":"127.0.0.1:0","routing":{"mode":"path"},"limits":{"channels":2}}]})";
     require(validate_config_json(ConfigDocument::kHost, json).ok,
-            "new service/listener schema fields accepted");
+            "v2 service/listener schema fields accepted");
     ParsedHostConfig config;
     std::string error;
     const bool parsed = parse_host_config(json, &config, &error);
     require(parsed, error.c_str());
-    require(config.capacity.channels.channels == 3 && config.capacity.channels.pending_dials == 2 &&
-                config.capacity.channels.queue_bytes == 65536,
-            "service fields map to enforced limits");
+    require(config.capacity.channels.channels == 3 &&
+                config.capacity.channels.pending_dials == 16 &&
+                config.capacity.channels.queue_bytes == 32ULL * 1024ULL * 1024ULL,
+            "v2 service fields map to derived enforced limits");
     require(config.listeners[0].limits.channels == 2 &&
-                config.listeners[0].limits.channel_queue_bytes == 32768,
-            "listener fields map to enforced limits");
-    for (const auto& field : {"channelsTotal", "pendingDialsTotal"}) {
-        const auto bad =
-            "{\"apiVersion\":\"capsid/host-v1\",\"capacity\":{\"" + std::string(field) + "\":0}}";
-        require(!validate_config_json(ConfigDocument::kHost, bad).ok,
-                "operator count cannot disable finite quota with zero");
-    }
+                config.listeners[0].limits.channel_queue_bytes == 32ULL * 1024ULL * 1024ULL,
+            "v2 listener fields map to enforced limits");
+    const std::string zero_channels =
+        R"({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:0","routing":{"mode":"path"}}],"capacity":{"channelsTotal":0}})";
+    require(!validate_config_json(ConfigDocument::kHost, zero_channels).ok,
+            "operator count cannot disable finite quota with zero");
     for (const auto& size : {"0", "18446744073709551616B", "bogus"}) {
         auto bad = json;
-        bad.replace(bad.find("64KiB"), 5, size);
+        bad.replace(bad.find("2MiB"), 4, size);
         require(!parse_host_config(bad, &config, &error),
-                "invalid/zero/overflow aggregate size rejected at startup");
+                "invalid/zero/overflow maxChannelMessageSize rejected at startup");
         require(error == "invalid host.json capacity",
                 "size refusal comes from capacity parser, not another invalid fixture field");
     }

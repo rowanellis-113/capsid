@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
     capsid_worker_config_init(&config);
     config.worker_path = argv[1];
     capsid_worker* worker = NULL;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_OK, "worker spawn");
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_OK, "worker spawn");
     require(capsid_worker_set_cpu_affinity(worker, cpu) == CAPSID_OK, "worker affinity");
 
     cpu_set_t assigned;
@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
     capsid_worker_config_init(&config);
     config.worker_path = argv[1];
     capsid_worker* worker = NULL;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_OK, "worker spawn");
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_OK, "worker spawn");
     require(capsid_worker_set_cpu_affinity(worker, cpu) == CAPSID_OK, "worker affinity");
 
     // The child inherits the caller's mask at spawn, so the pin must have

@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
     rollback_config.sandbox_cgroup_path = cgroup.c_str();
     rollback_config.resource_limits = &rollback_probe;
     capsid_worker* rejected_worker = NULL;
-    if (capsid_worker_spawn(&rollback_config, &rejected_worker) != CAPSID_SYSTEM_ERROR ||
+    if (capsid_worker_spawn_ex(&rollback_config, NULL, &rejected_worker) != CAPSID_SYSTEM_ERROR ||
         rejected_worker != NULL || read_control(cgroup, "cpu.max") != original_cpu_max ||
         read_control(cgroup, "memory.max") != original_memory_max) {
         rmdir(cgroup.c_str());
@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
     config.resource_limits = &limits;
 
     capsid_worker* worker = NULL;
-    const capsid_result spawned = capsid_worker_spawn(&config, &worker);
+    const capsid_result spawned = capsid_worker_spawn_ex(&config, NULL, &worker);
     if (spawned != CAPSID_OK) {
         rmdir(cgroup.c_str());
         fail(std::string("cgroup worker spawn: ") + capsid_result_string(spawned));
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     config.resource_limits = &limits;
 
     worker = NULL;
-    if (capsid_worker_spawn(&config, &worker) != CAPSID_OK ||
+    if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK ||
         !cgroup_contains_pid(cgroup, capsid_worker_pid(worker)) ||
         read_control(cgroup, "cpu.max") != "max 100000" ||
         read_control(cgroup, "memory.high") != "max" ||

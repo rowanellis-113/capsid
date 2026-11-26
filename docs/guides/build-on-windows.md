@@ -2,7 +2,7 @@
 
 > Start with [releases and installation](install-packages.md), the
 > [development quick start](run-application.md#run-the-development-branch), the
-> [published-beta PowerShell quick start](run-application.md#windows-powershell), or the shared
+> [published-beta PowerShell quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#windows-powershell), or the shared
 > [source build guide](build-from-source.md). This page covers Windows-specific contracts;
 > [platform support](../reference/platform-support.md) compares the systems.
 

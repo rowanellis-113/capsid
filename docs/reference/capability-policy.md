@@ -18,7 +18,7 @@ Capabilities are evaluated independently in the following order:
 
 Unknown descriptors, unknown modules in `allowed_modules`, duplicate or zero
 rule IDs, non-canonical resources, and unsupported policy versions all make
-`capsid_worker_spawn()` return `CAPSID_INVALID_ARGUMENT`. spawn validates
+`capsid_worker_spawn_ex()` return `CAPSID_INVALID_ARGUMENT`. spawn validates
 synchronously and copies all nested strings and rules before returning, so a
 policy change requires creating a new worker.
 
@@ -87,10 +87,7 @@ only stdout/stderr output, stdin remains `unavailable`; `sys` has only
 `runtimeVersion` and `featureFlags` available, other resources remain
 `unavailable`.
 
-The capability policy current version is 2; the decoder still accepts version 1
-without an environment snapshot field, preserving its original semantics.
-Unknown versions, version 1 carrying environment data, or version 2 missing the
-snapshot section all fail closed.
+ABI v8 accepts Capability Policy v2. An enabled policy requires the complete descriptor and a HELLO environment section. Use an empty environment list when the application receives no variables.
 
 The machine-readable authoritative list is
 [`capability-manifest.json`](../data/capability-manifest.json). CMake computes SHA-256 at
@@ -179,7 +176,7 @@ config.capability_policy = &capability;
 ```
 
 The C++11 header provides `capsid::CapabilityPolicyBuilder` to hold temporary
-strings and descriptors before calling `capsid_worker_spawn()`; environment
+strings and descriptors before calling `capsid_worker_spawn_ex()`; environment
 snapshots are added with `.environment("APP_MODE", "production")`.
 
 If both `capsid_worker_config.egress_policy` and

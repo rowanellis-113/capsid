@@ -43,6 +43,7 @@
 # The delegated test driver also runs directly from Windows checkouts under WSL.
 /tests/sandbox/run-delegated-sandbox-tests.sh text eol=lf
 /tests/sandbox/run-tenant-memory-cgroup.sh text eol=lf
+/tests/test_install_script.sh text eol=lf
 
 # Reference captures bind exact module bytes, including the original mix of
 # LF and CRLF. Disable checkout normalization without rewriting fixture blobs.
@@ -75,7 +76,6 @@
 /bench/results/**/*.csv -whitespace
 
 # Byte-locked first-party source inputs listed in tools/format-policy.json.
-/tests/compat/runtime_v7.h -text
 /tests/helpers/workerd_listener_control.mjs -text
 /tests/helpers/ws_fetch_arguments_peer.mjs -text
 /tests/helpers/ws_fetch_boundary_peer.mjs -text

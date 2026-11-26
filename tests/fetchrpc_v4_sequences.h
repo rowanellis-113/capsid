@@ -7,6 +7,7 @@
 // registry (test_channel_registry.cc) run the SAME sequences through
 // this driver; neither run substitutes for the other (GLM plan T05/
 // T06).
+#include "capsid/runtime.h"
 #include "protocol.h"
 
 #include <jansson.h>
@@ -34,13 +35,13 @@ class SequenceTarget {
     virtual std::string apply(const std::string& dir, const capsid::protocol::Frame& frame) = 0;
 };
 
-// Canonical v3 startup payload (mirrors the fixed fixture in
+// Canonical startup payload (mirrors the fixed fixture in
 // tests/test_ipc_validation.cc); HELLO vectors and synthesized HELLOs
 // build on it so the REAL startup decoder accepts them.
 inline std::vector<uint8_t> canonical_startup_payload() {
     namespace p = capsid::protocol;
     std::vector<uint8_t> payload;
-    p::append_u32(&payload, 7); // CAPSID_ABI_VERSION
+    p::append_u32(&payload, CAPSID_ABI_VERSION);
     p::append_u64(&payload, 64u * 1024u * 1024u);
     p::append_u64(&payload, 0);
     p::append_u32(&payload, 64);
@@ -96,7 +97,7 @@ inline bool synthesize(const json_t* make, capsid::protocol::Frame* frame, std::
         const uint32_t caps =
             static_cast<uint32_t>(json_integer_value(json_object_get(make, "caps")));
         frame->type = kind == "hello" ? p::kHello : p::kReady;
-        frame->version = p::kVersionV4;
+        frame->version = p::kVersion;
         if (kind == "hello") {
             frame->payload = canonical_startup_payload();
             if ((caps & p::kCapChannelLayoutA2) != 0) {
@@ -165,7 +166,7 @@ inline bool synthesize(const json_t* make, capsid::protocol::Frame* frame, std::
     }
     if (kind == "data" || kind == "data-v3") {
         frame->type = p::kChannelData;
-        frame->version = kind == "data-v3" ? p::kVersion : p::kVersionV4;
+        frame->version = kind == "data-v3" ? 3 : p::kVersion;
         const bool text = json_is_true(json_object_get(make, "text"));
         const bool first = json_is_true(json_object_get(make, "first"));
         const bool last = json_is_true(json_object_get(make, "last"));
@@ -280,7 +281,7 @@ run_sequences(const json_t* sequences,
                     ++(*failures);
                     continue;
                 }
-                capsid::protocol::Parser v4(4);
+                capsid::protocol::Parser v4;
                 v4.append(it->second.data(), it->second.size());
                 if (v4.next(&frame) != capsid::protocol::kParseFrame) {
                     std::fprintf(stderr, "FAIL: step frame parses: %s/%s\n", name.c_str(),
@@ -295,7 +296,7 @@ run_sequences(const json_t* sequences,
                     ++(*failures);
                     continue;
                 }
-                if (frame.version == capsid::protocol::kVersion) {
+                if (frame.version == 3) {
                     // a v3 frame on the v4 connection: feed it raw
                     const std::string outcome = target->apply(dir, frame);
                     if (outcome != expect) {
@@ -309,7 +310,7 @@ run_sequences(const json_t* sequences,
                 }
                 std::vector<uint8_t> wire;
                 capsid::protocol::encode_versioned(4, frame, &wire);
-                capsid::protocol::Parser v4(4);
+                capsid::protocol::Parser v4;
                 v4.append(wire.data(), wire.size());
                 if (v4.next(&frame) != capsid::protocol::kParseFrame) {
                     std::fprintf(stderr, "FAIL: synthesized frame parses: %s\n", name.c_str());

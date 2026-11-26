@@ -113,6 +113,44 @@ std::string ascii_lower(std::string_view text) {
     return lower;
 }
 
+bool ascii_iequals(std::string_view a, std::string_view lower_b) {
+    if (a.size() != lower_b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const char c = a[i];
+        const char lc = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+        if (lc != lower_b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ascii_iequals_anycase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const char ca = a[i];
+        const char cb = b[i];
+        const char lca = (ca >= 'A' && ca <= 'Z') ? static_cast<char>(ca - 'A' + 'a') : ca;
+        const char lcb = (cb >= 'A' && cb <= 'Z') ? static_cast<char>(cb - 'A' + 'a') : cb;
+        if (lca != lcb) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_hop_by_hop_response_header(std::string_view name) {
+    return ascii_iequals(name, "connection") || ascii_iequals(name, "keep-alive") ||
+           ascii_iequals(name, "proxy-connection") || ascii_iequals(name, "transfer-encoding") ||
+           ascii_iequals(name, "te") || ascii_iequals(name, "trailer") ||
+           ascii_iequals(name, "upgrade") || ascii_iequals(name, "proxy-authenticate") ||
+           ascii_iequals(name, "proxy-authorization");
+}
+
 bool is_event_stream_content_type(std::string_view value) {
     std::size_t begin = 0;
     while (begin < value.size() && (value[begin] == ' ' || value[begin] == '\t')) {
@@ -143,9 +181,10 @@ std::size_t estimate_request_bytes(const http::request<http::string_body>& reque
 }
 
 // Parses the comma-separated token list of a Connection header and collects
-// the (lowercased) nominated names. Returns false on an empty or non-token
+// zero-copy views into `value`. Returns false on an empty or non-token
 // nomination, which fails the response closed (RFC 7230 §6.1).
-bool collect_connection_nominations(std::string_view value, std::set<std::string>* nominated) {
+bool collect_connection_nominations(std::string_view value,
+                                    std::vector<std::string_view>* nominated) {
     std::size_t begin = 0;
     while (begin <= value.size()) {
         while (begin < value.size() && (value[begin] == ' ' || value[begin] == '\t')) {
@@ -165,7 +204,7 @@ bool collect_connection_nominations(std::string_view value, std::set<std::string
                 return false;
             }
         }
-        nominated->insert(ascii_lower(value.substr(begin, trimmed - begin)));
+        nominated->push_back(value.substr(begin, trimmed - begin));
         if (end == std::string_view::npos) {
             break;
         }
@@ -208,11 +247,47 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
         if (closed_ || !dispatcher_) {
             return; // fail closed: no listener side to serve the event
         }
-        events_.emplace_back(std::move(executor), std::move(event));
+        if (!batches_.empty() && batches_.back().executor == executor) {
+            batches_.back().events.push_back(std::move(event));
+        } else {
+            EventBatch batch;
+            batch.executor = std::move(executor);
+            batch.events.push_back(std::move(event));
+            batches_.push_back(std::move(batch));
+        }
         if (!drain_scheduled_) {
             drain_scheduled_ = true;
             // Post under mutex_: serialized against close()/destruction, so a
             // post can never race the io_context.
+            asio::post(ioc, [weak = weak_from_this()] {
+                if (std::shared_ptr<WorkerEventMailbox> mailbox = weak.lock()) {
+                    mailbox->drain();
+                }
+            });
+        }
+    }
+
+    void post_batch(const std::shared_ptr<WorkerExecutor>& executor,
+                    std::vector<WorkerEvent>& events) {
+        if (events.empty()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (closed_ || !dispatcher_) {
+            return;
+        }
+        if (!batches_.empty() && batches_.back().executor == executor) {
+            auto& dst = batches_.back().events;
+            dst.insert(dst.end(), std::make_move_iterator(events.begin()),
+                       std::make_move_iterator(events.end()));
+        } else {
+            EventBatch batch;
+            batch.executor = executor;
+            batch.events.swap(events);
+            batches_.push_back(std::move(batch));
+        }
+        if (!drain_scheduled_) {
+            drain_scheduled_ = true;
             asio::post(ioc, [weak = weak_from_this()] {
                 if (std::shared_ptr<WorkerEventMailbox> mailbox = weak.lock()) {
                     mailbox->drain();
@@ -254,26 +329,32 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
     std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> dispatcher_;
     std::function<void()> on_batch_drained_;
 
+    struct EventBatch {
+        std::shared_ptr<WorkerExecutor> executor;
+        std::vector<WorkerEvent> events;
+    };
+
     void drain() {
-        std::deque<std::pair<std::shared_ptr<WorkerExecutor>, WorkerEvent>> local;
         for (;;) {
             {
                 // Swap + dispatch AFTER release (lock-order rule in the class
                 // comment): the dispatcher can route through acquire_worker/pick_worker,
                 // which takes the pool mutex.
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (events_.empty()) {
+                if (batches_.empty()) {
                     drain_scheduled_ = false;
                     return;
                 }
-                local.swap(events_);
+                drain_scratch_.swap(batches_);
             }
-            for (auto& [executor, event] : local) {
+            for (auto& batch : drain_scratch_) {
                 if (dispatcher_) {
-                    dispatcher_(std::move(executor), std::move(event));
+                    for (auto& event : batch.events) {
+                        dispatcher_(batch.executor, std::move(event));
+                    }
                 }
             }
-            local.clear();
+            drain_scratch_.clear();
             if (on_batch_drained_) {
                 on_batch_drained_();
             }
@@ -283,7 +364,8 @@ class WorkerEventMailbox : public std::enable_shared_from_this<WorkerEventMailbo
     mutable std::mutex mutex_;
     bool closed_ = false;
     bool drain_scheduled_ = false;
-    std::deque<std::pair<std::shared_ptr<WorkerExecutor>, WorkerEvent>> events_;
+    std::vector<EventBatch> batches_;
+    std::vector<EventBatch> drain_scratch_;
 };
 
 // Early-credit window (host, spec §8.1): response credit is returned at
@@ -339,10 +421,11 @@ struct PendingRequest {
         std::vector<std::uint8_t> bytes;
         bool credit_returned_early = false;
     };
-    std::deque<QueuedBody> body_queue;
+    std::vector<QueuedBody> body_queue;
     std::size_t body_queue_bytes = 0; // client-bytes accounting
     std::uint32_t pending_response_credit = 0;
     bool outgoing_credit_returned_early = false;
+    bool credit_flush_deferred = false;
     bool head_deferred = false;
     bool head_sent = false;
     bool head_only = false;
@@ -426,7 +509,7 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
         sessions_.reserve(128);
         streaming_inflight_.reserve(16);
         deferred_heads_.reserve(16);
-        upgrade_views_.reserve(16);
+        deferred_credits_.reserve(16);
         const char* bodyless_env = std::getenv("CAPSID_BODYLESS");
         if (bodyless_env != nullptr && std::strcmp(bodyless_env, "0") == 0) {
             bodyless_enabled_ = false;
@@ -470,13 +553,13 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     void dispatch_request(const std::shared_ptr<GenerationPool>& pool,
                           GenerationPool::DispatchLease lease,
                           const std::shared_ptr<ListenerSession>& session,
-                          const http::request<http::string_body>& request,
-                          const NormalizedPublicRequest& normalized);
+                          http::request<http::string_body> request,
+                          NormalizedPublicRequest normalized, bool upgrade);
     void wire_pool(const std::shared_ptr<GenerationPool>& pool);
     void enqueue_or_reject(const std::shared_ptr<GenerationPool>& pool,
                            const std::shared_ptr<ListenerSession>& session,
                            http::request<http::string_body> request,
-                           const NormalizedPublicRequest& normalized);
+                           NormalizedPublicRequest normalized, bool upgrade);
     void pump_pool_queue(const GenerationPool* pool_key);
     void fail_pool_queue_unavailable(const GenerationPool* pool_key);
     struct PoolQueue;
@@ -488,10 +571,11 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     void begin_request(const std::shared_ptr<GenerationPool>& pool,
                        GenerationPool::DispatchLease lease, std::uint64_t request_id,
                        const std::shared_ptr<ListenerSession>& session,
-                       const http::request<http::string_body>& request,
-                       const NormalizedPublicRequest& normalized);
+                       http::request<http::string_body> request, NormalizedPublicRequest normalized,
+                       bool upgrade);
     void handle_worker_event(std::shared_ptr<WorkerExecutor> executor, WorkerEvent event);
     void flush_deferred_response_heads();
+    void flush_deferred_response_credits();
     void start_streaming_head_write(const std::shared_ptr<WorkerExecutor>& executor,
                                     std::uint64_t request_id, PendingRequest& pending);
     void advance_request_body(const std::shared_ptr<WorkerExecutor>& executor,
@@ -529,6 +613,7 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
         std::shared_ptr<GenerationPool> pool;
         http::request<http::string_body> request;
         NormalizedPublicRequest normalized;
+        bool upgrade = false;
         std::size_t bytes = 0;
         std::optional<std::chrono::steady_clock::time_point> deadline;
     };
@@ -563,7 +648,7 @@ class ManagedListenerImpl : public std::enable_shared_from_this<ManagedListenerI
     std::unordered_map<std::uint64_t, std::uint64_t> next_request_id_;
     std::unordered_map<std::uint64_t, std::uint64_t> streaming_inflight_;
     std::vector<std::pair<std::shared_ptr<WorkerExecutor>, std::uint64_t>> deferred_heads_;
-    std::vector<PublicRequestHeaderView> upgrade_views_;
+    std::vector<std::pair<std::shared_ptr<WorkerExecutor>, std::uint64_t>> deferred_credits_;
     std::map<const GenerationPool*, PoolQueue> pool_queues_;
     std::map<std::pair<std::uint64_t, std::uint32_t>, std::shared_ptr<WebSocketSession>>
         websockets_;
@@ -693,18 +778,19 @@ void ListenerSession::handle_request(http::request<http::string_body> request,
     }
     const WebSocketUpgradeCheck ws_check =
         check_websocket_upgrade(header_views_, request.method_string(), request.version());
+    const bool upgrade_valid = (ws_check == WebSocketUpgradeCheck::kValid);
     const auto rejection = websocket_upgrade_rejection(ws_check);
     if (rejection.status != 0) {
         send_simple(static_cast<http::status>(rejection.status), rejection.body, false,
                     request.version());
         return;
     }
-    if (ws_check == WebSocketUpgradeCheck::kValid && !request.body().empty()) {
+    if (upgrade_valid && !request.body().empty()) {
         send_simple(http::status::bad_request, "WebSocket upgrade must be bodyless", false,
                     request.version());
         return;
     }
-    const RequestNormalizationResult normalized =
+    RequestNormalizationResult normalized =
         cached_normalized
             ? std::move(*cached_normalized)
             : normalize_validated_public_request(impl_->policy_, request.target(), header_views_);
@@ -752,7 +838,7 @@ void ListenerSession::handle_request(http::request<http::string_body> request,
                  pool->scale_out_in_flight())) {
                 current_pool_ = pool;
                 impl_->enqueue_or_reject(pool, shared_from_this(), std::move(request),
-                                         normalized.request);
+                                         std::move(normalized.request), upgrade_valid);
                 impl_->pump_pool_queue(pool.get());
                 return;
             }
@@ -773,11 +859,12 @@ void ListenerSession::handle_request(http::request<http::string_body> request,
             (void)pool->request_scale_out();
         }
         current_pool_ = pool;
-        impl_->enqueue_or_reject(pool, shared_from_this(), std::move(request), normalized.request);
+        impl_->enqueue_or_reject(pool, shared_from_this(), std::move(request),
+                                 std::move(normalized.request), upgrade_valid);
         return;
     }
-    impl_->dispatch_request(pool, std::move(lease), shared_from_this(), request,
-                            normalized.request);
+    impl_->dispatch_request(pool, std::move(lease), shared_from_this(), std::move(request),
+                            std::move(normalized.request), upgrade_valid);
 }
 
 bool ListenerSession::prepare_cors(const http::request<http::string_body>& request) {
@@ -1128,6 +1215,7 @@ bool ManagedListenerImpl::start(std::string* error) {
         [weak = weak_from_this()] {
             if (std::shared_ptr<ManagedListenerImpl> self = weak.lock()) {
                 self->flush_deferred_response_heads();
+                self->flush_deferred_response_credits();
             }
         });
 
@@ -1312,30 +1400,30 @@ void ManagedListenerImpl::drop_session(const std::shared_ptr<ListenerSession>& s
 void ManagedListenerImpl::dispatch_request(const std::shared_ptr<GenerationPool>& pool,
                                            GenerationPool::DispatchLease lease,
                                            const std::shared_ptr<ListenerSession>& session,
-                                           const http::request<http::string_body>& request,
-                                           const NormalizedPublicRequest& normalized) {
+                                           http::request<http::string_body> request,
+                                           NormalizedPublicRequest normalized, bool upgrade) {
     const std::shared_ptr<WorkerExecutor> executor = lease.executor();
     std::uint64_t& next = next_request_id_[executor->id()];
     const std::uint64_t request_id = ++next;
     session->current_executor_ = executor;
     session->current_request_id_ = request_id;
     session->current_pool_ = pool;
-    begin_request(pool, std::move(lease), request_id, session, request, normalized);
+    begin_request(pool, std::move(lease), request_id, session, std::move(request),
+                  std::move(normalized), upgrade);
     session->start_disconnect_probe();
 }
 
 void ManagedListenerImpl::enqueue_or_reject(const std::shared_ptr<GenerationPool>& pool,
                                             const std::shared_ptr<ListenerSession>& session,
                                             http::request<http::string_body> request,
-                                            const NormalizedPublicRequest& normalized) {
+                                            NormalizedPublicRequest normalized, bool upgrade) {
     const std::uint64_t max_q = pool->max_queued_requests();
     if (max_q == 0) {
         session->current_pool_.reset();
-        if (options_.metrics != nullptr) {
-            options_.metrics->count_pool_rejection(std::string(pool->application_id()),
-                                                   std::string(pool->tenant_id()),
-                                                   "queue_disabled");
-        }
+        record_pool_rejection(options_.metrics, options_.log, std::string(pool->application_id()),
+                              std::string(pool->tenant_id()),
+                              std::string(pool->generation_digest()), "queue_disabled",
+                              LogLane::kApp);
         const bool cold = pool->ready_workers() == 0;
         session->send_simple(cold ? http::status::service_unavailable
                                   : http::status::too_many_requests,
@@ -1349,10 +1437,9 @@ void ManagedListenerImpl::enqueue_or_reject(const std::shared_ptr<GenerationPool
     if (pq.entries.size() >= max_q ||
         (max_hdr_bytes != 0 && pq.queued_bytes + req_bytes > max_hdr_bytes)) {
         session->current_pool_.reset();
-        if (options_.metrics != nullptr) {
-            options_.metrics->count_pool_rejection(std::string(pool->application_id()),
-                                                   std::string(pool->tenant_id()), "queue_full");
-        }
+        record_pool_rejection(options_.metrics, options_.log, std::string(pool->application_id()),
+                              std::string(pool->tenant_id()),
+                              std::string(pool->generation_digest()), "queue_full", LogLane::kApp);
         if (pq.entries.empty()) {
             pool_queues_.erase(pool.get());
         }
@@ -1365,7 +1452,8 @@ void ManagedListenerImpl::enqueue_or_reject(const std::shared_ptr<GenerationPool
     entry.session = session;
     entry.pool = pool;
     entry.request = std::move(request);
-    entry.normalized = normalized;
+    entry.normalized = std::move(normalized);
+    entry.upgrade = upgrade;
     entry.bytes = req_bytes;
     if (q_timeout_ms != 0) {
         entry.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(q_timeout_ms);
@@ -1428,8 +1516,8 @@ void ManagedListenerImpl::pump_pool_queue(const GenerationPool* pool_key) {
         if (!entry.session || entry.session->closed()) {
             continue;
         }
-        dispatch_request(entry.pool, std::move(lease), entry.session, entry.request,
-                         entry.normalized);
+        dispatch_request(entry.pool, std::move(lease), entry.session, std::move(entry.request),
+                         std::move(entry.normalized), entry.upgrade);
     }
     arm_queue_timer(pool_key);
 }
@@ -1466,9 +1554,10 @@ void ManagedListenerImpl::wire_pool(const std::shared_ptr<GenerationPool>& pool)
     if (!pool) {
         return;
     }
-    pool->set_shared_event_sink(
-        [mailbox = mailbox_](std::shared_ptr<WorkerExecutor> executor, WorkerEvent event) {
-            mailbox->post(std::move(executor), std::move(event));
+    pool->set_shared_event_batch_sink(
+        [mailbox = mailbox_](const std::shared_ptr<WorkerExecutor>& executor,
+                             std::vector<WorkerEvent>& events) {
+            mailbox->post_batch(executor, events);
         });
     std::weak_ptr<GenerationPool> weak_pool = pool;
     pool->set_scale_callbacks(
@@ -1528,10 +1617,11 @@ void ManagedListenerImpl::expire_front_queued(PoolQueue& pq) {
     QueuedRequest expired = std::move(pq.entries.front());
     pq.entries.pop_front();
     pq.queued_bytes -= expired.bytes;
-    if (expired.pool && options_.metrics != nullptr) {
-        options_.metrics->count_pool_rejection(std::string(expired.pool->application_id()),
-                                               std::string(expired.pool->tenant_id()),
-                                               "queue_timeout");
+    if (expired.pool) {
+        record_pool_rejection(
+            options_.metrics, options_.log, std::string(expired.pool->application_id()),
+            std::string(expired.pool->tenant_id()), std::string(expired.pool->generation_digest()),
+            "queue_timeout", LogLane::kApp);
     }
     if (expired.session && !expired.session->closed()) {
         expired.session->current_pool_.reset();
@@ -1579,8 +1669,8 @@ void ManagedListenerImpl::begin_request(const std::shared_ptr<GenerationPool>& p
                                         GenerationPool::DispatchLease lease,
                                         std::uint64_t request_id,
                                         const std::shared_ptr<ListenerSession>& session,
-                                        const http::request<http::string_body>& request,
-                                        const NormalizedPublicRequest& normalized) {
+                                        http::request<http::string_body> request,
+                                        NormalizedPublicRequest normalized, bool upgrade) {
     const std::shared_ptr<WorkerExecutor> executor = lease.executor();
     if (!executor) {
         session->current_request_id_.reset();
@@ -1592,12 +1682,6 @@ void ManagedListenerImpl::begin_request(const std::shared_ptr<GenerationPool>& p
     }
     PendingRequest pending;
     pending.pool = pool;
-    upgrade_views_.clear();
-    for (const auto& field : request.base())
-        upgrade_views_.push_back({field.name_string(), field.value()});
-    const bool upgrade =
-        check_websocket_upgrade(upgrade_views_, request.method_string(), request.version()) ==
-        WebSocketUpgradeCheck::kValid;
     if (upgrade && !(executor->effective_channel_caps() & CAPSID_PROTOCOL_CAP_UPGRADE)) {
         session->current_request_id_.reset();
         session->current_executor_.reset();
@@ -1629,15 +1713,15 @@ void ManagedListenerImpl::begin_request(const std::shared_ptr<GenerationPool>& p
     pending.method = std::string(request.method_string());
     pending.keep_alive = request.keep_alive();
     pending.version = request.version();
-    pending.request_body = request.body();
+    pending.request_body = std::move(request.body());
     const bool has_body = !pending.request_body.empty();
 
     Command begin;
     begin.type = CommandType::kBeginRequest;
     begin.request_id = request_id;
     begin.method = pending.method;
-    begin.url = normalized.url;
-    begin.headers = normalized.headers;
+    begin.url = std::move(normalized.url);
+    begin.headers = std::move(normalized.headers);
     begin.upgrade_request = upgrade;
     begin.channel_max_message = executor->channel_limits().max_message_bytes;
     if (upgrade)
@@ -1650,7 +1734,7 @@ void ManagedListenerImpl::begin_request(const std::shared_ptr<GenerationPool>& p
         session->current_executor_.reset();
         session->current_pool_.reset();
         session->send_simple(http::status::service_unavailable, "worker exited", false,
-                             request.version());
+                             pending.version);
         return;
     }
     pending.request_ended = send_fused_end && !has_body;
@@ -1776,7 +1860,7 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
         }
         bool is_sse = false;
         for (const auto& [name, value] : event.headers) {
-            if (ascii_lower(name) == "content-type") {
+            if (ascii_iequals(name, "content-type")) {
                 is_sse = is_event_stream_content_type(value);
                 break;
             }
@@ -1908,7 +1992,12 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
         const bool credit_returned_early = pending.body_queue_bytes < kEarlyCreditWindow;
         if (credit_returned_early) {
             pending.pending_response_credit += static_cast<std::uint32_t>(event.body.size());
-            flush_pending_credit(executor, event.request_id, pending, false);
+            if (!pending.end_seen && !pending.credit_flush_deferred &&
+                (credit_grant_threshold_ == 0 ||
+                 pending.pending_response_credit >= credit_grant_threshold_)) {
+                pending.credit_flush_deferred = true;
+                deferred_credits_.emplace_back(executor, event.request_id);
+            }
         }
         if (pending.head_only) {
             // HEAD consumes the worker body without exposing it.
@@ -1969,16 +2058,19 @@ void ManagedListenerImpl::handle_worker_event(std::shared_ptr<WorkerExecutor> ex
     }
     case WorkerEvent::Type::kLog:
         if (options_.log != nullptr) {
+            const WorkerLogExtra* log_extra = event.log_extra.get();
             LogFields fields;
-            fields.level = event.binding_log ? event.log_level : "info";
+            fields.level = (log_extra && log_extra->binding_log) ? log_extra->log_level : "info";
             fields.event = log_events::kAppLog;
-            fields.app = event.application_id;
-            fields.generation = event.generation_digest;
-            fields.binding = event.binding_id;
+            if (log_extra != nullptr) {
+                fields.app = log_extra->application_id;
+                fields.generation = log_extra->generation_digest;
+                fields.binding = log_extra->binding_id;
+                fields.fields = log_extra->log_fields_json;
+            }
             if (event.request_id != 0) {
                 fields.request_id = std::to_string(event.request_id);
             }
-            fields.fields = event.log_fields_json;
             fields.message = event.text;
             options_.log->log(LogLane::kApp, std::move(fields));
         } else {
@@ -2152,6 +2244,28 @@ void ManagedListenerImpl::flush_deferred_response_heads() {
             write_end_block(executor, request_id);
         } else {
             start_streaming_head_write(executor, request_id, pending);
+        }
+    }
+}
+
+void ManagedListenerImpl::flush_deferred_response_credits() {
+    if (deferred_credits_.empty()) {
+        return;
+    }
+    std::vector<std::pair<std::shared_ptr<WorkerExecutor>, std::uint64_t>> batch;
+    batch.swap(deferred_credits_);
+    for (const auto& [executor, request_id] : batch) {
+        if (!executor) {
+            continue;
+        }
+        auto it = requests_.find({executor->id(), request_id});
+        if (it == requests_.end()) {
+            continue;
+        }
+        PendingRequest& pending = it->second;
+        pending.credit_flush_deferred = false;
+        if (!pending.end_seen && pending.pending_response_credit > 0) {
+            flush_pending_credit(executor, request_id, pending, false);
         }
     }
 }
@@ -2481,7 +2595,8 @@ void ManagedListenerImpl::reject_response_head(const std::shared_ptr<WorkerExecu
 
 bool ManagedListenerImpl::sanitize_response_headers(
     std::vector<std::pair<std::string, std::string>>* headers) {
-    std::set<std::string> nominated;
+    bool has_connection = false;
+    bool has_removable = false;
     unsigned content_length_count = 0;
     for (const auto& [name, value] : *headers) {
         if (name.empty()) {
@@ -2497,12 +2612,10 @@ bool ManagedListenerImpl::sanitize_response_headers(
                 return false;
             }
         }
-        const std::string lower = ascii_lower(name);
-        if (lower == "connection") {
-            if (!collect_connection_nominations(value, &nominated)) {
-                return false;
-            }
-        } else if (lower == "content-length") {
+        if (ascii_iequals(name, "connection")) {
+            has_connection = true;
+            has_removable = true;
+        } else if (ascii_iequals(name, "content-length")) {
             ++content_length_count;
             if (content_length_count > 1 || value.empty()) {
                 return false;
@@ -2512,21 +2625,53 @@ bool ManagedListenerImpl::sanitize_response_headers(
                     return false;
                 }
             }
+        } else if (!has_removable && is_hop_by_hop_response_header(name)) {
+            has_removable = true;
         }
     }
-    std::vector<std::pair<std::string, std::string>> sanitized;
-    sanitized.reserve(headers->size());
-    for (const auto& [name, value] : *headers) {
-        const std::string lower = ascii_lower(name);
-        if (lower == "connection" || lower == "keep-alive" || lower == "proxy-connection" ||
-            lower == "transfer-encoding" || lower == "te" || lower == "trailer" ||
-            lower == "upgrade" || lower == "proxy-authenticate" || lower == "proxy-authorization" ||
-            nominated.count(lower) != 0) {
-            continue; // hop-by-hop: never reaches the client
-        }
-        sanitized.push_back({name, value});
+    if (!has_connection && !has_removable) {
+        return true;
     }
-    *headers = std::move(sanitized);
+    std::vector<std::string_view> nominated;
+    if (has_connection) {
+        nominated.reserve(8);
+        for (const auto& [name, value] : *headers) {
+            if (ascii_iequals(name, "connection") &&
+                !collect_connection_nominations(value, &nominated)) {
+                return false;
+            }
+        }
+        std::vector<std::pair<std::string, std::string>> sanitized;
+        sanitized.reserve(headers->size());
+        for (auto& [name, value] : *headers) {
+            bool remove = is_hop_by_hop_response_header(name);
+            if (!remove) {
+                for (const std::string_view token : nominated) {
+                    if (ascii_iequals_anycase(name, token)) {
+                        remove = true;
+                        break;
+                    }
+                }
+            }
+            if (remove) {
+                continue;
+            }
+            sanitized.emplace_back(std::move(name), std::move(value));
+        }
+        *headers = std::move(sanitized);
+        return true;
+    }
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < headers->size(); ++read) {
+        if (is_hop_by_hop_response_header((*headers)[read].first)) {
+            continue;
+        }
+        if (write != read) {
+            (*headers)[write] = std::move((*headers)[read]);
+        }
+        ++write;
+    }
+    headers->resize(write);
     return true;
 }
 

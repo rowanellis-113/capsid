@@ -242,7 +242,7 @@ void exercise_cancellation(const char* worker_path, const char* fixture_path,
     egress_policy.attach(&config);
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn");
     const std::unique_ptr<capsid_worker, decltype(&capsid_worker_destroy)> worker_owner(
         worker, capsid_worker_destroy);
     require_result(capsid_worker_load_bundle(

@@ -95,6 +95,8 @@ capsid::protocol::Frame hello_frame(
             append_string16(&hello.payload, env_value);
         }
     }
+    capsid::protocol::append_u32(&hello.payload, 0);
+    capsid::protocol::append_u32(&hello.payload, 0);
     return hello;
 }
 
@@ -108,10 +110,6 @@ void test_hello_and_bundle_state_machine() {
         truncated.payload.resize(size);
         capsid::WorkerStartupState state;
         std::string error;
-        if (size == capsid::protocol::kHelloLegacyFixedPayloadSize) {
-            require(state.consume(truncated, &error), "legacy version-0 HELLO was rejected");
-            continue;
-        }
         require(!state.consume(truncated, &error), "truncated HELLO was accepted");
         require(!state.hello_received() && !error.empty(), "truncated HELLO mutated startup state");
     }
@@ -153,12 +151,10 @@ void test_hello_and_bundle_state_machine() {
 
     const capsid::protocol::Frame legacy_capability =
         hello_frame(std::string(), std::string(), "legacy-application", "capsid:permissions",
-                    "APP_*", std::string(), std::string(), CAPSID_CAPABILITY_POLICY_VERSION_1);
+                    "APP_*", std::string(), std::string(), 1);
     capsid::WorkerStartupState legacy_capability_state;
-    require(legacy_capability_state.consume(legacy_capability, &error) &&
-                legacy_capability_state.config().capability_policy.version() ==
-                    CAPSID_CAPABILITY_POLICY_VERSION_1,
-            "legacy capability HELLO was rejected");
+    require(!legacy_capability_state.consume(legacy_capability, &error),
+            "retired capability HELLO was accepted");
 
     const capsid::protocol::Frame environment =
         hello_frame(std::string(), std::string(), "environment-a", "capsid:env", "APP_*",

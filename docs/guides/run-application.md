@@ -53,108 +53,15 @@ Use `curl.exe` in Windows PowerShell. Expect `{"message":"hello from Capsid","pa
 
 ## Run the published beta
 
-Save this as UTF-8 `capsid.json`. It requests no capability modules or outbound
-Fetch targets:
-
-```json
-{
-  "apiVersion": "capsid/app-v1",
-  "permissions": {
-    "modules": [],
-    "fetch": { "allow": [] }
-  },
-  "pool": { "minReady": 1, "maxWorkers": 1 }
-}
-```
-
-Do not put credentials in either file. The [configuration guide](configure-application.md)
-explains how to request additional authority explicitly.
-
-Use a free loopback port. If startup fails, read stderr and correct the cause;
-there is no automatic port selection or business-request retry in this example.
-
-### Linux and macOS
-
-After installing to the default prefix:
-
-```sh
-CAPSID_BIN="$HOME/.local/bin"
-
-"$CAPSID_BIN/capsid-host" --mode single-worker \
-  --worker "$CAPSID_BIN/capsid-worker" \
-  --source-bundle ./bundle.mjs \
-  --source-name "file://$PWD/bundle.mjs" \
-  --application hello --listen 127.0.0.1:8080 \
-  --routing path --public-scheme http \
-  --public-authority 127.0.0.1:8080 \
-  --request-timeout-ms 5000 --strict-sandbox off \
-  --ready-fd 1 --capsid-json ./capsid.json
-```
-
-Set `CAPSID_BIN` to the directory containing both executables if you extracted the archive manually.
-
-### Windows PowerShell
-
-Point `$capsidBin` at the actual extracted package's `bin` directory:
-
-```powershell
-$capsidBin = 'C:/tools/capsid/bin'
-$bundle = (Resolve-Path -LiteralPath './bundle.mjs').Path
-$sourceName = ([System.Uri]$bundle).AbsoluteUri
-
-& "$capsidBin/capsid-host.exe" --mode single-worker `
-  --worker "$capsidBin/capsid-worker.exe" `
-  --source-bundle $bundle --source-name $sourceName `
-  --application hello --listen 127.0.0.1:8080 `
-  --routing path --public-scheme http `
-  --public-authority 127.0.0.1:8080 `
-  --request-timeout-ms 5000 --strict-sandbox off `
-  --ready-fd 1 --capsid-json ./capsid.json
-```
-
-### Wait for Readiness
-
-`--ready-fd 1` explicitly directs the one-line readiness record to stdout for
-this interactive example. Diagnostics go to stderr. Successful startup produces:
-
-```json
-{"schema":"capsid-host-ready-v1","app":"hello","address":"127.0.0.1","port":8080}
-```
-
-Wait for this record before sending the request. File existence, process
-creation or an empty log is not readiness. Supervising Hosts should use a
-separate inherited readiness descriptor and, when needed, the `--stop-fd`
-protocol; see [Host configuration](../reference/host-configuration.md).
-
-### Send a request
-
-Leave the Host running. In another terminal:
-
-```sh
-curl http://127.0.0.1:8080/@capsid/hello/
-```
-
-In Windows PowerShell, use `curl.exe` rather than the `curl` alias:
-
-```powershell
-curl.exe http://127.0.0.1:8080/@capsid/hello/
-```
-
-Expected JSON:
-
-```json
-{"message":"hello from Capsid","path":"/"}
-```
-
-The `path` routing mode removes `/@capsid/hello` before constructing the
-application request URL. Stop the foreground Host when finished, normally with
-Ctrl+C. This example does not install a system service or expose a public port.
+Use the guide shipped with the installed binaries. It includes the matching manifest,
+Host invocation, readiness record and request URL for each platform.
+[Linux and macOS quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#linux-and-macos) · [Windows PowerShell quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#windows-powershell)
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| `missing --...` | Use the complete command. On the published `v0.3.1-beta.1` local CLI, public authority, strict-sandbox mode and a valid readiness descriptor are explicit CLI inputs; on `dev/v0.3.2`, `--mode managed` requires `--host-config` and `--worker`. |
+| `missing --...` | In managed mode, supply both `--host-config` and `--worker`. |
 | `--ready-fd is not an open descriptor` | The chosen descriptor must be inherited and open. The interactive example uses stdout, descriptor 1. |
 | Listener bind failure | Confirm the address is loopback and the port is free; stop only processes you own. |
 | Import or outbound Fetch denied | Add the narrow request to `capsid.json`; do not broaden policy or disable security checks to hide a failure. |
@@ -166,8 +73,7 @@ Ctrl+C. This example does not install a system service or expose a public port.
 
 - [Application configuration](configure-application.md): modules, egress, resources and
   entry points.
-- [Host modes and options](../reference/host-configuration.md): static pools, Linux managed mode and
-  trusted bytecode precompilation (`capsid-bytecode-compile` + offline signing).
+- [Host modes and options](../reference/host-configuration.md) for local packages and Linux managed deployment.
 - [Framework guides](../reference/frameworks/README.md): bundling TypeScript or
   npm dependencies (e.g. with `esbuild`) into a self-contained ESM.
 - [Host integration](../reference/embedding-api.md): embedding the C/C++ runtime.

@@ -1,12 +1,15 @@
 #ifndef CAPSID_HOST_METRICS_H
 #define CAPSID_HOST_METRICS_H
 
+#include "host/structured_log.h"
+
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
 
 namespace capsid::host {
 class ServiceChannelBudget;
@@ -53,6 +56,16 @@ struct ProcessMetricsSnapshot {
     std::uint64_t worker_pid = 0;
 };
 
+struct AppPoolDiagnostics {
+    std::map<std::string, std::uint64_t> evictions;
+    std::map<std::string, std::uint64_t> rejections;
+    std::string last_eviction_reason;
+    std::string last_rejection_reason;
+};
+
+bool is_valid_pool_eviction_reason(std::string_view reason) noexcept;
+bool is_valid_pool_rejection_reason(std::string_view reason) noexcept;
+
 class MetricsRegistry {
   public:
     using ProcessSnapshotProvider = std::function<ProcessMetricsSnapshot()>;
@@ -82,6 +95,7 @@ class MetricsRegistry {
                              const std::string& reason);
     void count_pool_rejection(const std::string& app, const std::string& tenant,
                               const std::string& reason);
+    AppPoolDiagnostics app_pool_diagnostics(const std::string& app) const;
 
     // Prometheus text format, families in a fixed order, series sorted
     // within a family (deterministic output for scrapers and tests).
@@ -94,8 +108,19 @@ class MetricsRegistry {
     mutable std::mutex mutex_;
     std::map<std::string, std::uint64_t> counters_;
     std::map<std::string, std::uint64_t> gauges_;
+    std::map<std::string, AppPoolDiagnostics> app_pool_diagnostics_;
     std::map<std::string, std::weak_ptr<ServiceChannelBudget>> channel_budgets_;
 };
+
+// Single-source-of-truth three-surface recorders: record the same canonical
+// reason simultaneously into /metrics, Admin app status diagnostics (backed by
+// MetricsRegistry), and StructuredLog.
+void record_pool_eviction(MetricsRegistry* metrics, StructuredLog* log, const std::string& app,
+                          const std::string& tenant, const std::string& generation,
+                          const std::string& reason);
+void record_pool_rejection(MetricsRegistry* metrics, StructuredLog* log, const std::string& app,
+                           const std::string& tenant, const std::string& generation,
+                           const std::string& reason, LogLane lane = LogLane::kControl);
 
 } // namespace capsid::host
 

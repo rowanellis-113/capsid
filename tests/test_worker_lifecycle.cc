@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     config.strict_sandbox = 0;
 
     capsid_worker* worker = NULL;
-    if (capsid_worker_spawn(&config, &worker) != CAPSID_OK) {
+    if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK) {
         fail("could not spawn stubborn worker");
     }
     const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

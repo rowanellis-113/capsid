@@ -81,7 +81,7 @@ bench and examples, plus selected development package/config JSON.
 Never apply a blanket formatter to:
 
 - vendor, patches, licenses and installed dependencies;
-- `tests/fixtures`, the frozen ABI compatibility header and pinned `tests/wpt` inputs;
+- `tests/fixtures` and pinned `tests/wpt` inputs;
 - the explicit first-party source inputs in `preservedInputs` (source-hash-bound
   primary capture models/clients/drivers and the mutation runner template);
 - generated `js/streams.js`, `js/encoding-data` tables and `tools/encoding-data` locks;

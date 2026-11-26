@@ -107,14 +107,12 @@ void test_v2_minimal_documents_are_valid() {
 }
 
 void test_v1_documents_reject_binding_fields() {
-    require_unknown_field(
-        ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","bindingsRoot":"/etc/capsid/bindings"})json",
-        "/bindingsRoot", "Host v1 bindingsRoot");
-    require_unknown_field(
+    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v1"})json",
+                  ConfigErrorCode::kInvalidValue, "/apiVersion", "retired Host v1 rejected");
+    require_error(
         ConfigDocument::kApplication,
         R"json({"apiVersion":"capsid/app-v1","bindings":{},"pool":{"minReady":1,"maxWorkers":1}})json",
-        "/bindings", "App v1 bindings");
+        ConfigErrorCode::kInvalidValue, "/apiVersion", "retired App v1 rejected");
     require_unknown_field(ConfigDocument::kHost, host_v2_base(R"json("bindings":{})json"),
                           "/bindings", "Host v2 app-only bindings field");
 }
@@ -294,9 +292,11 @@ void test_binding_net_target_grammar_is_exact() {
                   "unified outbound target with comma port list");
     require_valid(ConfigDocument::kApplication, app_with_binding_net("10.0.0.0/8:3306,3307"),
                   "IPv4 CIDR outbound target with comma port list");
-    require_valid(ConfigDocument::kApplication, app_with_binding_net("host:*"),
+    require_error(ConfigDocument::kApplication, app_with_binding_net("host:*"),
+                  ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
                   "wildcard port on binding net target");
-    require_valid(ConfigDocument::kApplication, app_with_binding_net("example.com:8000-8010"),
+    require_error(ConfigDocument::kApplication, app_with_binding_net("example.com:8000-8010"),
+                  ConfigErrorCode::kInvalidValue, "/bindings/mongo/permissions/net/allow/0",
                   "port range on binding net target");
 
     require_error(ConfigDocument::kApplication, app_with_binding_net("example.com:0"),

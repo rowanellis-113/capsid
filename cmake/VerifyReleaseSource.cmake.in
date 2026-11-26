@@ -1,0 +1,12 @@
+# Compare the live checkout with the identity compiled into this Release.
+execute_process(COMMAND "@CGBI_GIT@" -C "@CGBI_CAPSID_SOURCE_DIR@" rev-parse HEAD
+    RESULT_VARIABLE commit_rc OUTPUT_VARIABLE current_commit OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT commit_rc EQUAL 0 OR NOT current_commit STREQUAL "@CGBI_CAPSID_COMMIT@")
+    message(FATAL_ERROR "Release source commit mismatch. Reconfigure and rebuild before installing.")
+endif()
+execute_process(COMMAND "@CGBI_GIT@" -C "@CGBI_CAPSID_SOURCE_DIR@"
+        status --porcelain=v1 --untracked-files=normal --ignore-submodules=none
+    RESULT_VARIABLE status_rc OUTPUT_VARIABLE tree_status OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT status_rc EQUAL 0 OR NOT tree_status STREQUAL "")
+    message(FATAL_ERROR "Release requires a clean worktree. Git status returned:\n${tree_status}")
+endif()

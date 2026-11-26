@@ -128,6 +128,22 @@ WorkerStabilityResult observe_worker_stability(const GenerationRecoveryState& st
                                                std::uint64_t continuously_ready_since_ms,
                                                std::uint64_t now_ms);
 
+struct StartupPermitRefusalDecision {
+    bool ok = false;
+    GenerationRecoveryState state;
+    std::uint64_t retry_delay_ms = 0;
+    WorkerRecoveryError error;
+};
+
+// Computes exponential backoff with jitter after a transient startup-permit
+// refusal without consuming crash-budget events. Consecutive refusals advance
+// replacement_attempts_since_stable; observe_worker_stability() resets it
+// after stable_reset_ms of continuous READY operation.
+StartupPermitRefusalDecision record_startup_permit_refusal(const GenerationRecoveryState& state,
+                                                           const WorkerRecoveryPolicy& policy,
+                                                           std::uint64_t now_ms,
+                                                           std::int32_t chosen_jitter_basis_points);
+
 struct FailedRequestRetryContext {
     std::string method;
     bool response_head_sent = false;

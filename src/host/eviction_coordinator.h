@@ -43,7 +43,7 @@ class GlobalEvictionCoordinator {
   public:
     GlobalEvictionCoordinator(MemoryBudgetConfig memory, TenancyConfig tenancy,
                               WorkerCapacityLedger* ledger, MemorySampler* sampler,
-                              MetricsRegistry* metrics = nullptr);
+                              MetricsRegistry* metrics = nullptr, StructuredLog* log = nullptr);
     ~GlobalEvictionCoordinator();
 
     GlobalEvictionCoordinator(const GlobalEvictionCoordinator&) = delete;
@@ -101,6 +101,7 @@ class GlobalEvictionCoordinator {
     WorkerCapacityLedger* ledger_ = nullptr;
     MemorySampler* sampler_ = nullptr;
     MetricsRegistry* metrics_ = nullptr;
+    StructuredLog* log_ = nullptr;
 
     mutable std::mutex registry_mutex_;
     mutable std::vector<std::weak_ptr<GenerationPool>> pools_;

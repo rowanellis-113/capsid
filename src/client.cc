@@ -5,6 +5,7 @@
 #include "client_ipc_metrics.h"
 #include "cpu_topology.h"
 #include "egress_policy.h"
+#include "ipc_validation.h"
 #include "protocol.h"
 #include "response_headers.h"
 #include "worker_exit_status.h"
@@ -90,7 +91,6 @@ struct capsid_worker {
     std::vector<uint8_t> write_buffer{0, uint8_t{0}, std::allocator<uint8_t>{}};
     // Pinned from the spawn config; v4 pins the parser and the Hello
     // capability tail. worker_capabilities lands from the READY tail.
-    uint16_t protocol_version = capsid::protocol::kVersion;
     uint32_t protocol_capabilities = 0;
     uint32_t worker_capabilities = 0;
     bool protocol_ready = false;
@@ -248,7 +248,7 @@ capsid_result queue_wire(capsid_worker* worker, const std::vector<uint8_t>& wire
 
 capsid_result queue_frame(capsid_worker* worker, const capsid::protocol::Frame& frame) {
     std::vector<uint8_t> wire(0);
-    if (!capsid::protocol::encode_versioned(worker->protocol_version, frame, &wire)) {
+    if (!capsid::protocol::encode(frame, &wire)) {
         return CAPSID_INVALID_ARGUMENT;
     }
     const capsid_result result = queue_wire(worker, wire);
@@ -304,7 +304,7 @@ capsid_result queue_chunked(capsid_worker* worker, uint16_t type, uint64_t reque
             frame.payload.assign(data + offset, data + offset + chunk_size);
         }
         std::vector<uint8_t> wire(0);
-        if (!capsid::protocol::encode_versioned(worker->protocol_version, frame, &wire)) {
+        if (!capsid::protocol::encode(frame, &wire)) {
             return CAPSID_INVALID_ARGUMENT;
         }
         batch.insert(batch.end(), wire.begin(), wire.end());
@@ -345,11 +345,8 @@ bool append_string32(std::vector<uint8_t>* output, const uint8_t* data, size_t s
 
 namespace {
 
-// Resolved protocol selection for one spawn: the frozen v7 config never
-// carries protocol fields; spawn_ex resolves them from the options
-// descriptor BEFORE any OS side effect (T01/T02).
+// Validate spawn options before creating a worker or acquiring OS resources.
 struct ResolvedProtocol {
-    uint16_t wire_version = capsid::protocol::kVersion;
     uint32_t capabilities = 0;
     capsid::protocol::ChannelLimits limits;
 };
@@ -379,15 +376,13 @@ capsid_result resolve_protocol_options(const capsid_protocol_options* options,
         return CAPSID_INVALID_ARGUMENT;
     }
     ResolvedProtocol resolved;
-    std::memcpy(&resolved.wire_version, &options->wire_version, sizeof(resolved.wire_version));
     uint16_t reserved16 = 0;
     std::memcpy(&reserved16, &options->reserved16, sizeof(reserved16));
     std::memcpy(&resolved.capabilities, &options->capabilities, sizeof(resolved.capabilities));
     if (reserved16 != 0) {
         return CAPSID_INVALID_ARGUMENT;
     }
-    if (resolved.wire_version != capsid::protocol::kVersion &&
-        resolved.wire_version != capsid::protocol::kVersionV4) {
+    if (options->wire_version != capsid::protocol::kVersion) {
         return CAPSID_INVALID_ARGUMENT;
     }
     if ((resolved.capabilities & ~capsid::protocol::kCapabilitiesKnownMask) != 0 ||
@@ -468,7 +463,6 @@ capsid_result send_hello(capsid_worker* worker, const capsid_worker_config& conf
     frame.request_id = 0;
     // The registry validates the host's own HELLO (bootstrap rule);
     // it needs the wire version on the in-memory frame.
-    frame.version = worker->protocol_version;
     capsid::protocol::append_u32(&frame.payload, CAPSID_ABI_VERSION);
     capsid::protocol::append_u64(&frame.payload, config.js_heap_limit);
     capsid::protocol::append_u64(&frame.payload, config.process_memory_limit);
@@ -574,16 +568,14 @@ capsid_result send_hello(capsid_worker* worker, const capsid_worker_config& conf
             return CAPSID_INVALID_ARGUMENT;
         }
     }
-    if (worker->protocol_version == capsid::protocol::kVersionV4) {
-        // Amended §1.2 (v4.1): [v3 startup payload][A2 limits
-        // extension when A2 announced][8-byte capability tail].
-        if ((worker->protocol_capabilities & capsid::protocol::kCapChannelLayoutA2) != 0 &&
-            !capsid::protocol::append_hello_a2_extension(&frame.payload, worker->protocol_limits)) {
-            return CAPSID_INTERNAL_ERROR;
-        }
-        capsid::protocol::append_u32(&frame.payload, worker->protocol_capabilities);
-        capsid::protocol::append_u32(&frame.payload, 0);
+    // Amended §1.2 (v4.1): [startup payload][A2 limits
+    // extension when A2 announced][8-byte capability tail].
+    if ((worker->protocol_capabilities & capsid::protocol::kCapChannelLayoutA2) != 0 &&
+        !capsid::protocol::append_hello_a2_extension(&frame.payload, worker->protocol_limits)) {
+        return CAPSID_INTERNAL_ERROR;
     }
+    capsid::protocol::append_u32(&frame.payload, worker->protocol_capabilities);
+    capsid::protocol::append_u32(&frame.payload, 0);
     // The registry validates the host's own HELLO first (bootstrap
     // rule: HELLO is frame one, from the host).
     if (worker->channel_registry_live) {
@@ -752,8 +744,7 @@ capsid_result map_frame_to_event(capsid_worker* worker, const capsid::protocol::
     // FetchRPC v4 A2 channel frames (T07): validate through the
     // shared registry (worker side), then surface as typed channel
     // events whose payload is the raw A2 frame payload for
-    // capsid_channel_event_decode. v3 workers can never reach here:
-    // their parser rejects channel frame types outright.
+    // capsid_channel_event_decode.
     if (frame.type >= capsid::protocol::kChannelOpen &&
         frame.type <= capsid::protocol::kConnectionLifetime) {
         if (!worker->channel_registry_live || !event->payload.data) {
@@ -809,17 +800,12 @@ capsid_result map_frame_to_event(capsid_worker* worker, const capsid::protocol::
     switch (frame.type) {
     case capsid::protocol::kReady:
         event->type = CAPSID_EVENT_READY;
-        // v3 connections have nothing to negotiate: capabilities
-        // stay zero and the info getter answers after READY too.
-        if (worker->protocol_version != capsid::protocol::kVersionV4) {
-            worker->protocol_ready = true;
-        }
-        if (worker->protocol_version == capsid::protocol::kVersionV4) {
+        {
             // Amended §1.2 (v4.1): READY appends the worker's
             // capability bitset; unknown bits, nonzero reserved,
             // or a closure violation are protocol errors. The tail
             // is split FIRST and stripped, so the sandbox proof
-            // verifier downstream reads exactly the v3-shaped
+            // verifier downstream reads exactly the standard
             // compatibility/proof payload and never has to guess
             // the trailing format (GLM plan T07).
             if (event->payload.size < capsid::protocol::kHelloV4TailSize) {
@@ -849,7 +835,7 @@ capsid_result map_frame_to_event(capsid_worker* worker, const capsid::protocol::
             worker->worker_capabilities = caps;
             worker->protocol_ready = true;
             // Strip the tail: the event payload is the original
-            // v3 READY bytes (compatibility id + proof).
+            // READY identity bytes (compatibility id + proof).
             worker->event_payload.resize(worker->event_payload.size() -
                                          capsid::protocol::kHelloV4TailSize);
             event->payload.size = worker->event_payload.size();
@@ -1245,9 +1231,10 @@ void capsid_resource_limits_init(capsid_resource_limits* limits) {
     limits->struct_size = sizeof(*limits);
 }
 
-void capsid_worker_config_init(capsid_worker_config* config) {
-    if (!config) {
-        return;
+capsid_result capsid_worker_config_init_sized(capsid_worker_config* config, uint32_t size,
+                                              uint32_t abi_version) {
+    if (!config || size != sizeof(*config) || abi_version != CAPSID_ABI_VERSION) {
+        return CAPSID_INVALID_ARGUMENT;
     }
     std::memset(config, 0, sizeof(*config));
     config->struct_size = sizeof(*config);
@@ -1280,6 +1267,7 @@ void capsid_worker_config_init(capsid_worker_config* config) {
     config->capability_policy = NULL;
     config->sandbox_network_namespace_fd = -1;
     config->egress_reserved = 0;
+    return CAPSID_OK;
 }
 
 const char* capsid_result_string(capsid_result result) {
@@ -1320,7 +1308,7 @@ capsid_result spawn_worker_internal(const capsid_worker_config* input,
                                     const ResolvedProtocol& resolved, capsid_worker** out_worker) {
     return capsid::abi::guard_result(
         [&]() -> capsid_result {
-            if (!input || !out_worker || input->struct_size < sizeof(capsid_worker_config) ||
+            if (!input || !out_worker || input->struct_size != sizeof(capsid_worker_config) ||
                 input->abi_version != CAPSID_ABI_VERSION) {
                 return CAPSID_INVALID_ARGUMENT;
             }
@@ -1445,6 +1433,12 @@ capsid_result spawn_worker_internal(const capsid_worker_config* input,
             const size_t cgroup_path_size =
                 config.sandbox_cgroup_path ? std::strlen(config.sandbox_cgroup_path) : 0;
             const uint64_t max_safe_js_integer = UINT64_C(9007199254740991);
+            const size_t hello_size =
+                capsid::protocol::kHelloFixedPayloadSize + ca_bundle_path_size +
+                egress_rule_payload_size + capability_payload_size +
+                ((resolved.capabilities & capsid::protocol::kCapChannelLayoutA2)
+                     ? capsid::protocol::kHelloA2ExtensionTotalSize
+                     : 0);
             if (config.js_heap_limit > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
                 (config.process_memory_limit != 0 &&
                  config.process_memory_limit < config.js_heap_limit) ||
@@ -1452,16 +1446,9 @@ capsid_result spawn_worker_internal(const capsid_worker_config* input,
                     static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
                 config.max_header_bytes < 8 ||
                 config.max_header_bytes > capsid::protocol::kMaxPayloadSize ||
-                config.max_queued_bytes <
-                    capsid::protocol::kHeaderSize + capsid::protocol::kHelloFixedPayloadSize ||
                 config.max_queued_bytes > capsid::protocol::kMaxBufferedBytes ||
-                ca_bundle_path_size > 4096 ||
-                capsid::protocol::kHelloFixedPayloadSize + ca_bundle_path_size +
-                        egress_rule_payload_size + capability_payload_size >
-                    capsid::protocol::kMaxPayloadSize ||
-                capsid::protocol::kHeaderSize + capsid::protocol::kHelloFixedPayloadSize +
-                        ca_bundle_path_size + egress_rule_payload_size + capability_payload_size >
-                    config.max_queued_bytes ||
+                ca_bundle_path_size > 4096 || hello_size > capsid::protocol::kMaxPayloadSize ||
+                capsid::protocol::kHeaderSize + hello_size > config.max_queued_bytes ||
                 config.max_fetch_request_body_bytes > max_safe_js_integer ||
                 config.max_fetch_response_body_bytes > max_safe_js_integer ||
                 config.strict_sandbox > 1 || config.sandbox_reserved != 0 ||
@@ -1856,7 +1843,7 @@ capsid_result spawn_worker_internal(const capsid_worker_config* input,
                 kill_and_reap(pid);
                 // Uniform OOM contract: same code and detail the ABI guard would
                 // have produced.
-                capsid::abi::set_error("capsid_worker_spawn: out of memory");
+                capsid::abi::set_error("capsid_worker_spawn_ex: out of memory");
                 return CAPSID_OUT_OF_MEMORY;
             } catch (...) {
                 close(sockets[0]);
@@ -1869,35 +1856,30 @@ capsid_result spawn_worker_internal(const capsid_worker_config* input,
                 // WP-06: a nothrow allocation failure is an OOM; report it with
                 // the same code and detail the ABI guard would have produced, so
                 // callers see a uniform CAPSID_OUT_OF_MEMORY contract.
-                capsid::abi::set_error("capsid_worker_spawn: out of memory");
+                capsid::abi::set_error("capsid_worker_spawn_ex: out of memory");
                 return CAPSID_OUT_OF_MEMORY;
             }
             worker->fd = sockets[0];
             // Protocol selection was resolved and validated from the options
             // descriptor BEFORE any OS side effect (spawn_ex); pin the stream
             // here once the worker object exists.
-            worker->protocol_version = resolved.wire_version;
             worker->protocol_capabilities = resolved.capabilities;
             try {
-                if (worker->protocol_version == capsid::protocol::kVersionV4) {
-                    worker->parser = capsid::protocol::Parser(capsid::protocol::kVersionV4);
-                    worker->protocol_limits = resolved.limits;
-                    if ((worker->protocol_capabilities & capsid::protocol::kCapDuplexChannel) !=
-                        0) {
-                        // One registry instance validates both directions of the
-                        // channel stream (options already passed the closure and
-                        // limits validation).
-                        capsid::ChannelRegistry::Options options;
-                        options.max_channels = resolved.limits.max_channels;
-                        options.max_message_bytes = resolved.limits.max_message_bytes;
-                        options.reassembly_budget_bytes = resolved.limits.reassembly_budget_bytes;
-                        options.send_budget_bytes = resolved.limits.send_budget_bytes;
-                        options.per_channel_queue_bytes = resolved.limits.per_channel_queue_bytes;
-                        options.dial_timeout_ms = resolved.limits.dial_timeout_ms;
-                        options.close_timeout_ms = resolved.limits.close_timeout_ms;
-                        worker->channel_registry = capsid::ChannelRegistry(options);
-                        worker->channel_registry_live = true;
-                    }
+                worker->protocol_limits = resolved.limits;
+                if ((worker->protocol_capabilities & capsid::protocol::kCapDuplexChannel) != 0) {
+                    // One registry instance validates both directions of the
+                    // channel stream (options already passed the closure and
+                    // limits validation).
+                    capsid::ChannelRegistry::Options options;
+                    options.max_channels = resolved.limits.max_channels;
+                    options.max_message_bytes = resolved.limits.max_message_bytes;
+                    options.reassembly_budget_bytes = resolved.limits.reassembly_budget_bytes;
+                    options.send_budget_bytes = resolved.limits.send_budget_bytes;
+                    options.per_channel_queue_bytes = resolved.limits.per_channel_queue_bytes;
+                    options.dial_timeout_ms = resolved.limits.dial_timeout_ms;
+                    options.close_timeout_ms = resolved.limits.close_timeout_ms;
+                    worker->channel_registry = capsid::ChannelRegistry(options);
+                    worker->channel_registry_live = true;
                 }
             } catch (...) {
                 close(sockets[0]);
@@ -1945,7 +1927,7 @@ capsid_result spawn_worker_internal(const capsid_worker_config* input,
             *out_worker = worker;
             return CAPSID_OK;
         },
-        "capsid_worker_spawn: out of memory", "capsid_worker_spawn: internal error");
+        "capsid_worker_spawn_ex: out of memory", "capsid_worker_spawn_ex: internal error");
 }
 
 } // namespace
@@ -1967,16 +1949,6 @@ capsid_result capsid_protocol_options_init(capsid_protocol_options* options, uin
     options->descriptor_version = CAPSID_PROTOCOL_DESCRIPTOR_VERSION;
     options->wire_version = capsid::protocol::kVersion;
     return CAPSID_OK;
-}
-
-capsid_result capsid_worker_spawn(const capsid_worker_config* config, capsid_worker** out_worker) {
-    // The published entry stays exactly v3; protocol selection is
-    // spawn_ex's job.
-    if (out_worker) {
-        *out_worker = nullptr;
-    }
-    const ResolvedProtocol v3;
-    return spawn_worker_internal(config, v3, out_worker);
 }
 
 capsid_result capsid_worker_spawn_ex(const capsid_worker_config* config,
@@ -2021,7 +1993,7 @@ capsid_result channel_abi_readiness(capsid_worker* worker) {
 
 capsid_result apply_and_queue_host(capsid_worker* worker, capsid::protocol::Frame* frame) {
     // the registry pins the connection's wire version
-    frame->version = capsid::protocol::kVersionV4;
+    frame->version = capsid::protocol::kVersion;
     capsid::ChannelRegistry next = worker->channel_registry;
     const capsid::ChannelRegistry::ApplyResult applied =
         next.apply(capsid::ChannelSide::Host, *frame);
@@ -2383,7 +2355,7 @@ capsid_result capsid_worker_upgrade_begin(capsid_worker* worker, uint64_t reques
     return capsid::abi::guard_result(
         [&]() -> capsid_result {
             capsid::protocol::Frame probe;
-            probe.version = capsid::protocol::kVersionV4;
+            probe.version = capsid::protocol::kVersion;
             probe.type = capsid::protocol::kRequestHead;
             probe.flags = capsid::protocol::kFlagRequestUpgrade;
             probe.request_id = request_id;
@@ -2555,7 +2527,7 @@ capsid_result capsid_worker_get_protocol_info(const capsid_worker* worker,
     capsid_protocol_info info = {};
     info.struct_size = caller_size;
     info.descriptor_version = CAPSID_PROTOCOL_DESCRIPTOR_VERSION;
-    info.wire_version = worker->protocol_version;
+    info.wire_version = capsid::protocol::kVersion;
     info.host_capabilities = worker->protocol_capabilities;
     info.worker_capabilities = worker->worker_capabilities;
     info.effective_capabilities = worker->protocol_capabilities & worker->worker_capabilities;
@@ -2755,7 +2727,6 @@ namespace {
 
 const size_t kApiMaxBindingSecrets = 64;
 const size_t kApiMaxBindingSecretValueBytes = 256U * 1024U;
-const size_t kApiMaxBindingRules = 1024;
 const size_t kApiMaxBindingEnvEntries = 256;
 const size_t kApiMaxBindingPathBytes = 4096;
 
@@ -2860,11 +2831,11 @@ capsid_result capsid_worker_load_binding(capsid_worker* worker,
                 return CAPSID_INVALID_ARGUMENT;
             }
             if (!valid_api_list(policy->modules, policy->module_count, 64, 64, NULL) ||
-                !valid_api_list(policy->net_rules, policy->net_rule_count, kApiMaxBindingRules,
+                !valid_api_list(policy->net_rules, policy->net_rule_count, capsid::kMaxBindingRules,
                                 1024, NULL) ||
-                !valid_api_list(policy->fs_read, policy->fs_read_count, kApiMaxBindingRules,
+                !valid_api_list(policy->fs_read, policy->fs_read_count, capsid::kMaxBindingRules,
                                 kApiMaxBindingPathBytes, NULL) ||
-                !valid_api_list(policy->fs_write, policy->fs_write_count, kApiMaxBindingRules,
+                !valid_api_list(policy->fs_write, policy->fs_write_count, capsid::kMaxBindingRules,
                                 kApiMaxBindingPathBytes, NULL) ||
                 !valid_api_list(policy->env, policy->env_count, kApiMaxBindingEnvEntries, 256,
                                 NULL) ||

@@ -245,103 +245,103 @@
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-ext-bad-limits": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "3e240dddaabae4ecec0faf178a921b868992c733bc7b5d1c9847eb4f239b45e4",
+      "sha256": "f3b177820437d9b4ff7e98bb1b162d1d62a0cd9240fec7b0bea1a9fc8d429c1f",
       "vector": "hello-a2-ext-bad-limits"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-ext-bad-size": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "1ff4928f65dbe577ff24d3a893d55b35933fe2fc1e8bded254d87eeb1c4105ba",
+      "sha256": "12562b4d735990a2d44cd4b06a26c441fd68b97f2395a4bf31562e1c80b31915",
       "vector": "hello-a2-ext-bad-size"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-ext-bad-version": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "0af3d2881a9daaa341c1eeeeff977c20e58194c6cf53a41c0805d29977152f42",
+      "sha256": "4468c84c5583707bd3bc2aba093a9c32b64c46762deb2038a25b28c70ad82ac0",
       "vector": "hello-a2-ext-bad-version"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-ext-missing": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "e287a82a36fbffc067a8d25e24797e21b2ff01bec09545195a26342b691b0e95",
+      "sha256": "d5b9f754b70fef7f9e3ea94ab33da78a1a0f8ca1cb84381bd703598930159207",
       "vector": "hello-a2-ext-missing"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-ext-reserved": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "3c5b9fb08c09ca07f5098549452598529edd6663f47d5ad95239f430f1f7f6f0",
+      "sha256": "2c06b939968f233a662515336eae878b5e85ab11b9c96730718cde0fa05c24aa",
       "vector": "hello-a2-ext-reserved"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-ext-without-cap": {
       "bytes": 192,
       "expect": "v4-parser-error:trailing HELLO payload",
-      "sha256": "85317eec2c05fbbc6916ff2ec4e39125db94b6e4ad0efced365bfd5b13ed0d21",
+      "sha256": "2ce84634ffd1264617e6e57337205ac0ce141ee5f23e0d081b2345a7a22f94ad",
       "vector": "hello-a2-ext-without-cap"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-full": {
       "bytes": 192,
       "expect": "v4-parser-ok",
-      "sha256": "8d732bb6d859c5fb8ecfeac5cf255b39c8f98093bc331a65964cf0f02908acf9",
+      "sha256": "e64885bc49cb8262b9791a0f707ad3136520bcd5f967bcdfe92d11223cb2d4c9",
       "vector": "hello-a2-full"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-a2-without-duplex": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "5c74e2897f07d060cf46d92761c51499533e496938f9443f418241fa8a6a49f6",
+      "sha256": "0fbe963d2a210f64d3f90481f3e0bb617593769b1ab7830c1c3efb26bf76e155",
       "vector": "hello-a2-without-duplex"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-duplex-without-a2": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "d2eff3b50eee1b4c133e7edc5b8bac2a6e366b3957b46e5e24ba6917e1795ff7",
+      "sha256": "20e1e7549aa51ed75ecdb3934dc7250fbc4904939cb60e06e462c02abf56505a",
       "vector": "hello-duplex-without-a2"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-final-all-capabilities": {
       "bytes": 192,
       "expect": "v4-parser-ok",
-      "sha256": "da19eef81e34a6df9af8907994482fadc38bd72815548b2294f9c4ac13f87a16",
+      "sha256": "85b6d7edf712be2832ed9737423b37abc35dd4dc1fb9c1c1c65bac9038a03845",
       "vector": "hello-final-all-capabilities"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-final-without-confirm": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "3c8cedf2a14ce6cb24162e2ab3972e91e375502180874354ab23b384e04c8439",
+      "sha256": "9b411efe21ba111687893cc9f74eb4f06329b8000b1fddd340a92e98b2e6fc28",
       "vector": "hello-final-without-confirm"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-reserved-cap-bit-5": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "cb5c780ba4b4b0c3921eacab93268ab34696d65be62ce248e13f56f480d3ad20",
+      "sha256": "6544deee61705940324b900671affbbc1239e952bd6fd150fb09da4edc8667e4",
       "vector": "hello-reserved-cap-bit-5"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-upgrade-without-duplex": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "08dff68c711494886e11fe649769cb1d1adcaac67a08059a0e68bb7960b7078c",
+      "sha256": "267531a5f62785a0db3efe59446f28c70542bea51247fb6dfaad4b3d95b67df7",
       "vector": "hello-upgrade-without-duplex"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-v4-carriage": {
       "bytes": 140,
       "expect": "v4-parser-ok",
-      "sha256": "776a95501e61dcff2e03e49b032896b0f430619967ccb6c444a81ad40eeebd9c",
+      "sha256": "3f25b3b9ce3c4a0d22a693049077693d9906b0b3447b7a5b1a0123ab80e14e5a",
       "vector": "hello-v4-carriage"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-v4-reserved-nonzero": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "8aa6ee51e0727a704b3d715ac5a06bee46dded6eaf1beb9225f22c0a5281905d",
+      "sha256": "e68247b12c61e7ae3f4c18094ba9a9fe81849d91b6aebd27cefcc4bb1dd8d630",
       "vector": "hello-v4-reserved-nonzero"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-v4-unknown-cap-bit": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "4acc595847a013776793496abaff7ad0d39a493a9a7694d4079fd6aed7d27408",
+      "sha256": "2b516691b9e3cba7d35e3cf1608819dc360306a84745452055ed120a9696ee1e",
       "vector": "hello-v4-unknown-cap-bit"
     },
     "tests/fuzz/corpus/protocol/golden-v4-hello-v42-confirm": {
       "bytes": 192,
       "expect": "v4-parser-ok",
-      "sha256": "359a18734f8bd0f8ad82ba5150ac1131bceba8c819a875d345eafdd4d682ddfc",
+      "sha256": "1647c17a49a909fd8e6fe7a4226a646fae971957c62e488ac277ca17d4dea599",
       "vector": "hello-v42-confirm"
     },
     "tests/fuzz/corpus/protocol/golden-v4-open-bad-kind": {
@@ -701,103 +701,103 @@
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-ext-bad-limits": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "3e240dddaabae4ecec0faf178a921b868992c733bc7b5d1c9847eb4f239b45e4",
+      "sha256": "f3b177820437d9b4ff7e98bb1b162d1d62a0cd9240fec7b0bea1a9fc8d429c1f",
       "vector": "hello-a2-ext-bad-limits"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-ext-bad-size": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "1ff4928f65dbe577ff24d3a893d55b35933fe2fc1e8bded254d87eeb1c4105ba",
+      "sha256": "12562b4d735990a2d44cd4b06a26c441fd68b97f2395a4bf31562e1c80b31915",
       "vector": "hello-a2-ext-bad-size"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-ext-bad-version": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "0af3d2881a9daaa341c1eeeeff977c20e58194c6cf53a41c0805d29977152f42",
+      "sha256": "4468c84c5583707bd3bc2aba093a9c32b64c46762deb2038a25b28c70ad82ac0",
       "vector": "hello-a2-ext-bad-version"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-ext-missing": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "e287a82a36fbffc067a8d25e24797e21b2ff01bec09545195a26342b691b0e95",
+      "sha256": "d5b9f754b70fef7f9e3ea94ab33da78a1a0f8ca1cb84381bd703598930159207",
       "vector": "hello-a2-ext-missing"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-ext-reserved": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello extension",
-      "sha256": "3c5b9fb08c09ca07f5098549452598529edd6663f47d5ad95239f430f1f7f6f0",
+      "sha256": "2c06b939968f233a662515336eae878b5e85ab11b9c96730718cde0fa05c24aa",
       "vector": "hello-a2-ext-reserved"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-ext-without-cap": {
       "bytes": 192,
       "expect": "v4-parser-error:trailing HELLO payload",
-      "sha256": "85317eec2c05fbbc6916ff2ec4e39125db94b6e4ad0efced365bfd5b13ed0d21",
+      "sha256": "2ce84634ffd1264617e6e57337205ac0ce141ee5f23e0d081b2345a7a22f94ad",
       "vector": "hello-a2-ext-without-cap"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-full": {
       "bytes": 192,
       "expect": "v4-parser-ok",
-      "sha256": "8d732bb6d859c5fb8ecfeac5cf255b39c8f98093bc331a65964cf0f02908acf9",
+      "sha256": "e64885bc49cb8262b9791a0f707ad3136520bcd5f967bcdfe92d11223cb2d4c9",
       "vector": "hello-a2-full"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-a2-without-duplex": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "5c74e2897f07d060cf46d92761c51499533e496938f9443f418241fa8a6a49f6",
+      "sha256": "0fbe963d2a210f64d3f90481f3e0bb617593769b1ab7830c1c3efb26bf76e155",
       "vector": "hello-a2-without-duplex"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-duplex-without-a2": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "d2eff3b50eee1b4c133e7edc5b8bac2a6e366b3957b46e5e24ba6917e1795ff7",
+      "sha256": "20e1e7549aa51ed75ecdb3934dc7250fbc4904939cb60e06e462c02abf56505a",
       "vector": "hello-duplex-without-a2"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-final-all-capabilities": {
       "bytes": 192,
       "expect": "v4-parser-ok",
-      "sha256": "da19eef81e34a6df9af8907994482fadc38bd72815548b2294f9c4ac13f87a16",
+      "sha256": "85b6d7edf712be2832ed9737423b37abc35dd4dc1fb9c1c1c65bac9038a03845",
       "vector": "hello-final-all-capabilities"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-final-without-confirm": {
       "bytes": 192,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "3c8cedf2a14ce6cb24162e2ab3972e91e375502180874354ab23b384e04c8439",
+      "sha256": "9b411efe21ba111687893cc9f74eb4f06329b8000b1fddd340a92e98b2e6fc28",
       "vector": "hello-final-without-confirm"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-reserved-cap-bit-5": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "cb5c780ba4b4b0c3921eacab93268ab34696d65be62ce248e13f56f480d3ad20",
+      "sha256": "6544deee61705940324b900671affbbc1239e952bd6fd150fb09da4edc8667e4",
       "vector": "hello-reserved-cap-bit-5"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-upgrade-without-duplex": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "08dff68c711494886e11fe649769cb1d1adcaac67a08059a0e68bb7960b7078c",
+      "sha256": "267531a5f62785a0db3efe59446f28c70542bea51247fb6dfaad4b3d95b67df7",
       "vector": "hello-upgrade-without-duplex"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-v4-carriage": {
       "bytes": 140,
       "expect": "v4-parser-ok",
-      "sha256": "776a95501e61dcff2e03e49b032896b0f430619967ccb6c444a81ad40eeebd9c",
+      "sha256": "3f25b3b9ce3c4a0d22a693049077693d9906b0b3447b7a5b1a0123ab80e14e5a",
       "vector": "hello-v4-carriage"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-v4-reserved-nonzero": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "8aa6ee51e0727a704b3d715ac5a06bee46dded6eaf1beb9225f22c0a5281905d",
+      "sha256": "e68247b12c61e7ae3f4c18094ba9a9fe81849d91b6aebd27cefcc4bb1dd8d630",
       "vector": "hello-v4-reserved-nonzero"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-v4-unknown-cap-bit": {
       "bytes": 140,
       "expect": "v4-parser-error:invalid hello capabilities",
-      "sha256": "4acc595847a013776793496abaff7ad0d39a493a9a7694d4079fd6aed7d27408",
+      "sha256": "2b516691b9e3cba7d35e3cf1608819dc360306a84745452055ed120a9696ee1e",
       "vector": "hello-v4-unknown-cap-bit"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-hello-v42-confirm": {
       "bytes": 192,
       "expect": "v4-parser-ok",
-      "sha256": "359a18734f8bd0f8ad82ba5150ac1131bceba8c819a875d345eafdd4d682ddfc",
+      "sha256": "1647c17a49a909fd8e6fe7a4226a646fae971957c62e488ac277ca17d4dea599",
       "vector": "hello-v42-confirm"
     },
     "tests/fuzz/corpus/worker_protocol/golden-v4-open-bad-kind": {
@@ -916,5 +916,5 @@
     }
   },
   "source": "tests/fixtures/fetchrpc-v4/vectors.json",
-  "sourceSHA256": "c79096c2da7d89581e1ce466bbdfdadf285d26a9ddaad2c87b3b84efeed76bd8"
+  "sourceSHA256": "299a9bdd9adec819f7736d08caffc5cf7b8b7e87e525b40136284b3535b6d747"
 }

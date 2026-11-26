@@ -36,7 +36,6 @@ const size_t kMaxBindingSourceBytes = 16U * 1024U * 1024U; // index.js
 const size_t kMaxBindingConfigBytes = 256U * 1024U;
 const size_t kMaxBindingSecrets = 64;
 const size_t kMaxBindingSecretValueBytes = 256U * 1024U;
-const size_t kMaxBindingRules = 1024;
 const size_t kMaxBindingModules = 64;
 const size_t kMaxBindingEnvEntries = 256;
 const size_t kMaxBindingStdioEntries = 3;
@@ -624,11 +623,11 @@ bool parse_binding_blob(const std::vector<uint8_t>& blob, capsid::WorkerBindingD
                            capsid::binding_profile_known, "sandbox profile", error) ||
         !read_binding_list(&cursor, descriptor_end, &decoded.modules, kMaxBindingModules,
                            capsid::binding_module_known, "module", error) ||
-        !read_binding_list(&cursor, descriptor_end, &decoded.net_rules, kMaxBindingRules,
+        !read_binding_list(&cursor, descriptor_end, &decoded.net_rules, capsid::kMaxBindingRules,
                            valid_binding_net_target, "net target", error) ||
-        !read_binding_list(&cursor, descriptor_end, &decoded.fs_read, kMaxBindingRules,
+        !read_binding_list(&cursor, descriptor_end, &decoded.fs_read, capsid::kMaxBindingRules,
                            valid_binding_path, "fs read path", error) ||
-        !read_binding_list(&cursor, descriptor_end, &decoded.fs_write, kMaxBindingRules,
+        !read_binding_list(&cursor, descriptor_end, &decoded.fs_write, capsid::kMaxBindingRules,
                            valid_binding_path, "fs write path", error) ||
         !read_binding_list(&cursor, descriptor_end, &decoded.env, kMaxBindingEnvEntries,
                            valid_binding_env_name, "environment name", error) ||
@@ -778,10 +777,8 @@ bool decode_wire_capability(const uint8_t** cursor, const uint8_t* end,
     if (!decode_wire_egress(cursor, end, &net, error)) {
         return false;
     }
-    const bool has_environment_section = *cursor != end;
     uint16_t env_entry_count = 0;
-    if (has_environment_section &&
-        (!capsid::protocol::read_u16(cursor, end, &env_entry_count) || env_entry_count > 256)) {
+    if (!capsid::protocol::read_u16(cursor, end, &env_entry_count) || env_entry_count > 256) {
         return reject(error, "invalid HELLO environment snapshot header");
     }
     std::vector<std::string> env_names(env_entry_count);
@@ -808,15 +805,8 @@ bool decode_wire_capability(const uint8_t** cursor, const uint8_t* end,
         }
         return true;
     }
-    if (version != CAPSID_CAPABILITY_POLICY_VERSION_1 &&
-        version != CAPSID_CAPABILITY_POLICY_VERSION) {
+    if (version != CAPSID_CAPABILITY_POLICY_VERSION) {
         return reject(error, "unknown HELLO capability policy version");
-    }
-    if (version == CAPSID_CAPABILITY_POLICY_VERSION && !has_environment_section) {
-        return reject(error, "version 2 capability policy lacks environment section");
-    }
-    if (version == CAPSID_CAPABILITY_POLICY_VERSION_1 && !env_entries.empty()) {
-        return reject(error, "version 1 capability policy has environment data");
     }
 
     capsid_egress_policy net_descriptor;
@@ -837,10 +827,6 @@ bool decode_wire_capability(const uint8_t** cursor, const uint8_t* end,
     descriptor.net_policy = &net_descriptor;
     descriptor.env_entries = env_entries.empty() ? NULL : &env_entries[0];
     descriptor.env_entry_count = env_entry_count;
-    if (version == CAPSID_CAPABILITY_POLICY_VERSION_1) {
-        descriptor.struct_size = offsetof(capsid_capability_policy, env_entries);
-        descriptor.version = CAPSID_CAPABILITY_POLICY_VERSION_1;
-    }
     if (!output->configure(&descriptor, error)) {
         return reject(error, "invalid HELLO capability policy");
     }
@@ -854,10 +840,8 @@ namespace capsid {
 bool decode_hello(const capsid::protocol::Frame& frame, capsid::WorkerStartupConfig* output,
                   std::string* error) {
     if (!output || frame.type != capsid::protocol::kHello ||
-        (frame.version != capsid::protocol::kVersion &&
-         frame.version != capsid::protocol::kVersionV4) ||
-        frame.flags != 0 || frame.request_id != 0 ||
-        frame.payload.size() < capsid::protocol::kHelloLegacyFixedPayloadSize ||
+        frame.version != capsid::protocol::kVersion || frame.flags != 0 || frame.request_id != 0 ||
+        frame.payload.size() < capsid::protocol::kHelloFixedPayloadSize ||
         frame.payload.size() > capsid::protocol::kMaxPayloadSize) {
         return reject(error, "invalid HELLO frame");
     }
@@ -912,42 +896,39 @@ bool decode_hello(const capsid::protocol::Frame& frame, capsid::WorkerStartupCon
         return false;
     }
     decoded.legacy_egress_configured = legacy_egress_configured != 0;
-    if (frame.version == capsid::protocol::kVersionV4) {
-        // Amended §1.2 (v4.1): the v4 Hello payload is [v3 startup]
-        // [A2 limits extension, only when A2 announced] [8-byte tail].
-        // The tail is read from the END so the extension (which sits
-        // before it) cannot be mistaken for the capability bits.
-        if (static_cast<size_t>(end - cursor) < capsid::protocol::kHelloV4TailSize) {
-            return reject(error, "invalid hello capabilities");
+    // Amended §1.2 (v4.1): the v4 Hello payload is [startup fields]
+    // [A2 limits extension, only when A2 announced] [8-byte tail].
+    // The tail is read from the END so the extension (which sits
+    // before it) cannot be mistaken for the capability bits.
+    if (static_cast<size_t>(end - cursor) < capsid::protocol::kHelloV4TailSize) {
+        return reject(error, "invalid hello capabilities");
+    }
+    const uint8_t* tail = end - capsid::protocol::kHelloV4TailSize;
+    uint32_t capabilities = 0;
+    uint32_t reserved = 0;
+    if (!capsid::protocol::read_u32(&tail, end, &capabilities) ||
+        !capsid::protocol::read_u32(&tail, end, &reserved) || reserved != 0 || tail != end ||
+        (capabilities & ~capsid::protocol::kCapabilitiesKnownMask) != 0 ||
+        !capsid::protocol::capabilities_satisfy_closure(capabilities)) {
+        return reject(error, "invalid hello capabilities");
+    }
+    if ((capabilities & capsid::protocol::kCapChannelLayoutA2) != 0) {
+        const uint8_t* extension_end = end - capsid::protocol::kHelloV4TailSize;
+        if (extension_end < cursor || !capsid::protocol::decode_hello_a2_extension(
+                                          cursor, static_cast<size_t>(extension_end - cursor),
+                                          &decoded.channel_limits, error)) {
+            return reject(error, "invalid hello extension");
         }
-        const uint8_t* tail = end - capsid::protocol::kHelloV4TailSize;
-        uint32_t capabilities = 0;
-        uint32_t reserved = 0;
-        if (!capsid::protocol::read_u32(&tail, end, &capabilities) ||
-            !capsid::protocol::read_u32(&tail, end, &reserved) || reserved != 0 || tail != end ||
-            (capabilities & ~capsid::protocol::kCapabilitiesKnownMask) != 0 ||
-            !capsid::protocol::capabilities_satisfy_closure(capabilities)) {
-            return reject(error, "invalid hello capabilities");
-        }
-        if ((capabilities & capsid::protocol::kCapChannelLayoutA2) != 0) {
-            const uint8_t* extension_end = end - capsid::protocol::kHelloV4TailSize;
-            if (extension_end < cursor || !capsid::protocol::decode_hello_a2_extension(
-                                              cursor, static_cast<size_t>(extension_end - cursor),
-                                              &decoded.channel_limits, error)) {
-                return reject(error, "invalid hello extension");
-            }
-            // decode_hello_a2_extension consumed exactly the 48-byte
-            // extension; the tail (already validated) follows.
-            cursor = extension_end;
-            decoded.channel_limits_present = true;
-        }
-        decoded.protocol_version = capsid::protocol::kVersionV4;
-        decoded.host_capabilities = capabilities;
-        // consume the validated tail only when the cursor has reached
-        // it; otherwise stray bytes fall to the trailing-bytes check
-        if (cursor == end - capsid::protocol::kHelloV4TailSize) {
-            cursor = end;
-        }
+        // decode_hello_a2_extension consumed exactly the 48-byte
+        // extension; the tail (already validated) follows.
+        cursor = extension_end;
+        decoded.channel_limits_present = true;
+    }
+    decoded.host_capabilities = capabilities;
+    // consume the validated tail only when the cursor has reached
+    // it; otherwise stray bytes fall to the trailing-bytes check
+    if (cursor == end - capsid::protocol::kHelloV4TailSize) {
+        cursor = end;
     }
     if (cursor != end) {
         return reject(error, "trailing HELLO payload");
@@ -961,7 +942,7 @@ bool decode_hello(const capsid::protocol::Frame& frame, capsid::WorkerStartupCon
         decoded.initial_window != 0 && decoded.max_header_bytes >= 8 &&
         decoded.max_header_bytes <= capsid::protocol::kMaxPayloadSize &&
         decoded.max_queued_bytes >=
-            capsid::protocol::kHeaderSize + capsid::protocol::kHelloLegacyFixedPayloadSize &&
+            capsid::protocol::kHeaderSize + capsid::protocol::kHelloFixedPayloadSize &&
         decoded.max_queued_bytes <= capsid::protocol::kMaxBufferedBytes &&
         frame.payload.size() <= decoded.max_queued_bytes - capsid::protocol::kHeaderSize &&
         decoded.file_descriptor_limit >= 4 &&
@@ -1113,14 +1094,38 @@ bool WorkerStartupState::consume_load_binding(const protocol::Frame& frame, std:
     return true;
 }
 
-bool decode_worker_request_head(const protocol::Frame& frame, uint32_t max_header_bytes,
-                                WorkerRequestHead* output, std::string* error) {
+static bool read_view16(const uint8_t** cursor, const uint8_t* end, WorkerSlice* value) {
+    uint16_t size = 0;
+    if (!capsid::protocol::read_u16(cursor, end, &size) ||
+        static_cast<size_t>(end - *cursor) < size) {
+        return false;
+    }
+    *value = WorkerSlice(reinterpret_cast<const char*>(*cursor), size);
+    *cursor += size;
+    return true;
+}
+
+static bool read_view32(const uint8_t** cursor, const uint8_t* end, WorkerSlice* value) {
+    uint32_t size = 0;
+    if (!capsid::protocol::read_u32(cursor, end, &size) ||
+        static_cast<uint64_t>(end - *cursor) < size) {
+        return false;
+    }
+    *value = WorkerSlice(reinterpret_cast<const char*>(*cursor), size);
+    *cursor += size;
+    return true;
+}
+
+bool decode_worker_request_head_views(const protocol::Frame& frame, uint32_t max_header_bytes,
+                                      WorkerRequestHeadView* output,
+                                      std::vector<WorkerRequestHeaderView>* headers_out,
+                                      std::string* error) {
     if (error) {
         error->clear();
     }
-    if (!output || frame.type != protocol::kRequestHead ||
+    if (!output || !headers_out || frame.type != protocol::kRequestHead ||
         (frame.flags & ~(protocol::kFlagRequestEnd | protocol::kFlagRequestUpgrade)) != 0 ||
-        ((frame.flags & protocol::kFlagRequestUpgrade) && frame.version != protocol::kVersionV4) ||
+        ((frame.flags & protocol::kFlagRequestUpgrade) && frame.version != protocol::kVersion) ||
         frame.request_id == 0 || frame.payload.size() < 8 ||
         frame.payload.size() > max_header_bytes ||
         frame.payload.size() > protocol::kMaxPayloadSize) {
@@ -1128,35 +1133,70 @@ bool decode_worker_request_head(const protocol::Frame& frame, uint32_t max_heade
     }
     const uint8_t* cursor = &frame.payload[0];
     const uint8_t* end = cursor + frame.payload.size();
-    WorkerRequestHead decoded;
+    WorkerRequestHeadView decoded;
     decoded.bodyless = (frame.flags & capsid::protocol::kFlagRequestEnd) != 0;
     uint16_t count = 0;
-    if (!read_string16(&cursor, end, &decoded.method) ||
-        !read_string32(&cursor, end, &decoded.url) || decoded.method.empty() ||
-        decoded.url.empty() || !protocol::read_u16(&cursor, end, &count)) {
+    if (!read_view16(&cursor, end, &decoded.method) || !read_view32(&cursor, end, &decoded.url) ||
+        decoded.method.empty() || decoded.url.empty() ||
+        !protocol::read_u16(&cursor, end, &count)) {
         return reject(error, "invalid request head fields");
     }
-    decoded.headers.reserve(count);
+    headers_out->clear();
+    headers_out->reserve(count);
     for (uint16_t index = 0; index < count; ++index) {
-        WorkerRequestHeader header;
-        if (!read_string16(&cursor, end, &header.name) ||
-            !read_string32(&cursor, end, &header.value) || header.name.empty()) {
+        WorkerRequestHeaderView header;
+        if (!read_view16(&cursor, end, &header.name) || !read_view32(&cursor, end, &header.value) ||
+            header.name.empty()) {
+            headers_out->clear();
             return reject(error, "invalid request header");
         }
-        decoded.headers.push_back(header);
+        headers_out->push_back(header);
     }
     if (frame.flags & protocol::kFlagRequestUpgrade) {
         protocol::UpgradeTail tail;
-        if (!decoded.bodyless || !protocol::decode_upgrade_head(frame, &tail, error))
+        if (!decoded.bodyless || !protocol::decode_upgrade_head(frame, &tail, error)) {
+            headers_out->clear();
             return false;
+        }
         decoded.upgrade_channel_id = tail.channel_id;
         decoded.upgrade_max_message_bytes = tail.max_message_bytes;
         cursor += 12;
     }
     if (cursor != end) {
+        headers_out->clear();
         return reject(error, "trailing request head payload");
     }
     *output = decoded;
+    return true;
+}
+
+bool decode_worker_request_head(const protocol::Frame& frame, uint32_t max_header_bytes,
+                                WorkerRequestHead* output, std::string* error) {
+    if (!output) {
+        if (error) {
+            error->clear();
+        }
+        return reject(error, "invalid request head frame");
+    }
+    WorkerRequestHeadView view;
+    std::vector<WorkerRequestHeaderView> header_views;
+    if (!decode_worker_request_head_views(frame, max_header_bytes, &view, &header_views, error)) {
+        return false;
+    }
+    WorkerRequestHead decoded;
+    decoded.method.assign(view.method.data(), view.method.size());
+    decoded.url.assign(view.url.data(), view.url.size());
+    decoded.bodyless = view.bodyless;
+    decoded.upgrade_channel_id = view.upgrade_channel_id;
+    decoded.upgrade_max_message_bytes = view.upgrade_max_message_bytes;
+    decoded.headers.reserve(header_views.size());
+    for (const auto& header_view : header_views) {
+        WorkerRequestHeader header;
+        header.name.assign(header_view.name.data(), header_view.name.size());
+        header.value.assign(header_view.value.data(), header_view.value.size());
+        decoded.headers.push_back(std::move(header));
+    }
+    *output = std::move(decoded);
     return true;
 }
 

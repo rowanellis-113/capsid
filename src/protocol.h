@@ -12,19 +12,9 @@ namespace capsid {
 namespace protocol {
 
 static const uint32_t kMagic = 0x43545257u;
-static const uint16_t kVersion = 3;
-// FetchRPC v4 (docs/reference/fetchrpc-v4.md): adds duplex channels and Upgrade
-// negotiation on top of the v3 vocabulary. A connection speaks exactly
-// one version; the parser pins its expectation at construction and
-// rejects every other version deterministically.
-static const uint16_t kVersionV4 = 4;
-// Bootstrap mode for the worker side (amended §1.2): the first frame
-// may be version 3 or 4 and locks the connection to that version;
-// every later frame must match. Steady-state peers never mix.
-static const uint16_t kVersionNegotiate = 0;
+static const uint16_t kVersion = 4;
 static const size_t kHeaderSize = 24;
-static const size_t kHelloLegacyFixedPayloadSize = 106;
-static const size_t kHelloFixedPayloadSize = 108;
+static const size_t kHelloFixedPayloadSize = 116;
 static const uint32_t kMaxPayloadSize = 64u * 1024u;
 static const uint32_t kMaxFixedBodySize = 4u * 1024u;
 static const size_t kMaxBufferedBytes = 4u * 1024u * 1024u;
@@ -48,15 +38,13 @@ static const uint32_t kFlagBindingLog = 1u;
 static const uint32_t kErrorFlagTimeout = 1u;
 static const uint32_t kReadySandboxFeatureMask = (1u << 10) - 1u;
 // ---- v4 flags (flag namespaces stay per frame type) ----
-// Pre-A2 draft flag; A2 OPEN is worker->host and requires flags == 0.
-static const uint32_t kFlagChanOutbound = 1u;
 // kChannelData: message payload is text (workerd WebSocket semantics).
 static const uint32_t kFlagChanText = 4u;
 // kRequestHead (v4): the request carries an accepted-pending Upgrade.
 static const uint32_t kFlagRequestUpgrade = 32u;
 // kResponseHead (v4): status 101 accept; payload carries channel_id.
 static const uint32_t kFlagResponseUpgrade = 32u;
-// Hello v4 appends a capability tail to the (variable-length) v3
+// Hello v4 appends a capability tail to the variable-length
 // startup-config payload: u32 capabilities + u32 reserved. Validation
 // reads the last 8 bytes.
 static const size_t kHelloV4TailSize = 8;
@@ -313,9 +301,7 @@ struct Frame {
     uint16_t type = 0;
     uint32_t flags = 0;
     uint64_t request_id = 0;
-    // Wire version this frame arrived with (filled by Parser::next;
-    // zero from encode-only callers).
-    uint16_t version = 0;
+    uint16_t version = kVersion;
     // The C++11 count/value/allocator overload keeps Debug STL allocation
     // throwable and the frame empty, even without guaranteed elision.
     std::vector<uint8_t> payload{0, uint8_t{0}, std::allocator<uint8_t>{}};
@@ -325,9 +311,7 @@ enum ParseResult { kParseNeedMore, kParseFrame, kParseError };
 
 class Parser {
   public:
-    // expected_version pins the wire version this parser accepts; the
-    // default keeps the shipped v3 behavior byte-identical.
-    explicit Parser(uint16_t expected_version = kVersion);
+    Parser();
 
     bool append(const uint8_t* data, size_t size);
     ParseResult next(Frame* frame);
@@ -338,7 +322,11 @@ class Parser {
     std::vector<uint8_t> buffer_;
     size_t offset_;
     std::string error_;
-    uint16_t expected_version_;
+};
+
+struct PayloadSpan {
+    const uint8_t* data;
+    size_t size;
 };
 
 bool encode(const Frame& frame, std::vector<uint8_t>* output);
@@ -352,12 +340,16 @@ bool append_encoded(uint16_t type, uint32_t flags, uint64_t request_id, const ui
 bool append_encoded_versioned(uint16_t version, uint16_t type, uint32_t flags, uint64_t request_id,
                               const uint8_t* payload, size_t payload_size,
                               std::vector<uint8_t>* output);
+bool append_encoded_scatter_versioned(uint16_t version, uint16_t type, uint32_t flags,
+                                      uint64_t request_id, const PayloadSpan* spans,
+                                      size_t span_count, size_t total_payload_size,
+                                      std::vector<uint8_t>* output);
 
 // Direct little-endian loads at an address (bounds belong to the
 // caller); used by tail readers that index from a frame payload end.
 uint16_t load_u16_at(const uint8_t* input);
 uint32_t load_u32_at(const uint8_t* input);
-// Validate the complete v3 head prefix before reading the appended A2
+// Validate the complete response or request head prefix before reading the appended A2
 // tail. This prevents tail-only fixtures from standing in for real heads.
 bool decode_upgrade_head(const Frame& frame, UpgradeTail* tail, std::string* error);
 void append_u16(std::vector<uint8_t>* output, uint16_t value);

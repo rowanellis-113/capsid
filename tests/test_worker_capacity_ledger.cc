@@ -346,5 +346,65 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (mode == "ledger_reaping_budget") {
+        // B1: bounded asynchronous reaping handoff. Explicit reaping ceiling
+        // prevents unbounded concurrent exiting processes after elastic slots
+        // are returned for reuse.
+        WorkerCapacityLedger ledger(3, 1, 2);
+        require(ledger.reaping_limit() == 2 && ledger.reaping_used() == 0 &&
+                    ledger.reaping_available(),
+                "unexpected explicit reaping budget initialization");
+        require(ledger.reserve_fresh("steady-a", 1), "reserve steady floor");
+        ledger.commit_fresh("steady-a");
+        require(ledger.try_acquire_elastic("el-b") && ledger.try_acquire_elastic("el-b"),
+                "acquire two elastic slots");
+        require(ledger.elastic_used() == 2 && !ledger.try_acquire_elastic("el-c"),
+                "elastic slots should fill remaining workersTotal");
+
+        require(ledger.handoff_elastic_to_reaping("el-b"), "first reaping handoff should fit");
+        require(ledger.elastic_used() == 1 && ledger.reaping_used() == 1 &&
+                    ledger.reaping_of("el-b") == 1 && ledger.reaping_available(),
+                "first handoff accounting mismatch");
+        require(ledger.handoff_elastic_to_reaping("el-b"), "second reaping handoff should fit");
+        require(ledger.elastic_used() == 0 && ledger.reaping_used() == 2 &&
+                    ledger.reaping_of("el-b") == 2 && !ledger.reaping_available(),
+                "second handoff should saturate reaping limit");
+
+        // Reaping is saturated: elastic handoff must refuse and keep the slot
+        // charged under elastic until reaping headroom frees up.
+        require(ledger.try_acquire_elastic("el-c"), "reused elastic slot should fit");
+        require(!ledger.handoff_elastic_to_reaping("el-c"),
+                "handoff must fail closed when reaping budget is full");
+        require(ledger.elastic_used() == 1 && ledger.elastic_of("el-c") == 1 &&
+                    ledger.reaping_used() == 2 && ledger.reaping_of("el-c") == 0,
+                "failed handoff mutated elastic or reaping counts");
+
+        ledger.finish_reaping("el-b", 1);
+        require(ledger.reaping_used() == 1 && ledger.reaping_of("el-b") == 1 &&
+                    ledger.reaping_available(),
+                "finish_reaping did not restore reaping headroom");
+        require(ledger.handoff_elastic_to_reaping("el-c"),
+                "handoff did not succeed after reaping headroom returned");
+        require(ledger.elastic_used() == 0 && ledger.reaping_used() == 2 &&
+                    ledger.reaping_of("el-c") == 1,
+                "post-reap handoff accounting mismatch");
+
+        ledger.finish_reaping("el-b", 1);
+        ledger.finish_reaping("el-c", 1);
+        require(ledger.reaping_used() == 0 && ledger.reaping_of("el-b") == 0 &&
+                    ledger.reaping_of("el-c") == 0,
+                "finish_reaping left residual reaping count");
+
+        // Default reaping limit derives from surge when positive, else max(1, workersTotal / 4).
+        WorkerCapacityLedger default_surge(8, 3);
+        WorkerCapacityLedger default_no_surge(8, 0);
+        WorkerCapacityLedger tiny(1, 0);
+        require(default_surge.reaping_limit() == 3 && default_no_surge.reaping_limit() == 2 &&
+                    tiny.reaping_limit() == 1,
+                "default reaping limit derivation mismatch");
+        std::cout << "PASS" << std::endl;
+        return 0;
+    }
+
     fail("unknown ledger test mode: " + mode);
 }

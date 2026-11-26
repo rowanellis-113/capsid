@@ -17,7 +17,6 @@
 
 #include <cstdint>
 #include <cstdlib>
-#include <deque>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -42,7 +41,7 @@ QueuedBody body(std::initializer_list<std::uint8_t> bytes, bool credit_returned_
 }
 
 void test_response_body_batching() {
-    std::deque<QueuedBody> queue;
+    std::vector<QueuedBody> queue;
     queue.push_back(body({1, 2}, true));
     queue.push_back(body({3, 4}, true));
     queue.push_back(body({5, 6}, true));

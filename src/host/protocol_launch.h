@@ -21,7 +21,6 @@ namespace host {
 // effective set so unsupported operations fail fast and explicitly. The wire
 // version is never auto-downgraded.
 struct ProtocolLaunch {
-    bool use_v4 = true; // first-party hosts: v4 carriage
     capsid_protocol_options options{};
 
     // The options descriptor must ALWAYS be initialized (two-way size
@@ -29,7 +28,6 @@ struct ProtocolLaunch {
     // would leave struct_size at zero and spawn_ex would refuse.
     ProtocolLaunch() {
         capsid_protocol_options_init(&options, sizeof(options));
-        options.wire_version = capsid::protocol::kVersionV4;
         options.capabilities =
             CAPSID_PROTOCOL_CAP_DUPLEX_CHANNEL | CAPSID_PROTOCOL_CAP_UPGRADE |
             CAPSID_PROTOCOL_CAP_CHANNEL_LAYOUT_A2 | CAPSID_PROTOCOL_CAP_CHANNEL_CONFIRM |
@@ -39,7 +37,6 @@ struct ProtocolLaunch {
 
     static ProtocolLaunch from(const ChannelsConfig& channels) {
         ProtocolLaunch launch;
-        launch.options.wire_version = 4;
         if (channels.configured) {
             launch.options.capabilities =
                 CAPSID_PROTOCOL_CAP_CHANNEL_LAYOUT_A2 | CAPSID_PROTOCOL_CAP_DUPLEX_CHANNEL |
@@ -59,14 +56,9 @@ struct ProtocolLaunch {
     }
 };
 
-// Spawns through the selected entry point. Existing embedding entries
-// keep capsid_worker_spawn (v3) — this helper is host-internal.
 inline capsid_result spawn_with_protocol(const capsid_worker_config* config,
                                          const ProtocolLaunch& launch, capsid_worker** out) {
-    if (launch.use_v4) {
-        return capsid_worker_spawn_ex(config, &launch.options, out);
-    }
-    return capsid_worker_spawn(config, out);
+    return capsid_worker_spawn_ex(config, &launch.options, out);
 }
 
 } // namespace host

@@ -18,14 +18,10 @@
 // everything for environmental reasons.
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const testDir = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(testDir, '..');
 
 function parseArgs(argv) {
   const values = new Map();
@@ -119,6 +115,17 @@ async function assertNoProcessContains(marker) {
     !output.includes(marker),
     `benchmark runner left a marked component process alive: ${marker}`,
   );
+}
+
+function copyRunner(source, directory) {
+  const runner = path.join(directory, 'run-ab.sh');
+  fs.copyFileSync(source, runner);
+  fs.chmodSync(runner, 0o755);
+  fs.copyFileSync(
+    path.join(path.dirname(source), 'evidence.py'),
+    path.join(directory, 'evidence.py'),
+  );
+  return runner;
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -490,20 +497,42 @@ const requiredFiles = [
   assert.match(result.stderr, /no IPC mechanism counters/);
 }
 
-// ---- RED: dirty working tree (no exemption). The test dirties the tree
-// itself (an untracked marker file at the repo root) so it does not depend
-// on the checkout being dirty; the runner must refuse. ----
+// Run the clean and dirty controls against the same private commit.
 {
-  const marker = path.join(repoRoot, '.dirty-marker-test');
-  fs.writeFileSync(marker, 'dirty');
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-ab-source-'));
   try {
-    const result = await runnerOutput(args, {
+    const bench = path.join(repo, 'bench');
+    fs.mkdirSync(bench);
+    const runnerPath = copyRunner(args.get('runner'), bench);
+    const git = (...argv) =>
+      execFileSync('git', ['-C', repo, ...argv], { encoding: 'utf8' }).trim();
+    git('init', '--quiet');
+    git('add', 'bench');
+    git(
+      '-c',
+      'user.name=Capsid Test',
+      '-c',
+      'user.email=test@capsid.invalid',
+      'commit',
+      '--no-gpg-sign',
+      '-qm',
+      'runner fixture',
+    );
+    const options = {
+      runnerPath,
+      extraArgs: ['--no-profile'],
       env: { CAPSID_BENCH_TEST_MODE: '' },
-    });
+    };
+    const clean = await runnerOutput(args, options);
+    assert.equal(clean.code, 0, clean.stderr);
+    const manifest = JSON.parse(fs.readFileSync(path.join(clean.out, 'manifest.json'), 'utf8'));
+    assert.equal(manifest.commit, git('rev-parse', 'HEAD'));
+    fs.writeFileSync(path.join(repo, 'untracked.txt'), 'dirty');
+    const result = await runnerOutput(args, options);
     assert.notEqual(result.code, 0, 'dirty working tree must be rejected');
     assert.match(result.stderr, /dirty working tree/);
   } finally {
-    fs.rmSync(marker, { force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 }
 
@@ -560,14 +589,7 @@ const requiredFiles = [
 // repository so `git rev-parse` fails. ----
 {
   const strayDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-stray-'));
-  const strayRunner = path.join(strayDir, 'run-ab.sh');
-  fs.copyFileSync(args.get('runner'), strayRunner);
-  fs.chmodSync(strayRunner, 0o755);
-  // The evidence generator lives next to the runner.
-  fs.copyFileSync(
-    path.join(path.dirname(args.get('runner')), 'evidence.py'),
-    path.join(strayDir, 'evidence.py'),
-  );
+  const strayRunner = copyRunner(args.get('runner'), strayDir);
   const result = await runnerOutput(args, {
     runnerPath: strayRunner,
   });

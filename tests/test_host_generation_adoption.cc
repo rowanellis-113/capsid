@@ -37,7 +37,8 @@ class Child {
         capsid_worker_config_init(&config);
         config.worker_path = worker_path;
         config.strict_sandbox = 0;
-        require(capsid_worker_spawn(&config, &worker_) == CAPSID_OK, "spawn actual Worker");
+        require(capsid_worker_spawn_ex(&config, NULL, &worker_) == CAPSID_OK,
+                "spawn actual Worker");
         pid_ = capsid_worker_pid(worker_);
 #if defined(_WIN32)
         handle_ = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,

@@ -1,5 +1,6 @@
 #include "host/metrics.h"
 #include "host/channel_ledger.h"
+#include "json_escape.h"
 #include <stdexcept>
 
 namespace capsid::host {
@@ -158,6 +159,17 @@ void MetricsRegistry::set_log_dropped(const std::string& app, std::uint64_t valu
     gauges_[std::move(key)] = value;
 }
 
+bool is_valid_pool_eviction_reason(std::string_view reason) noexcept {
+    return reason == "idle_timeout" || reason == "tenant_overshare" || reason == "global_lru" ||
+           reason == "tenant_quota_swap";
+}
+
+bool is_valid_pool_rejection_reason(std::string_view reason) noexcept {
+    return reason == "queue_disabled" || reason == "queue_full" || reason == "queue_timeout" ||
+           reason == "app_max_workers" || reason == "tenant_max_workers" ||
+           reason == "tenant_hard_memory" || reason == "host_capacity_exhausted";
+}
+
 void MetricsRegistry::count_pool_eviction(const std::string& app, const std::string& tenant,
                                           const std::string& reason) {
     std::string key = "pool_evictions_total{app=\"";
@@ -169,6 +181,11 @@ void MetricsRegistry::count_pool_eviction(const std::string& app, const std::str
     key += "\"}";
     std::lock_guard<std::mutex> lock(mutex_);
     ++counters_[std::move(key)];
+    if (is_valid_pool_eviction_reason(reason)) {
+        AppPoolDiagnostics& diag = app_pool_diagnostics_[app];
+        ++diag.evictions[reason];
+        diag.last_eviction_reason = reason;
+    }
 }
 
 void MetricsRegistry::count_pool_rejection(const std::string& app, const std::string& tenant,
@@ -182,6 +199,59 @@ void MetricsRegistry::count_pool_rejection(const std::string& app, const std::st
     key += "\"}";
     std::lock_guard<std::mutex> lock(mutex_);
     ++counters_[std::move(key)];
+    if (is_valid_pool_rejection_reason(reason)) {
+        AppPoolDiagnostics& diag = app_pool_diagnostics_[app];
+        ++diag.rejections[reason];
+        diag.last_rejection_reason = reason;
+    }
+}
+
+AppPoolDiagnostics MetricsRegistry::app_pool_diagnostics(const std::string& app) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = app_pool_diagnostics_.find(app);
+    return found == app_pool_diagnostics_.end() ? AppPoolDiagnostics{} : found->second;
+}
+
+void record_pool_eviction(MetricsRegistry* metrics, StructuredLog* log, const std::string& app,
+                          const std::string& tenant, const std::string& generation,
+                          const std::string& reason) {
+    const std::string effective_tenant = tenant.empty() ? app : tenant;
+    if (metrics != nullptr) {
+        metrics->count_pool_eviction(app, effective_tenant, reason);
+    }
+    if (log != nullptr) {
+        LogFields fields;
+        fields.level = "info";
+        fields.event = log_events::kPoolEviction;
+        fields.app = app;
+        fields.generation = generation;
+        fields.result = reason;
+        fields.fields = "{\"tenant\":\"" + capsid::json_escape(effective_tenant) +
+                        "\",\"reason\":\"" + capsid::json_escape(reason) + "\"}";
+        fields.message = "pool worker evicted";
+        log->log(LogLane::kControl, std::move(fields));
+    }
+}
+
+void record_pool_rejection(MetricsRegistry* metrics, StructuredLog* log, const std::string& app,
+                           const std::string& tenant, const std::string& generation,
+                           const std::string& reason, LogLane lane) {
+    const std::string effective_tenant = tenant.empty() ? app : tenant;
+    if (metrics != nullptr) {
+        metrics->count_pool_rejection(app, effective_tenant, reason);
+    }
+    if (log != nullptr) {
+        LogFields fields;
+        fields.level = "warn";
+        fields.event = log_events::kPoolRejection;
+        fields.app = app;
+        fields.generation = generation;
+        fields.result = reason;
+        fields.fields = "{\"tenant\":\"" + capsid::json_escape(effective_tenant) +
+                        "\",\"reason\":\"" + capsid::json_escape(reason) + "\"}";
+        fields.message = "pool capacity rejected";
+        log->log(lane, std::move(fields));
+    }
 }
 
 std::string

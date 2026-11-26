@@ -1,6 +1,6 @@
 # Architecture and Product Boundary
 
-> Source/API reviewed 2026-11-22 against `dev/v0.3.1` (ABI v7 / published 0.3.1-beta interface baseline). See
+> This architecture describes the v0.3.2 development interface (ABI v8). See
 > [current status](../reference/release-status.md) for release, standards and measured-source identities.
 
 Capsid Runtime is a process-isolated JavaScript runtime built from a pinned txiki.js vendor tree and `quickjs-turbo` VM overlay. It targets embedded HTTP hosts and provides a versioned Minimum Common Web API subset; it does not claim full ECMA-429 conformance. Capsid is the only product name; external organization names are used only to identify standard sources and historical internal implementation.
@@ -42,7 +42,7 @@ and [WebSocket semantics](../reference/websocket-semantics.md).
 ```text
 Host HTTP/TLS, routing, worker pool, audit
                    │
-                   │ FetchRPC v3 default / negotiated v4 channels
+                   │ FetchRPC v4 / negotiated channel capabilities
                    ▼
 capsid-worker
   quickjs-turbo (QuickJS-NG 0.15.1-derived) + libuv
@@ -72,7 +72,7 @@ Native development at minimum requires that the Host and worker can build and st
 
 Platform boundaries keep a single responsibility. The host decides which capabilities it needs and verifies the actual features at READY. The runtime implements process creation, IPC, termination/reclamation, and OS sandboxing. Linux uses seccomp, Landlock, namespace, and cgroup; a future Windows production backend will use Windows native process and security mechanisms and must not misreport Job Object, Restricted Token, or AppContainer as a Linux feature bit. The deployment environment remains responsible for additional network boundaries; the Host does not create a privileged network supervisor.
 
-For the current ABI v7, the worker event source is a Unix fd on POSIX and a CRT fd on Windows (backed by a loopback TCP socket); spawn/reap and the worker-event adapter are implemented per platform. The Windows native development toolchain has been delivered since v0.1.2. It covers source/trusted-bytecode identity, requests, streaming, cancel, crash/reap, and loopback-only negative controls. Multi-shard static-pool is available through a pool-level shared acceptor, while strict sandbox and the managed Host remain unavailable and `capsid:fs` is degraded (drive-letter absolute paths, reparse points rejected); see the [platform support overview](../reference/platform-support.md) and [Windows build and platform capabilities](../guides/build-on-windows.md). The first-party Host must not leak platform differences into pool, routing, or lifecycle; only the platform worker-event adapter may access fd/HANDLE directly. Trusted bytecode remains subject to compatibility identity, and bytecode built locally on Windows must not bypass identity validation to be deployed to an incompatible Linux worker.
+For the current ABI v8, the worker event source is a Unix fd on POSIX and a CRT fd on Windows (backed by a loopback TCP socket); spawn/reap and the worker-event adapter are implemented per platform. The Windows native development toolchain has been delivered since v0.1.2. It covers source/trusted-bytecode identity, requests, streaming, cancel, crash/reap, and loopback-only negative controls. Multi-shard static-pool is available through a pool-level shared acceptor, while strict sandbox and the managed Host remain unavailable and `capsid:fs` is degraded (drive-letter absolute paths, reparse points rejected); see the [platform support overview](../reference/platform-support.md) and [Windows build and platform capabilities](../guides/build-on-windows.md). The first-party Host must not leak platform differences into pool, routing, or lifecycle; only the platform worker-event adapter may access fd/HANDLE directly. Trusted bytecode remains subject to compatibility identity, and bytecode built locally on Windows must not bypass identity validation to be deployed to an incompatible Linux worker.
 
 ## JavaScript Surface
 

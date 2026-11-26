@@ -191,7 +191,7 @@ int main(int argc, char** argv) {
         capsid_worker_config_init(&config);
         config.worker_path = self;
         config.strict_sandbox = 0;
-        require(capsid_worker_spawn(&config, &probe.value) == CAPSID_OK,
+        require(capsid_worker_spawn_ex(&config, NULL, &probe.value) == CAPSID_OK,
                 "physical environment probe spawn");
         const capsid_event event = probe.next();
         require(event.type == CAPSID_EVENT_ERROR &&

@@ -51,6 +51,17 @@ class OutboundBuffer {
                                                           payload_size, &storage_);
     }
 
+    bool append_scatter(uint16_t type, uint32_t flags, uint64_t request_id,
+                        const capsid::protocol::PayloadSpan* spans, size_t span_count,
+                        size_t total_payload_size, uint16_t version = capsid::protocol::kVersion) {
+        if (total_payload_size > capsid::protocol::kMaxPayloadSize) {
+            return false;
+        }
+        compact_if_needed();
+        return capsid::protocol::append_encoded_scatter_versioned(
+            version, type, flags, request_id, spans, span_count, total_payload_size, &storage_);
+    }
+
     // Sends whole frames, one frame at a time; stops on a stall, a
     // partially buffered trailing frame, or a fatal writer error.
     // Returns false on fatal error only.

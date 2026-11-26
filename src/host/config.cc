@@ -115,8 +115,7 @@ struct Schema {
     // violations map to kResourceLimit at the map path.
     std::size_t max_members = 0;
     // kString only: when non-empty, the value must be one of these exact
-    // strings. Replaces expected_string for multi-value contracts
-    // (apiVersion v1/v2 pairs).
+    // strings (for example, the supported routing modes).
     std::span<const std::string_view> allowed_strings{};
     // kArray of strings only: element values must be pairwise distinct
     // (duplicate-permission rejection for manifest module/profile lists).
@@ -130,18 +129,16 @@ struct Schema {
 // --- Leaf schemas ---
 
 constexpr Schema kStringSchema{Schema::Kind::kString};
-constexpr Schema kIntegerSchema{Schema::Kind::kInteger};
 constexpr Schema kBooleanSchema{Schema::Kind::kBoolean};
 constexpr Schema kPositiveIntegerSchema{Schema::Kind::kInteger, {}, false, {}, 1};
 
-// Host/App apiVersion values: Binding v1 enables the v2 pair alongside the
-// frozen v1 documents. Anything else stays "unsupported value".
+// Host/App apiVersion values: Config v2 only (capsid/host-v1 and
+// capsid/app-v1 are retired; capsid/binding-v1 remains an independent
+// contract). Anything else stays "unsupported value".
 constexpr std::string_view kHostApiVersions[] = {
-    "capsid/host-v1",
     "capsid/host-v2",
 };
 constexpr std::string_view kAppApiVersions[] = {
-    "capsid/app-v1",
     "capsid/app-v2",
 };
 constexpr Schema kHostApiVersionSchema{
@@ -159,57 +156,6 @@ constexpr Schema kStringArraySchema{
     .element_schema = &kStringSchema,
 };
 
-// --- Host schemas ---
-
-constexpr std::array kAdminMembers{
-    Member{"unix", &kStringSchema, false},
-    Member{"mode", &kStringSchema, false},
-};
-constexpr Schema kAdminSchema{Schema::Kind::kObject, std::span<const Member>(kAdminMembers)};
-
-constexpr std::array kRoutingMembers{
-    Member{"mode", &kStringSchema, false},
-    Member{"suffix", &kStringSchema, false},
-};
-constexpr Schema kRoutingSchema{Schema::Kind::kObject, std::span<const Member>(kRoutingMembers)};
-
-constexpr std::array kListenerLimitMembers{
-    Member{"channels", &kPositiveIntegerSchema, false},
-    Member{"channelQueueBytes", &kStringSchema, false},
-    Member{"connections", &kIntegerSchema, false},
-    Member{"headerBytes", &kStringSchema, false},
-    Member{"headerTimeout", &kStringSchema, false},
-    Member{"bodyIdleTimeout", &kStringSchema, false},
-    Member{"streamIdleTimeout", &kStringSchema, false},
-};
-constexpr Schema kListenerLimitSchema{Schema::Kind::kObject,
-                                      std::span<const Member>(kListenerLimitMembers)};
-
-constexpr std::array kCorsMembers{
-    Member{"allowedOrigins", &kStringArraySchema, true},
-    Member{"allowedMethods", &kStringArraySchema, true},
-    Member{"allowedHeaders", &kStringArraySchema, true},
-    Member{"maxAge", &kStringSchema, false},
-};
-constexpr Schema kCorsSchema{Schema::Kind::kObject, std::span<const Member>(kCorsMembers)};
-
-constexpr std::array kListenerMembers{
-    Member{"name", &kStringSchema, false},
-    Member{"tcp", &kStringSchema, false},
-    Member{"publicScheme", &kStringSchema, false},
-    Member{"publicAuthority", &kStringSchema, false},
-    Member{"trusted", &kBooleanSchema, false},
-    Member{"routing", &kRoutingSchema, false},
-    Member{"limits", &kListenerLimitSchema, false},
-    Member{"cors", &kCorsSchema, false},
-};
-constexpr Schema kListenerSchema{Schema::Kind::kObject, std::span<const Member>(kListenerMembers)};
-
-constexpr Schema kListenerArraySchema{
-    .kind = Schema::Kind::kArray,
-    .element_schema = &kListenerSchema,
-};
-
 // Host allowlist entries use the Runtime's exact/one-trailing-'*' grammar.
 constexpr Schema kEnvironmentPatternSchema{
     .kind = Schema::Kind::kString,
@@ -219,140 +165,6 @@ constexpr Schema kEnvironmentPatternArraySchema{
     .kind = Schema::Kind::kArray,
     .element_schema = &kEnvironmentPatternSchema,
 };
-
-constexpr std::array kHostPermissionsMembers{
-    Member{"modules", &kStringArraySchema, false},
-    Member{"environmentNames", &kEnvironmentPatternArraySchema, false},
-    Member{"fsReadRoots", &kStringArraySchema, false},
-    Member{"fetchTargets", &kStringArraySchema, false},
-    Member{"storageNamespaces", &kStringArraySchema, false},
-    Member{"stdioStreams", &kStringArraySchema, false},
-};
-constexpr Schema kHostPermissionsSchema{Schema::Kind::kObject,
-                                        std::span<const Member>(kHostPermissionsMembers)};
-
-constexpr std::array kIsolationMembers{
-    Member{"mode", &kStringSchema, false},
-    Member{"required", &kStringArraySchema, false},
-    Member{"cgroupRoot", &kStringSchema, false},
-};
-constexpr Schema kIsolationSchema{Schema::Kind::kObject,
-                                  std::span<const Member>(kIsolationMembers)};
-
-// Key names are free (release identifiers); values are public key paths.
-constexpr Schema kTrustedBytecodeKeysSchema{
-    .kind = Schema::Kind::kDynamicMap,
-    .dynamic_value_schema = &kStringSchema,
-};
-
-// Worker and request shapes are shared verbatim between Host
-// defaults/maximums and the App document.
-constexpr std::array kWorkerMembers{
-    Member{"jsHeap", &kStringSchema, false},
-    Member{"processAddressSpace", &kStringSchema, false},
-    Member{"memoryMax", &kStringSchema, false},
-    Member{"fileDescriptors", &kPositiveIntegerSchema, false},
-    Member{"pidsMax", &kIntegerSchema, false},
-};
-constexpr Schema kWorkerSchema{Schema::Kind::kObject, std::span<const Member>(kWorkerMembers)};
-
-constexpr std::array kRequestMembers{
-    Member{"timeout", &kStringSchema, false},
-    Member{"maxInflightPerWorker", &kPositiveIntegerSchema, false},
-    Member{"maxStreamingInflightPerWorker", &kIntegerSchema, false},
-    Member{"streamIdleTimeoutMs", &kIntegerSchema, false},
-    Member{"writeTimeoutMs", &kIntegerSchema, false},
-};
-constexpr Schema kRequestSchema{Schema::Kind::kObject, std::span<const Member>(kRequestMembers)};
-
-// Host-side pool config carries only the queue fields; the App pool adds
-// the required fixed-size members and equality below.
-constexpr std::array kPoolQueueMembers{
-    Member{"queueRequests", &kIntegerSchema, false},
-    Member{"queueHeaderBytes", &kStringSchema, false},
-    Member{"queueTimeout", &kStringSchema, false},
-};
-constexpr Schema kHostPoolSchema{Schema::Kind::kObject, std::span<const Member>(kPoolQueueMembers)};
-
-constexpr std::array kTierMembers{
-    Member{"worker", &kWorkerSchema, false},
-    Member{"request", &kRequestSchema, false},
-    Member{"pool", &kHostPoolSchema, false},
-};
-constexpr Schema kTierSchema{Schema::Kind::kObject, std::span<const Member>(kTierMembers)};
-
-constexpr std::array kCapacityMembers{
-    Member{"channelsTotal", &kPositiveIntegerSchema, false},
-    Member{"pendingDialsTotal", &kPositiveIntegerSchema, false},
-    Member{"channelQueueBytesTotal", &kStringSchema, false},
-    Member{"workersTotal", &kPositiveIntegerSchema, false},
-    // §9.4: non-negative (0 = default); the surge budget is optional and
-    // absence means zero-downtime replaces are refused.
-    Member{"activationSurgeWorkers", &kIntegerSchema, false},
-    Member{"startupsConcurrent", &kIntegerSchema, false},
-    Member{"queuedRequestsTotal", &kIntegerSchema, false},
-    Member{"queuedHeaderBytesTotal", &kStringSchema, false},
-    Member{"workerMemoryCommitTotal", &kStringSchema, false},
-};
-constexpr Schema kCapacitySchema{Schema::Kind::kObject, std::span<const Member>(kCapacityMembers)};
-
-constexpr std::array kCrashBudgetMembers{
-    Member{"maxEvents", &kIntegerSchema, false},
-    Member{"window", &kStringSchema, false},
-};
-constexpr Schema kCrashBudgetSchema{Schema::Kind::kObject,
-                                    std::span<const Member>(kCrashBudgetMembers)};
-
-constexpr std::array kRestartBackoffMembers{
-    Member{"initial", &kStringSchema, false},
-    Member{"maximum", &kStringSchema, false},
-    Member{"jitter", &kStringSchema, false},
-    Member{"stableReset", &kStringSchema, false},
-};
-constexpr Schema kRestartBackoffSchema{Schema::Kind::kObject,
-                                       std::span<const Member>(kRestartBackoffMembers)};
-
-constexpr std::array kRecoveryMembers{
-    Member{"crashBudget", &kCrashBudgetSchema, false},
-    Member{"restartBackoff", &kRestartBackoffSchema, false},
-    Member{"replacementsConcurrentPerApp", &kIntegerSchema, false},
-    Member{"activeHealthInterval", &kStringSchema, false},
-    Member{"activeHealthFailures", &kIntegerSchema, false},
-};
-constexpr Schema kRecoverySchema{Schema::Kind::kObject, std::span<const Member>(kRecoveryMembers)};
-
-// GLM T08: host-level channel limits (FetchRPC v4 A2). All members
-// optional positive integers; the typed projection validates the
-// frozen A2 bounds and compiles them into the generation snapshot.
-constexpr std::array kChannelsMembers{
-    Member{"maxChannels", &kPositiveIntegerSchema, false},
-    Member{"maxMessageBytes", &kPositiveIntegerSchema, false},
-    Member{"reassemblyBudgetBytes", &kPositiveIntegerSchema, false},
-    Member{"sendBudgetBytes", &kPositiveIntegerSchema, false},
-    Member{"closeTimeoutMs", &kPositiveIntegerSchema, false},
-    Member{"dialTimeoutMs", &kPositiveIntegerSchema, false},
-    Member{"idleTimeoutMs", &kPositiveIntegerSchema, false},
-    Member{"perChannelQueueBytes", &kPositiveIntegerSchema, false},
-};
-constexpr Schema kChannelsSchema{Schema::Kind::kObject, std::span<const Member>(kChannelsMembers)};
-
-constexpr std::array kHostMembers{
-    Member{"apiVersion", &kHostApiVersionSchema, true},
-    Member{"applicationsRoot", &kStringSchema, false},
-    Member{"stateRoot", &kStringSchema, false},
-    Member{"secretRootTemplate", &kStringSchema, false},
-    Member{"admin", &kAdminSchema, false},
-    Member{"listeners", &kListenerArraySchema, false},
-    Member{"permissions", &kHostPermissionsSchema, false},
-    Member{"isolation", &kIsolationSchema, false},
-    Member{"trustedBytecodeKeys", &kTrustedBytecodeKeysSchema, false},
-    Member{"defaults", &kTierSchema, false},
-    Member{"maximums", &kTierSchema, false},
-    Member{"capacity", &kCapacitySchema, false},
-    Member{"channels", &kChannelsSchema, false},
-    Member{"recovery", &kRecoverySchema, false},
-};
-constexpr Schema kHostSchema{Schema::Kind::kObject, std::span<const Member>(kHostMembers)};
 
 // --- Environment request schemas ---
 //
@@ -403,65 +215,10 @@ constexpr std::array kFsMembers{
 };
 constexpr Schema kFsSchema{Schema::Kind::kObject, std::span<const Member>(kFsMembers)};
 
-constexpr std::array kFetchMembers{
-    Member{"allow", &kStringArraySchema, false},
-};
-constexpr Schema kFetchSchema{Schema::Kind::kObject, std::span<const Member>(kFetchMembers)};
-
 constexpr std::array kStorageMembers{
     Member{"namespaces", &kStringArraySchema, false},
 };
 constexpr Schema kStorageSchema{Schema::Kind::kObject, std::span<const Member>(kStorageMembers)};
-
-constexpr std::array kAppPermissionsMembers{
-    Member{"modules", &kStringArraySchema, false},
-    Member{"env", &kEnvMapSchema, false},
-    Member{"fs", &kFsSchema, false},
-    Member{"fetch", &kFetchSchema, false},
-    Member{"storage", &kStorageSchema, false},
-    Member{"stdio", &kStringArraySchema, false},
-};
-constexpr Schema kAppPermissionsSchema{Schema::Kind::kObject,
-                                       std::span<const Member>(kAppPermissionsMembers)};
-
-// App pool: required fixed size plus the shared queue fields.
-constexpr std::array kAppPoolMembers{
-    Member{"minReady", &kPositiveIntegerSchema, true},
-    Member{"maxWorkers", &kPositiveIntegerSchema, true},
-    Member{"queueRequests", &kIntegerSchema, false},
-    Member{"queueHeaderBytes", &kStringSchema, false},
-    Member{"queueTimeout", &kStringSchema, false},
-};
-constexpr std::array kAppPoolEqualityPairs{
-    MemberPair{"minReady", "maxWorkers"},
-};
-constexpr Schema kAppPoolSchema{
-    Schema::Kind::kObject,
-    std::span<const Member>(kAppPoolMembers),
-    false,
-    {},
-    {},
-    std::span<const MemberPair>(kAppPoolEqualityPairs),
-};
-
-constexpr std::array kHealthCheckMembers{
-    Member{"path", &kStringSchema, false},
-    Member{"timeout", &kStringSchema, false},
-};
-constexpr Schema kHealthCheckSchema{Schema::Kind::kObject,
-                                    std::span<const Member>(kHealthCheckMembers)};
-
-constexpr std::array kApplicationMembers{
-    Member{"apiVersion", &kAppApiVersionSchema, true},
-    Member{"entry", &kStringSchema, false},
-    Member{"permissions", &kAppPermissionsSchema, false},
-    Member{"worker", &kWorkerSchema, false},
-    Member{"request", &kRequestSchema, false},
-    Member{"pool", &kAppPoolSchema, true},
-    Member{"healthCheck", &kHealthCheckSchema, false},
-};
-constexpr Schema kApplicationSchema{Schema::Kind::kObject,
-                                    std::span<const Member>(kApplicationMembers)};
 
 // --- Binding v1 schemas (docs/design/bindings-v1.md §2) -----------
 
@@ -563,23 +320,14 @@ constexpr Schema kRoutingModeV2Schema{
 };
 constexpr Schema kNonNegativeIntegerSchema{Schema::Kind::kInteger, {}, false, {}, 0};
 
-constexpr Schema kFetchTargetV2StringSchema{
-    .kind = Schema::Kind::kString,
-    .grammar = "fetch-target",
-};
-constexpr Schema kFetchTargetV2ArraySchema{
-    .kind = Schema::Kind::kArray,
-    .element_schema = &kFetchTargetV2StringSchema,
-};
-constexpr Schema kOutboundTargetV2StringSchema{
+constexpr Schema kOutboundTargetStringSchema{
     .kind = Schema::Kind::kString,
     .grammar = "outbound-target",
 };
-constexpr Schema kOutboundTargetV2ArraySchema{
+constexpr Schema kOutboundTargetArraySchema{
     .kind = Schema::Kind::kArray,
-    .element_schema = &kOutboundTargetV2StringSchema,
+    .element_schema = &kOutboundTargetStringSchema,
 };
-
 constexpr std::array kHostPathsV2Members{
     Member{"applications", &kNonEmptyStringSchema, true},
     Member{"state", &kNonEmptyStringSchema, true},
@@ -656,7 +404,7 @@ constexpr std::array kHostPermissionsV2Members{
     Member{"modules", &kStringArraySchema, false},
     Member{"environmentNames", &kEnvironmentPatternArraySchema, false},
     Member{"fsReadRoots", &kStringArraySchema, false},
-    Member{"fetchTargets", &kFetchTargetV2ArraySchema, false},
+    Member{"fetchTargets", &kOutboundTargetArraySchema, false},
     Member{"storageNamespaces", &kStringArraySchema, false},
     Member{"stdioStreams", &kStringArraySchema, false},
 };
@@ -784,7 +532,7 @@ constexpr std::array kHostV2Members{
 constexpr Schema kHostV2Schema{Schema::Kind::kObject, std::span<const Member>(kHostV2Members)};
 
 constexpr std::array kFetchV2Members{
-    Member{"allow", &kFetchTargetV2ArraySchema, false},
+    Member{"allow", &kOutboundTargetArraySchema, false},
 };
 constexpr Schema kFetchV2Schema{Schema::Kind::kObject, std::span<const Member>(kFetchV2Members)};
 
@@ -800,7 +548,7 @@ constexpr Schema kAppPermissionsV2Schema{Schema::Kind::kObject,
                                          std::span<const Member>(kAppPermissionsV2Members)};
 
 constexpr std::array kBindingNetV2Members{
-    Member{"allow", &kOutboundTargetV2ArraySchema, false},
+    Member{"allow", &kOutboundTargetArraySchema, false},
 };
 constexpr Schema kBindingNetV2Schema{Schema::Kind::kObject,
                                      std::span<const Member>(kBindingNetV2Members)};
@@ -890,17 +638,6 @@ constexpr std::array kBindingManifestMembers{
 };
 constexpr Schema kBindingManifestSchema{Schema::Kind::kObject,
                                         std::span<const Member>(kBindingManifestMembers)};
-
-// The apiVersion member selects the root schema: v2 values pick the v2
-// table, anything else falls back to the frozen v1 table so every v1 error
-// path (missing, wrong type, unsupported value) is byte-identical to the
-// pre-Binding behavior.
-const Schema& root_schema(ConfigDocument document, std::string_view api_version) {
-    if (document == ConfigDocument::kHost) {
-        return api_version == "capsid/host-v2" ? kHostV2Schema : kHostSchema;
-    }
-    return api_version == "capsid/app-v2" ? kAppV2Schema : kApplicationSchema;
-}
 
 std::string_view peek_api_version(const json_t* root) {
     const json_t* api = json_object_get(root, "apiVersion");
@@ -1251,29 +988,6 @@ bool split_outbound_target(std::string_view text, std::string* canonical_host_ou
     return true;
 }
 
-bool valid_outbound_binding_target_v2(std::string_view target) {
-    std::string_view ports;
-    bool has_ports = false;
-    if (!split_outbound_target(target, nullptr, &ports, &has_ports)) {
-        return false;
-    }
-    if (!has_ports) {
-        return true;
-    }
-    if (ports == "*") {
-        return true;
-    }
-    const std::size_t dash = ports.find('-');
-    if (dash != std::string_view::npos) {
-        const std::string_view first = ports.substr(0, dash);
-        const std::string_view second = ports.substr(dash + 1);
-        std::vector<std::uint16_t> bounds;
-        return valid_port(first) && valid_port(second) && parse_decimal_ports(first, &bounds) &&
-               parse_decimal_ports(second, &bounds) && bounds.size() == 2 && bounds[0] <= bounds[1];
-    }
-    return parse_decimal_ports(ports, nullptr);
-}
-
 bool valid_entry_name(std::string_view value) {
     if (value.empty() || value.size() > 255 || value == "." || value == ".." ||
         value.find('/') != std::string_view::npos || value.find('\\') != std::string_view::npos ||
@@ -1303,12 +1017,9 @@ bool matches_grammar(std::string_view grammar, std::string_view value) {
     if (grammar == "net-target") {
         return valid_net_target(value);
     }
-    if (grammar == "fetch-target") {
+    if (grammar == "outbound-target") {
         FetchTarget parsed;
         return parse_outbound_target_text(value, &parsed);
-    }
-    if (grammar == "outbound-target") {
-        return valid_outbound_binding_target_v2(value);
     }
     if (grammar == "sandbox-profile") {
         return is_sandbox_profile(value);
@@ -1486,7 +1197,9 @@ bool validate_string_leaf(const Schema& schema, json_t* node, const std::string&
     if (!schema.grammar.empty() && !matches_grammar(schema.grammar, value)) {
         error.code = ConfigErrorCode::kInvalidValue;
         error.path = path;
-        error.message = "unsupported value";
+        error.message = schema.grammar == "entry-name"
+                            ? "entry must be a plain file name inside the app directory"
+                            : "unsupported value";
         return false;
     }
     if (schema.max_bytes != 0 && value.size() > schema.max_bytes) {
@@ -1768,7 +1481,7 @@ namespace {
 // Shared envelope: byte limit -> strict parse -> unknown fields -> values ->
 // optional post-check. Every rejected document reports an RFC 6901 pointer.
 ConfigValidationResult validate_document(std::size_t byte_limit, std::string_view json,
-                                         const Schema* (*select_schema)(const json_t* root),
+                                         const Schema& schema,
                                          bool (*post_check)(json_t*, ConfigError&)) {
     ConfigValidationResult result;
 
@@ -1810,7 +1523,6 @@ ConfigValidationResult validate_document(std::size_t byte_limit, std::string_vie
     }
 
     const std::string root_path;
-    const Schema& schema = *select_schema(root);
     if (!check_unknown_fields(schema, root, root_path, result.error)) {
         result.ok = false;
         json_decref(root);
@@ -1824,20 +1536,7 @@ ConfigValidationResult validate_document(std::size_t byte_limit, std::string_vie
     return result;
 }
 
-const Schema* select_host_root(const json_t* root) {
-    return &root_schema(ConfigDocument::kHost, peek_api_version(root));
-}
-
-const Schema* select_app_root(const json_t* root) {
-    return &root_schema(ConfigDocument::kApplication, peek_api_version(root));
-}
-
-const Schema* select_manifest_root(const json_t* root) {
-    (void)root;
-    return &kBindingManifestSchema;
-}
-
-bool check_pool_object_consistency(const json_t* pool, const std::string& prefix, bool is_v2,
+bool check_pool_object_consistency(const json_t* pool, const std::string& prefix,
                                    ConfigError& error) {
     if (!json_is_object(pool)) {
         return true;
@@ -1864,39 +1563,33 @@ bool check_pool_object_consistency(const json_t* pool, const std::string& prefix
         error.message = "static pool worker limit exceeded";
         return false;
     }
-    if (is_v2) {
-        if (workers != nullptr &&
-            (min_ready != nullptr || max_workers != nullptr || idle_timeout != nullptr)) {
-            error.code = ConfigErrorCode::kInvalidValue;
-            error.path = prefix;
-            error.message = "pool.workers cannot be combined with elastic pool fields";
-            return false;
-        }
-        if (json_is_integer(min_ready) && json_is_integer(max_workers) &&
-            json_integer_value(min_ready) > json_integer_value(max_workers)) {
-            error.code = ConfigErrorCode::kInvalidValue;
-            error.path = prefix + "/minReady";
-            error.message = "pool.minReady cannot exceed pool.maxWorkers";
-            return false;
-        }
+    if (workers != nullptr &&
+        (min_ready != nullptr || max_workers != nullptr || idle_timeout != nullptr)) {
+        error.code = ConfigErrorCode::kInvalidValue;
+        error.path = prefix;
+        error.message = "pool.workers cannot be combined with elastic pool fields";
+        return false;
+    }
+    if (json_is_integer(min_ready) && json_is_integer(max_workers) &&
+        json_integer_value(min_ready) > json_integer_value(max_workers)) {
+        error.code = ConfigErrorCode::kInvalidValue;
+        error.path = prefix + "/minReady";
+        error.message = "pool.minReady cannot exceed pool.maxWorkers";
+        return false;
     }
     return true;
 }
 
 bool check_app_consistency(json_t* root, ConfigError& error) {
-    const bool is_v2 = peek_api_version(root) == "capsid/app-v2";
-    return check_pool_object_consistency(json_object_get(root, "pool"), "/pool", is_v2, error);
+    return check_pool_object_consistency(json_object_get(root, "pool"), "/pool", error);
 }
 
 bool check_host_consistency(json_t* root, ConfigError& error) {
-    if (peek_api_version(root) != "capsid/host-v2") {
-        return true;
-    }
     for (const char* tier : {"defaults", "maximums"}) {
         const json_t* tier_obj = json_object_get(root, tier);
         if (json_is_object(tier_obj)) {
             if (!check_pool_object_consistency(json_object_get(tier_obj, "pool"),
-                                               std::string("/") + tier + "/pool", true, error)) {
+                                               std::string("/") + tier + "/pool", error)) {
                 return false;
             }
         }
@@ -2042,18 +1735,15 @@ bool check_manifest_consistency(json_t* root, ConfigError& error) {
 
 ConfigValidationResult validate_config_json(ConfigDocument document, std::string_view json) {
     return validate_document(kMaxConfigBytes, json,
-                             document == ConfigDocument::kHost ? &select_host_root
-                                                               : &select_app_root,
+                             document == ConfigDocument::kHost ? kHostV2Schema : kAppV2Schema,
                              document == ConfigDocument::kApplication ? &check_app_consistency
                                                                       : &check_host_consistency);
 }
 
 ConfigValidationResult validate_binding_manifest(std::string_view json) {
-    return validate_document(kMaxBindingManifestBytes, json, &select_manifest_root,
+    return validate_document(kMaxBindingManifestBytes, json, kBindingManifestSchema,
                              &check_manifest_consistency);
 }
-
-namespace {} // namespace
 
 // Size grammar for worker.memoryMax: a decimal number with an explicit
 // upper-case IEC/SI suffix (KiB, MiB, GiB, KB, MB, GB). A bare number is
@@ -2073,67 +1763,6 @@ bool parse_size_bytes(const std::string& text, std::uint64_t* out) {
 // suffixes. 0 is a valid value (queueing without a deadline).
 bool parse_duration_ms(const std::string& text, std::uint64_t* out) {
     return units::parse_duration_ms(text, out, /*allow_hours=*/false);
-}
-
-bool parse_fetch_target_text(std::string_view text, FetchTarget* out) {
-    if (!out || text.empty() || text.find('\0') != std::string_view::npos)
-        return false;
-    FetchTarget parsed;
-    std::string_view ports;
-    bool has_ports = false;
-    if (text.front() == '[') {
-        const auto close = text.find(']');
-        if (close == std::string_view::npos)
-            return false;
-        const std::string literal(text.substr(1, close - 1));
-        in6_addr address;
-        char canonical[INET6_ADDRSTRLEN];
-        if (!parse_ipv6_literal(literal, &address) ||
-            !inet_ntop(AF_INET6, &address, canonical, sizeof(canonical)))
-            return false;
-        parsed.host = canonical;
-        if (close + 1 < text.size()) {
-            if (text[close + 1] != ':')
-                return false;
-            ports = text.substr(close + 2);
-            has_ports = true;
-        }
-    } else {
-        const auto colon = text.find(':');
-        parsed.host = text.substr(0, colon);
-        if (parsed.host.empty() || text.find(']') != std::string_view::npos)
-            return false;
-        if (colon != std::string_view::npos) {
-            ports = text.substr(colon + 1);
-            has_ports = true;
-        }
-    }
-    if (has_ports) {
-        std::size_t begin = 0;
-        for (;;) {
-            const auto comma = ports.find(',', begin);
-            const auto part = ports.substr(
-                begin, comma == std::string_view::npos ? std::string_view::npos : comma - begin);
-            if (part.empty())
-                return false;
-            std::uint32_t value = 0;
-            for (const char digit : part) {
-                if (digit < '0' || digit > '9')
-                    return false;
-                value = value * 10 + static_cast<unsigned>(digit - '0');
-                if (value > 65535)
-                    return false;
-            }
-            if (value == 0)
-                return false;
-            parsed.ports.push_back(static_cast<std::uint16_t>(value));
-            if (comma == std::string_view::npos)
-                break;
-            begin = comma + 1;
-        }
-    }
-    *out = std::move(parsed);
-    return true;
 }
 
 bool parse_outbound_target_text(std::string_view text, FetchTarget* out) {
@@ -2176,10 +1805,10 @@ bool parse_public_origin(std::string_view text, std::string* scheme_out,
     return true;
 }
 
-// Parse capsid.json (capsid/app-v1 or capsid/app-v2) into AppRequest. The
-// schema boundary runs first in the deploy pipeline (validate_config_json);
-// this parse maps the schema's fields onto the request and stays fail-closed
-// on any shape it cannot map.
+// Parse capsid.json (capsid/app-v2) into AppRequest. The schema boundary runs
+// first in the deploy pipeline (validate_config_json); this parse maps the
+// schema's fields onto the request and stays fail-closed on any shape it
+// cannot map.
 bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
                        std::string* error) {
     json_error_t parse_error;
@@ -2192,22 +1821,19 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
         }
         return false;
     }
-    const bool is_v2 = peek_api_version(root) == "capsid/app-v2";
-    app->is_v2 = is_v2;
+    if (peek_api_version(root) != "capsid/app-v2") {
+        *error = "capsid.json apiVersion must be capsid/app-v2";
+        json_decref(root);
+        return false;
+    }
     app->has_min_ready = false;
     app->has_max_workers = false;
     app->has_idle_timeout = false;
     app->max_workers = 0;
     app->idle_timeout_ms = 0;
-    if (is_v2) {
-        app->workers = 0;
-        app->min_ready = 0;
-        app->has_workers = false;
-    } else {
-        app->workers = 1;
-        app->min_ready = 1;
-        app->has_workers = true;
-    }
+    app->workers = 0;
+    app->min_ready = 0;
+    app->has_workers = false;
     const auto string_array = [&](json_t* parent, const char* key,
                                   std::vector<std::string>* out) -> bool {
         json_t* value = json_object_get(parent, key);
@@ -2292,9 +1918,7 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
             }
             for (const std::string& target : targets) {
                 FetchTarget parsed;
-                const bool ok = is_v2 ? parse_outbound_target_text(target, &parsed)
-                                      : parse_fetch_target_text(target, &parsed);
-                if (!ok) {
+                if (!parse_outbound_target_text(target, &parsed)) {
                     *error = "invalid capsid.json permissions.fetch.allow entry";
                     json_decref(root);
                     return false;
@@ -2360,89 +1984,63 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
     }
     json_t* pool = json_object_get(root, "pool");
     if (pool != nullptr && json_is_object(pool)) {
-        if (is_v2) {
-            json_t* workers = json_object_get(pool, "workers");
-            json_t* min_ready = json_object_get(pool, "minReady");
-            json_t* max_workers = json_object_get(pool, "maxWorkers");
-            json_t* idle_timeout = json_object_get(pool, "idleTimeout");
-            if (workers != nullptr &&
-                (min_ready != nullptr || max_workers != nullptr || idle_timeout != nullptr)) {
-                *error = "invalid capsid.json pool: cannot mix workers with elastic pool fields";
-                json_decref(root);
-                return false;
-            }
-            if (json_is_integer(workers)) {
-                const json_int_t value = json_integer_value(workers);
-                if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
-                    *error = "invalid capsid.json pool.workers";
-                    json_decref(root);
-                    return false;
-                }
-                app->workers = static_cast<std::uint32_t>(value);
-                app->max_workers = static_cast<std::uint32_t>(value);
-                app->min_ready = static_cast<std::uint32_t>(value);
-                app->has_workers = true;
-            }
-            if (json_is_integer(min_ready)) {
-                const json_int_t value = json_integer_value(min_ready);
-                if (value < 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
-                    *error = "invalid capsid.json pool.minReady";
-                    json_decref(root);
-                    return false;
-                }
-                app->has_min_ready = true;
-                app->min_ready = static_cast<std::uint32_t>(value);
-            }
-            if (json_is_integer(max_workers)) {
-                const json_int_t value = json_integer_value(max_workers);
-                if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
-                    *error = "invalid capsid.json pool.maxWorkers";
-                    json_decref(root);
-                    return false;
-                }
-                app->has_max_workers = true;
-                app->max_workers = static_cast<std::uint32_t>(value);
-                app->workers = static_cast<std::uint32_t>(value);
-            }
-            if (app->has_min_ready && app->has_max_workers && app->min_ready > app->max_workers) {
-                *error = "invalid capsid.json pool: minReady exceeds maxWorkers";
-                json_decref(root);
-                return false;
-            }
-            if (json_is_string(idle_timeout)) {
-                if (!parse_duration_ms(json_string_value(idle_timeout), &app->idle_timeout_ms) ||
-                    app->idle_timeout_ms == 0) {
-                    *error = "invalid capsid.json pool.idleTimeout";
-                    json_decref(root);
-                    return false;
-                }
-                app->has_idle_timeout = true;
-            }
-        } else {
-            json_t* min_ready = json_object_get(pool, "minReady");
-            json_t* max_workers = json_object_get(pool, "maxWorkers");
-            if (json_is_integer(min_ready)) {
-                const json_int_t value = json_integer_value(min_ready);
-                if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
-                    *error = "invalid capsid.json pool.minReady";
-                    json_decref(root);
-                    return false;
-                }
-                app->min_ready = static_cast<std::uint32_t>(value);
-            }
-            if (json_is_integer(max_workers)) {
-                const json_int_t value = json_integer_value(max_workers);
-                if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
-                    *error = "invalid capsid.json pool.maxWorkers";
-                    json_decref(root);
-                    return false;
-                }
-                app->workers = static_cast<std::uint32_t>(value);
-            }
+        json_t* workers = json_object_get(pool, "workers");
+        json_t* min_ready = json_object_get(pool, "minReady");
+        json_t* max_workers = json_object_get(pool, "maxWorkers");
+        json_t* idle_timeout = json_object_get(pool, "idleTimeout");
+        if (workers != nullptr &&
+            (min_ready != nullptr || max_workers != nullptr || idle_timeout != nullptr)) {
+            *error = "invalid capsid.json pool: cannot mix workers with elastic pool fields";
+            json_decref(root);
+            return false;
         }
-        // E-1 admission queue (§10.3): parsed here so the effective config
-        // can enforce the Host maximums (compile_policy) and forward the
-        // queue to the data plane.
+        if (json_is_integer(workers)) {
+            const json_int_t value = json_integer_value(workers);
+            if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+                *error = "invalid capsid.json pool.workers";
+                json_decref(root);
+                return false;
+            }
+            app->workers = static_cast<std::uint32_t>(value);
+            app->max_workers = static_cast<std::uint32_t>(value);
+            app->min_ready = static_cast<std::uint32_t>(value);
+            app->has_workers = true;
+        }
+        if (json_is_integer(min_ready)) {
+            const json_int_t value = json_integer_value(min_ready);
+            if (value < 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+                *error = "invalid capsid.json pool.minReady";
+                json_decref(root);
+                return false;
+            }
+            app->has_min_ready = true;
+            app->min_ready = static_cast<std::uint32_t>(value);
+        }
+        if (json_is_integer(max_workers)) {
+            const json_int_t value = json_integer_value(max_workers);
+            if (value <= 0 || value > static_cast<json_int_t>(kMaxStaticPoolWorkers)) {
+                *error = "invalid capsid.json pool.maxWorkers";
+                json_decref(root);
+                return false;
+            }
+            app->has_max_workers = true;
+            app->max_workers = static_cast<std::uint32_t>(value);
+            app->workers = static_cast<std::uint32_t>(value);
+        }
+        if (app->has_min_ready && app->has_max_workers && app->min_ready > app->max_workers) {
+            *error = "invalid capsid.json pool: minReady exceeds maxWorkers";
+            json_decref(root);
+            return false;
+        }
+        if (json_is_string(idle_timeout)) {
+            if (!parse_duration_ms(json_string_value(idle_timeout), &app->idle_timeout_ms) ||
+                app->idle_timeout_ms == 0) {
+                *error = "invalid capsid.json pool.idleTimeout";
+                json_decref(root);
+                return false;
+            }
+            app->has_idle_timeout = true;
+        }
         json_t* queue_requests = json_object_get(pool, "queueRequests");
         if (json_is_integer(queue_requests)) {
             const json_int_t value = json_integer_value(queue_requests);
@@ -2454,15 +2052,6 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
             app->queue_requests = static_cast<std::uint64_t>(value);
             app->has_queue_requests = true;
         }
-        json_t* queue_header_bytes = json_object_get(pool, "queueHeaderBytes");
-        if (json_is_string(queue_header_bytes)) {
-            if (!parse_size_bytes(json_string_value(queue_header_bytes),
-                                  &app->queue_header_bytes)) {
-                *error = "invalid capsid.json pool.queueHeaderBytes";
-                json_decref(root);
-                return false;
-            }
-        }
         json_t* queue_timeout = json_object_get(pool, "queueTimeout");
         if (json_is_string(queue_timeout)) {
             if (!parse_duration_ms(json_string_value(queue_timeout), &app->queue_timeout_ms)) {
@@ -2472,13 +2061,6 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
             }
         }
     }
-    // Worker resources. Each field keeps its own slot: jsHeap bounds the
-    // QuickJS heap, processAddressSpace bounds the process address space,
-    // memoryMax is the overall process-memory ceiling, and fileDescriptors
-    // bounds open descriptors. No field impersonates another (memoryMax
-    // must not be forwarded as the JS heap limit), and every field feeds
-    // the normalized App digest so the generation identity changes when
-    // the operator changes any of them.
     json_t* worker = json_object_get(root, "worker");
     if (worker != nullptr && json_is_object(worker)) {
         json_t* memory_max = json_object_get(worker, "memoryMax");
@@ -2497,14 +2079,6 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
                 return false;
             }
         }
-        json_t* address_space = json_object_get(worker, "processAddressSpace");
-        if (json_is_string(address_space)) {
-            if (!parse_size_bytes(json_string_value(address_space), &app->process_address_bytes)) {
-                *error = "invalid capsid.json worker.processAddressSpace";
-                json_decref(root);
-                return false;
-            }
-        }
         json_t* descriptors = json_object_get(worker, "fileDescriptors");
         if (json_is_integer(descriptors)) {
             const json_int_t value = json_integer_value(descriptors);
@@ -2516,9 +2090,6 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
             app->file_descriptors = static_cast<std::uint64_t>(value);
         }
     }
-    // Request window: maxInflightPerWorker is parsed here so the effective
-    // config can enforce the Host maximum (compile_policy) and forward the
-    // window to the worker (max_inflight_requests).
     json_t* request = json_object_get(root, "request");
     if (request != nullptr && json_is_object(request)) {
         json_t* timeout = json_object_get(request, "timeout");
@@ -2532,56 +2103,15 @@ bool parse_app_request(const std::vector<std::uint8_t>& bytes, AppRequest* app,
                 return false;
             }
         }
-        json_t* max_inflight =
-            json_object_get(request, is_v2 ? "maxInflight" : "maxInflightPerWorker");
+        json_t* max_inflight = json_object_get(request, "maxInflight");
         if (json_is_integer(max_inflight)) {
             const json_int_t value = json_integer_value(max_inflight);
             if (value <= 0) {
-                *error = is_v2 ? "invalid capsid.json request.maxInflight"
-                               : "invalid capsid.json request.maxInflightPerWorker";
+                *error = "invalid capsid.json request.maxInflight";
                 json_decref(root);
                 return false;
             }
             app->requests_per_worker = static_cast<std::uint64_t>(value);
-        }
-        // E-2 SSE permit (§9.3): parsed here so the effective config can
-        // enforce the Host maximums (compile_policy) and forward the
-        // values to the data plane (maxStreamingInflightPerWorker /
-        // streamIdleTimeoutMs). 0 = field not set (the shard keeps its
-        // defaults of 2 slots and 60s idle).
-        json_t* max_streaming = json_object_get(request, "maxStreamingInflightPerWorker");
-        if (json_is_integer(max_streaming)) {
-            const json_int_t value = json_integer_value(max_streaming);
-            if (value < 0) {
-                *error = "invalid capsid.json "
-                         "request.maxStreamingInflightPerWorker";
-                json_decref(root);
-                return false;
-            }
-            app->max_streaming_inflight_per_worker = static_cast<std::uint64_t>(value);
-        }
-        json_t* stream_idle = json_object_get(request, "streamIdleTimeoutMs");
-        if (json_is_integer(stream_idle)) {
-            const json_int_t value = json_integer_value(stream_idle);
-            if (value < 0) {
-                *error = "invalid capsid.json request.streamIdleTimeoutMs";
-                json_decref(root);
-                return false;
-            }
-            app->stream_idle_timeout_ms = static_cast<std::uint64_t>(value);
-        }
-        // E-3 slow-client write deadline (§9.2): the Host-side socket-view
-        // deadline for a write that does not complete. 0 = field not set
-        // (the shard keeps its 60s default).
-        json_t* write_timeout = json_object_get(request, "writeTimeoutMs");
-        if (json_is_integer(write_timeout)) {
-            const json_int_t value = json_integer_value(write_timeout);
-            if (value < 0) {
-                *error = "invalid capsid.json request.writeTimeoutMs";
-                json_decref(root);
-                return false;
-            }
-            app->write_timeout_ms = static_cast<std::uint64_t>(value);
         }
     }
     // M2 item 6: the active health probe (design §7.4). A healthCheck

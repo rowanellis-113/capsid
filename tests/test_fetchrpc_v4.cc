@@ -7,8 +7,7 @@
 // This harness enforces, with a real JSON parser (vendored jansson):
 //   * strict schema: missing files, wrong schema versions, malformed
 //     entries, and unexecuted sequences all fail the run;
-//   * the v3 boundary: the shipped v3 parser rejects every
-//     v4-versioned vector with the exact contract error string;
+//   * version enforcement: the parser rejects a retired version on each vector;
 //   * v4 grammar: every ok vector parses, its payload decodes through
 //     the matching A2 decoder, and re-encodes byte-identically; every
 //     error vector fails with the exact contract error string;
@@ -715,18 +714,18 @@ int main(int argc, char** argv) {
         frame_wire[name] = wire;
         frame_expect[name] = expect;
 
-        // v3 boundary (frozen forever): every v4 vector is rejected
-        // by the shipped v3 parser with the exact version string.
-        capsid::protocol::Parser v3;
+        auto retired_wire = wire;
+        require(retired_wire.size() >= capsid::protocol::kHeaderSize, "complete vector header");
+        retired_wire[4] = 3;
+        capsid::protocol::Parser parser;
         capsid::protocol::Frame frame;
-        require(v3.append(wire.data(), wire.size()), "v3 parser buffers: " + name);
-        require(v3.next(&frame) == capsid::protocol::kParseError,
-                "v3 parser rejects v4 frame: " + name);
-        require(v3.error() == "unsupported protocol version",
-                "v3 rejection names the version: " + name);
+        require(parser.append(retired_wire.data(), retired_wire.size()) &&
+                    parser.next(&frame) == capsid::protocol::kParseError &&
+                    parser.error() == "unsupported protocol version",
+                "retired wire version: " + name);
 
         if (expect == "v4-parser-ok") {
-            capsid::protocol::Parser v4(4);
+            capsid::protocol::Parser v4;
             capsid::protocol::Frame parsed;
             require(v4.append(wire.data(), wire.size()), "v4 parser buffers: " + name);
             require(v4.next(&parsed) == capsid::protocol::kParseFrame,
@@ -744,7 +743,7 @@ int main(int argc, char** argv) {
             // the parser may also reject first (unknown bits) - either
             // layer may fire, but the string is the contract's
             if (decode == "hello-tail") {
-                capsid::protocol::Parser v4(4);
+                capsid::protocol::Parser v4;
                 capsid::protocol::Frame parsed;
                 require(v4.append(wire.data(), wire.size()), "buffers");
                 capsid::protocol::ParseResult result = v4.next(&parsed);
@@ -757,7 +756,7 @@ int main(int argc, char** argv) {
                 require(rejected, "parser or startup decoder rejects: " + name);
                 require(error == want, "hello rejection exact: " + name + " (got: " + error + ")");
             } else {
-                capsid::protocol::Parser v4(4);
+                capsid::protocol::Parser v4;
                 capsid::protocol::Frame parsed;
                 require(v4.append(wire.data(), wire.size()), "buffers");
                 capsid::protocol::ParseResult result = v4.next(&parsed);
@@ -777,7 +776,7 @@ int main(int argc, char** argv) {
 
         // positive HELLOs through the real startup decoder
         if (decode == "hello-tail" && expect == "v4-parser-ok") {
-            capsid::protocol::Parser v4(4);
+            capsid::protocol::Parser v4;
             capsid::protocol::Frame parsed;
             v4.append(wire.data(), wire.size());
             require(v4.next(&parsed) == capsid::protocol::kParseFrame, "hello parses: " + name);

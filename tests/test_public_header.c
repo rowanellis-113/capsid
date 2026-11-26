@@ -1,12 +1,35 @@
 #include "capsid/runtime.h"
 
 int main(void) {
+    capsid_worker_config invalid = {0};
+    invalid.max_inflight_requests = 123;
+    if (capsid_worker_config_init_sized(&invalid, sizeof(invalid), 7) != CAPSID_INVALID_ARGUMENT ||
+        capsid_worker_config_init_sized(&invalid, sizeof(invalid) - 1, CAPSID_ABI_VERSION) !=
+            CAPSID_INVALID_ARGUMENT ||
+        invalid.max_inflight_requests != 123) {
+        return 20;
+    }
     capsid_build_info build_info;
     capsid_build_info_init(&build_info);
     if (build_info.struct_size != sizeof(build_info) ||
         build_info.version != CAPSID_BUILD_INFO_VERSION ||
         capsid_runtime_build_info(NULL) != CAPSID_INVALID_ARGUMENT) {
         return 16;
+    }
+
+    build_info.version = 1;
+    if (capsid_runtime_build_info(&build_info) != CAPSID_INVALID_ARGUMENT) {
+        return 17;
+    }
+    capsid_build_info_init(&build_info);
+    build_info.struct_size = offsetof(capsid_build_info, build_id);
+    if (capsid_runtime_build_info(&build_info) != CAPSID_INVALID_ARGUMENT) {
+        return 18;
+    }
+    capsid_build_info_init(&build_info);
+    if (capsid_runtime_build_info(&build_info) != CAPSID_OK || build_info.abi_version != 8 ||
+        build_info.fetchrpc_version != 4) {
+        return 19;
     }
 
     if (sizeof(capsid_egress_action) != sizeof(uint32_t) ||
@@ -109,7 +132,7 @@ int main(void) {
 
     capsid_worker_config config;
     capsid_worker_config_init(&config);
-    if (config.abi_version != CAPSID_ABI_VERSION || CAPSID_ABI_VERSION != 7u) {
+    if (config.abi_version != CAPSID_ABI_VERSION || CAPSID_ABI_VERSION != 8u) {
         return 1;
     }
     if (config.tls_ca_bundle_path != NULL || config.max_fetch_request_body_bytes != 0 ||

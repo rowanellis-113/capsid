@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
         config.strict_sandbox = 0;
         config.request_timeout_ms = 5000;
         Worker worker;
-        ok(capsid_worker_spawn(&config, &worker.value), "spawn real worker");
+        ok(capsid_worker_spawn_ex(&config, NULL, &worker.value), "spawn real worker");
         ok(capsid_worker_load_bundle(worker.value, reinterpret_cast<const uint8_t*>(bundle.data()),
                                      bundle.size()),
            "load soak fixture");

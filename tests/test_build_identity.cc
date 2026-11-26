@@ -270,7 +270,7 @@ std::string read_worker_identity(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     capsid_worker* worker = nullptr;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_OK && worker != nullptr,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_OK && worker != nullptr,
             "could not spawn identity worker");
 
     static constexpr char kBundle[] = "export default { fetch() { return new Response('ok'); } };";

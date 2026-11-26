@@ -91,6 +91,7 @@ class FormattingScopeTests(unittest.TestCase):
             for name, value in {
                 ".gitignore": "node_modules/\n",
                 "src/a.cc": "int a;\n",
+                "src/removed.cc": "int removed;\n",
                 "src/node_modules/hidden.js": "invalid dependency\n",
                 "tests/fixtures/sealed.mjs": "sealed bytes\r\n",
                 "bench/probe.py": "print(1)\n",
@@ -98,10 +99,14 @@ class FormattingScopeTests(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(value.encode())
+            subprocess.run(["git", "-C", str(root), "add", "src/removed.cc"], check=True)
+            (root / "src/removed.cc").unlink()
             selected = FORMAT.select_files(root, POLICY)
             self.assertEqual(selected["cpp"], ["src/a.cc"])
             self.assertEqual(selected["python"], ["bench/probe.py"])
             self.assertEqual(selected["javascript"], [])
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                FORMAT.select_files(root, POLICY, ["src/removed.cc"])
             with self.assertRaisesRegex(ValueError, "protected"):
                 FORMAT.select_files(root, POLICY, ["tests/fixtures/sealed.mjs"])
             with self.assertRaisesRegex(ValueError, "Git-listed"):

@@ -62,191 +62,87 @@ void require_error(ConfigDocument document, std::string_view json, ConfigErrorCo
             std::string(label) + " did not provide a safe diagnostic");
 }
 
+std::string host_v2_with(std::string_view extra_fields = {}) {
+    std::string out =
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}])json";
+    if (!extra_fields.empty()) {
+        out += ',';
+        out += extra_fields;
+    }
+    out += '}';
+    return out;
+}
+
 void test_minimal_documents_are_valid() {
-    require_valid(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v1"})json",
-                  "minimal Host config");
+    require_valid(ConfigDocument::kHost, host_v2_with(), "minimal Host config");
     require_valid(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"workers":1}})json",
         "minimal App config");
 }
 
-void test_complete_v1_document_shapes_are_valid() {
-    require_valid(ConfigDocument::kHost,
-                  R"json({
-          "apiVersion":"capsid/host-v1",
-          "applicationsRoot":"/srv/capsid/apps",
-          "stateRoot":"/var/lib/capsid",
-          "secretRootTemplate":"/run/capsid/secrets/{application}",
-          "admin":{"unix":"/run/capsid/admin.sock","mode":"0600"},
-          "listeners":[{
-            "name":"public",
-            "tcp":"127.0.0.1:8080",
-            "publicScheme":"https",
-            "routing":{"mode":"subdomain","suffix":".apps.example.com"},
-            "limits":{
-              "connections":4096,
-              "headerBytes":"64KiB",
-              "headerTimeout":"5s",
-              "bodyIdleTimeout":"30s",
-              "streamIdleTimeout":"60s"
-            }
-          }],
-          "permissions":{
-            "modules":["capsid:permissions","capsid:stdio"],
-            "environmentNames":["APP_MODE","API_*"],
-            "fsReadRoots":["/srv/capsid/data"],
-            "fetchTargets":["api.internal.example.com:443"],
-            "storageNamespaces":["orders-cache"],
-            "stdioStreams":["stdout","stderr"]
-          },
-          "isolation":{
-            "mode":"strict",
-            "required":["no_new_privs","landlock","seccomp","user_namespace","mount_namespace"],
-            "cgroupRoot":"/sys/fs/cgroup/capsid-host"
-          },
-          "trustedBytecodeKeys":{
-            "release-2026":"/etc/capsid/bytecode-keys/release-2026.pub"
-          },
-          "defaults":{
-            "worker":{
-              "jsHeap":"64MiB","processAddressSpace":"256MiB",
-              "memoryMax":"256MiB","fileDescriptors":64,"pidsMax":8
-            },
-            "request":{
-              "timeout":"3s","maxInflightPerWorker":8,
-              "maxStreamingInflightPerWorker":2
-            },
-            "pool":{
-              "queueRequests":128,"queueHeaderBytes":"2MiB",
-              "queueTimeout":"250ms"
-            }
-          },
-          "maximums":{
-            "worker":{
-              "jsHeap":"256MiB","processAddressSpace":"1GiB",
-              "memoryMax":"1GiB","fileDescriptors":256,"pidsMax":32
-            },
-            "request":{
-              "timeout":"30s","maxInflightPerWorker":32,
-              "maxStreamingInflightPerWorker":2
-            },
-            "pool":{
-              "queueRequests":1024,"queueHeaderBytes":"16MiB",
-              "queueTimeout":"5s"
-            }
-          },
-          "capacity":{
-            "workersTotal":128,"startupsConcurrent":4,
-            "queuedRequestsTotal":4096,"queuedHeaderBytesTotal":"64MiB",
-            "workerMemoryCommitTotal":"24GiB"
-          },
-          "recovery":{
-            "crashBudget":{"maxEvents":5,"window":"60s"},
-            "restartBackoff":{"initial":"250ms","maximum":"30s","jitter":"20%"},
-            "replacementsConcurrentPerApp":1,
-            "activeHealthInterval":"30s","activeHealthFailures":2
-          }
-        })json",
-                  "complete Host v1 shape");
-
-    require_valid(ConfigDocument::kApplication,
-                  R"json({
-          "apiVersion":"capsid/app-v1",
-          "entry":"bundle.mjs",
-          "permissions":{
-            "modules":["capsid:env","capsid:fs","capsid:stdio"],
-            "env":{
-              "APP_MODE":{"value":"production"},
-              "API_TOKEN":{"valueFrom":"orders-api-token"}
-            },
-            "fs":{"read":{"allow":["/srv/capsid/data/orders"],"deny":[]}},
-            "fetch":{"allow":["orders-api.internal.example.com:443"]},
-            "storage":{"namespaces":["orders-cache"]},
-            "stdio":["stdout","stderr"]
-          },
-          "worker":{
-            "jsHeap":"64MiB","processAddressSpace":"256MiB",
-            "memoryMax":"256MiB","fileDescriptors":64,"pidsMax":8
-          },
-          "request":{
-            "timeout":"3s","maxInflightPerWorker":8,
-            "maxStreamingInflightPerWorker":2
-          },
-          "pool":{
-            "minReady":4,"maxWorkers":4,"queueRequests":128,
-            "queueHeaderBytes":"2MiB","queueTimeout":"250ms"
-          },
-          "healthCheck":{"path":"/_capsid/health","timeout":"1s"}
-        })json",
-                  "complete App v1 shape");
-}
-
-void test_complete_v1_shapes_remain_recursively_fail_closed() {
+void test_complete_v2_document_shapes_remain_recursively_fail_closed() {
     require_unknown_field(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","listeners":[{"name":"public","tcp":"127.0.0.1:8080","publicScheme":"http","routing":{"mode":"path"},"limits":{"connections":1,"headerBytes":"1KiB","headerTimeout":"1s","bodyIdleTimeout":"1s","streamIdleTimeout":"1s","surprise":true}}]})json",
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:8080","publicOrigin":"http://public.example","routing":{"mode":"path"},"limits":{"connections":1,"headerSize":"1KiB","headerTimeout":"1s","bodyIdleTimeout":"1s","streamIdleTimeout":"1s","surprise":true}}]})json",
         "/listeners/0/limits/surprise", "unknown listener limit");
     require_unknown_field(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","permissions":{"env":{"TOKEN":{"valueFrom":"token","path":"/tmp/token"}}},"pool":{"minReady":1,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","permissions":{"env":{"TOKEN":{"valueFrom":"token","path":"/tmp/token"}}},"pool":{"workers":1}})json",
         "/permissions/env/TOKEN/path", "unknown App environment entry field");
 }
 
-void test_listener_public_authority_is_a_frozen_v1_shape() {
+void test_listener_public_origin_is_typed() {
     require_valid(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","listeners":[{"name":"public","tcp":"127.0.0.1:8080","publicScheme":"https","publicAuthority":"api.example.com:443","routing":{"mode":"path"}}]})json",
-        "path listener with fixed public authority");
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:8080","publicOrigin":"https://api.example.com:443","routing":{"mode":"path"}}]})json",
+        "path listener with fixed public origin");
     require_error(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","listeners":[{"publicAuthority":443}]})json",
-        ConfigErrorCode::kInvalidValue, "/listeners/0/publicAuthority",
-        "non-string public authority");
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:8080","publicOrigin":443,"routing":{"mode":"path"}}]})json",
+        ConfigErrorCode::kInvalidValue, "/listeners/0/publicOrigin", "non-string public origin");
 }
 
-void test_complete_v1_collections_and_limits_are_typed() {
-    require_error(ConfigDocument::kHost,
-                  R"json({"apiVersion":"capsid/host-v1","listeners":{}})json",
-                  ConfigErrorCode::kInvalidValue, "/listeners", "non-array Host listeners");
-    require_error(ConfigDocument::kHost,
-                  R"json({"apiVersion":"capsid/host-v1","listeners":["public"]})json",
-                  ConfigErrorCode::kInvalidValue, "/listeners/0", "non-object Host listener");
+void test_complete_v2_collections_and_limits_are_typed() {
     require_error(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","trustedBytecodeKeys":{"release/2026~a":7}})json",
-        ConfigErrorCode::kInvalidValue, "/trustedBytecodeKeys/release~12026~0a",
-        "non-string trusted bytecode public key path");
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":{}})json",
+        ConfigErrorCode::kInvalidValue, "/listeners", "non-array Host listeners");
     require_error(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","permissions":{"modules":["capsid:stdio",7]}})json",
-        ConfigErrorCode::kInvalidValue, "/permissions/modules/1",
-        "non-string Host module allowlist item");
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":["public"]})json",
+        ConfigErrorCode::kInvalidValue, "/listeners/0", "non-object Host listener");
     require_error(ConfigDocument::kHost,
-                  R"json({"apiVersion":"capsid/host-v1","capacity":{"workersTotal":0}})json",
+                  host_v2_with(R"json("trustedBytecodeKeys":{"release/2026~a":7})json"),
+                  ConfigErrorCode::kInvalidValue, "/trustedBytecodeKeys/release~12026~0a",
+                  "non-string trusted bytecode public key path");
+    require_error(ConfigDocument::kHost,
+                  host_v2_with(R"json("permissions":{"modules":["capsid:stdio",7]})json"),
+                  ConfigErrorCode::kInvalidValue, "/permissions/modules/1",
+                  "non-string Host module allowlist item");
+    require_error(ConfigDocument::kHost, host_v2_with(R"json("capacity":{"workersTotal":0})json"),
                   ConfigErrorCode::kInvalidValue, "/capacity/workersTotal",
                   "zero Host worker capacity");
     require_error(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","worker":{"fileDescriptors":0},"pool":{"minReady":1,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","worker":{"fileDescriptors":0},"pool":{"workers":1}})json",
         ConfigErrorCode::kInvalidValue, "/worker/fileDescriptors",
         "zero App file descriptor limit");
     require_error(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","request":{"maxInflightPerWorker":0},"pool":{"minReady":1,"maxWorkers":1}})json",
-        ConfigErrorCode::kInvalidValue, "/request/maxInflightPerWorker",
-        "zero App request inflight limit");
+        R"json({"apiVersion":"capsid/app-v2","request":{"maxInflight":0},"pool":{"workers":1}})json",
+        ConfigErrorCode::kInvalidValue, "/request/maxInflight", "zero App request inflight limit");
 }
 
 std::string app_with_environment_entry(std::string_view name, std::string_view entry_json) {
-    return "{\"apiVersion\":\"capsid/app-v1\",\"permissions\":{\"env\":{\"" + std::string(name) +
-           "\":" + std::string(entry_json) + "}},\"pool\":{\"minReady\":1,\"maxWorkers\":1}}";
+    return "{\"apiVersion\":\"capsid/app-v2\",\"permissions\":{\"env\":{\"" + std::string(name) +
+           "\":" + std::string(entry_json) + "}},\"pool\":{\"workers\":1}}";
 }
 
 void test_environment_request_schema_is_fail_closed() {
     require_valid(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","permissions":{"environmentNames":["APP_MODE","API_*"]}})json",
+        host_v2_with(R"json("permissions":{"environmentNames":["APP_MODE","API_*"]})json"),
         "valid Host environment allowlist");
     require_valid(ConfigDocument::kApplication,
                   app_with_environment_entry("APP_MODE", R"json({"value":""})json"),
@@ -256,11 +152,10 @@ void test_environment_request_schema_is_fail_closed() {
         app_with_environment_entry("API_TOKEN", R"json({"valueFrom":"orders-api-token"})json"),
         "secret environment request");
 
-    require_error(
-        ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","permissions":{"environmentNames":["API-*"]}})json",
-        ConfigErrorCode::kInvalidValue, "/permissions/environmentNames/0",
-        "invalid Host environment pattern");
+    require_error(ConfigDocument::kHost,
+                  host_v2_with(R"json("permissions":{"environmentNames":["API-*"]})json"),
+                  ConfigErrorCode::kInvalidValue, "/permissions/environmentNames/0",
+                  "invalid Host environment pattern");
     require_error(ConfigDocument::kApplication,
                   app_with_environment_entry("1TOKEN", R"json({"value":"x"})json"),
                   ConfigErrorCode::kInvalidValue, "/permissions/env/1TOKEN",
@@ -311,12 +206,12 @@ void test_environment_request_schema_is_fail_closed() {
         app_with_environment_entry(R"json(API_TOKEN\u0000shadow)json", R"json({"value":"x"})json"),
         ConfigErrorCode::kInvalidJson, "", "NUL App environment member name");
     require_error(ConfigDocument::kHost,
-                  R"json({"apiVersion":"capsid/host-v1","mystery\u0000suffix":true})json",
+                  R"json({"apiVersion":"capsid/host-v2","mystery\u0000suffix":true})json",
                   ConfigErrorCode::kInvalidJson, "", "NUL Host object member name");
     require_error(
         ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","applicationsRoot":"/srv/apps\u0000shadow"})json",
-        ConfigErrorCode::kInvalidValue, "/applicationsRoot",
+        R"json({"apiVersion":"capsid/host-v2","paths":{"applications":"/srv/apps\u0000shadow","state":"/var/lib/capsid","secrets":"/var/lib/capsid/secrets/{application}"},"admin":{"unix":"/run/capsid/admin.sock"},"listeners":[{"name":"public","tcp":"127.0.0.1:8080","routing":{"mode":"path"}}]})json",
+        ConfigErrorCode::kInvalidValue, "/paths/applications",
         "NUL in a general configuration string");
 
     const std::string exact_limit_value(16U * 1024U, 'x');
@@ -331,59 +226,57 @@ void test_environment_request_schema_is_fail_closed() {
         ConfigErrorCode::kResourceLimit, "/permissions/env/LARGE_VALUE/value",
         "literal environment value over the limit");
 
-    std::string too_many = R"json({"apiVersion":"capsid/app-v1","permissions":{"env":{)json";
+    std::string too_many = R"json({"apiVersion":"capsid/app-v2","permissions":{"env":{)json";
     for (std::size_t i = 0; i < 257; ++i) {
         if (i != 0) {
             too_many += ',';
         }
         too_many += "\"ENV_" + std::to_string(i) + "\":{\"value\":\"x\"}";
     }
-    too_many += R"json(}},"pool":{"minReady":1,"maxWorkers":1}})json";
+    too_many += R"json(}},"pool":{"workers":1}})json";
     require_error(ConfigDocument::kApplication, too_many, ConfigErrorCode::kResourceLimit,
                   "/permissions/env", "too many App environment entries");
 }
 
 void test_network_namespace_is_not_in_either_schema() {
     require_unknown_field(ConfigDocument::kHost,
-                          R"json({"apiVersion":"capsid/host-v1","networkNamespace":"inherit"})json",
+                          host_v2_with(R"json("networkNamespace":"inherit")json"),
                           "/networkNamespace", "Host root networkNamespace");
-    require_unknown_field(
-        ConfigDocument::kHost,
-        R"json({"apiVersion":"capsid/host-v1","isolation":{"networkNamespace":"inherit"}})json",
-        "/isolation/networkNamespace", "Host isolation networkNamespace");
+    require_unknown_field(ConfigDocument::kHost,
+                          host_v2_with(R"json("isolation":{"networkNamespace":"inherit"})json"),
+                          "/isolation/networkNamespace", "Host isolation networkNamespace");
     require_unknown_field(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1},"networkNamespace":"inherit"})json",
+        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"workers":1},"networkNamespace":"inherit"})json",
         "/networkNamespace", "App root networkNamespace");
     require_unknown_field(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"networkNamespace":"inherit"},"pool":{"minReady":1,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"networkNamespace":"inherit"},"pool":{"workers":1}})json",
         "/worker/networkNamespace", "App worker networkNamespace");
 }
 
 void test_unrelated_unknown_fields_use_the_same_fail_closed_path() {
-    require_unknown_field(ConfigDocument::kHost,
-                          R"json({"apiVersion":"capsid/host-v1","mystery":true})json", "/mystery",
-                          "Host unrelated unknown field");
+    require_unknown_field(ConfigDocument::kHost, host_v2_with(R"json("mystery":true)json"),
+                          "/mystery", "Host unrelated unknown field");
     require_unknown_field(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1,"elastic":true}})json",
+        R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"workers":1,"elastic":true}})json",
         "/pool/elastic", "App pool unrelated unknown field");
 }
 
 void test_json_envelope_is_strict() {
     require_error(ConfigDocument::kHost,
-                  R"json({"apiVersion":"capsid/host-v1","apiVersion":"capsid/host-v1"})json",
+                  R"json({"apiVersion":"capsid/host-v2","apiVersion":"capsid/host-v2"})json",
                   ConfigErrorCode::kDuplicateKey, "", "duplicate Host root key");
     require_error(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"minReady":1,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1,"minReady":1,"maxWorkers":1}})json",
         ConfigErrorCode::kDuplicateKey, "", "duplicate nested App key");
-    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v1",})json",
+    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v2",})json",
                   ConfigErrorCode::kInvalidJson, "", "trailing comma");
-    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v1" /* comment */})json",
+    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v2" /* comment */})json",
                   ConfigErrorCode::kInvalidJson, "", "JSON comment");
-    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v1"} trailing)json",
+    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v2"} trailing)json",
                   ConfigErrorCode::kInvalidJson, "", "trailing JSON input");
     require_error(ConfigDocument::kHost, R"json({"apiVersion":NaN})json",
                   ConfigErrorCode::kInvalidJson, "", "non-standard NaN");
@@ -394,20 +287,34 @@ void test_json_envelope_is_strict() {
 void test_api_versions_are_exact() {
     require_error(ConfigDocument::kHost, "{}", ConfigErrorCode::kInvalidValue, "/apiVersion",
                   "missing Host apiVersion");
-    require_error(ConfigDocument::kApplication, R"json({"pool":{"minReady":1,"maxWorkers":1}})json",
+    require_error(ConfigDocument::kApplication, R"json({"pool":{"workers":1}})json",
                   ConfigErrorCode::kInvalidValue, "/apiVersion", "missing App apiVersion");
     require_error(ConfigDocument::kHost, R"json({"apiVersion":7})json",
                   ConfigErrorCode::kInvalidValue, "/apiVersion", "non-string Host apiVersion");
-    // Binding v1 keeps v1/v2 as the exact supported pair; v3 stays the
-    // unsupported future-version example.
+    // Config v1 (capsid/host-v1 and capsid/app-v1) is retired; only v2 is accepted.
+    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v1"})json",
+                  ConfigErrorCode::kInvalidValue, "/apiVersion", "retired Host v1 apiVersion");
+    require_error(ConfigDocument::kApplication,
+                  R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"maxWorkers":1}})json",
+                  ConfigErrorCode::kInvalidValue, "/apiVersion", "retired App v1 apiVersion");
     require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/host-v3"})json",
                   ConfigErrorCode::kInvalidValue, "/apiVersion", "unsupported Host apiVersion");
     require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v3","pool":{"minReady":1,"maxWorkers":1}})json",
+                  R"json({"apiVersion":"capsid/app-v3","pool":{"workers":1}})json",
                   ConfigErrorCode::kInvalidValue, "/apiVersion", "unsupported App apiVersion");
-    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/app-v1"})json",
+    require_error(ConfigDocument::kHost, R"json({"apiVersion":"capsid/app-v2"})json",
                   ConfigErrorCode::kInvalidValue, "/apiVersion",
                   "App apiVersion used as Host config");
+    {
+        const std::string legacy_app =
+            R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"maxWorkers":1}})json";
+        capsid::host::AppRequest parsed;
+        std::string error;
+        require(
+            !capsid::host::parse_app_request(
+                std::vector<std::uint8_t>(legacy_app.begin(), legacy_app.end()), &parsed, &error),
+            "parse_app_request accepted retired capsid/app-v1");
+    }
 }
 
 void test_unknown_fields_precede_value_validation() {
@@ -415,47 +322,34 @@ void test_unknown_fields_precede_value_validation() {
                           "/mystery", "Host unknown field beside invalid value");
     require_unknown_field(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":"one","maxWorkers":1,"elastic":true}})json",
+        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":"one","maxWorkers":1,"elastic":true}})json",
         "/pool/elastic", "nested App unknown field beside invalid value");
 }
 
-void test_static_pool_is_explicit_positive_and_fixed_size() {
+void test_pool_bounds_are_validated() {
     require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs"})json",
-                  ConfigErrorCode::kInvalidValue, "/pool", "App without an explicit pool");
-    require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","pool":{"maxWorkers":1}})json",
-                  ConfigErrorCode::kInvalidValue, "/pool/minReady", "App pool without minReady");
-    require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1}})json",
-                  ConfigErrorCode::kInvalidValue, "/pool/maxWorkers",
-                  "App pool without maxWorkers");
-    require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":0,"maxWorkers":0}})json",
-                  ConfigErrorCode::kInvalidValue, "/pool/minReady", "zero-sized App pool");
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"workers":0}})json",
+                  ConfigErrorCode::kInvalidValue, "/pool/workers", "zero-sized App pool.workers");
     require_error(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":-1,"maxWorkers":-1}})json",
+        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":-1,"maxWorkers":-1}})json",
         ConfigErrorCode::kInvalidValue, "/pool/minReady", "negative App pool size");
     require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"maxWorkers":0}})json",
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1,"maxWorkers":0}})json",
                   ConfigErrorCode::kInvalidValue, "/pool/maxWorkers", "zero App maxWorkers");
     require_error(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1.5,"maxWorkers":1}})json",
+        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":1.5,"maxWorkers":1}})json",
         ConfigErrorCode::kInvalidValue, "/pool/minReady", "fractional App minReady");
     require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"maxWorkers":2}})json",
-                  ConfigErrorCode::kInvalidValue, "/pool", "elastic App pool in static v1");
-    require_error(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":2,"maxWorkers":1}})json",
-                  ConfigErrorCode::kInvalidValue, "/pool", "inverted App pool bounds");
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":2,"maxWorkers":1}})json",
+                  ConfigErrorCode::kInvalidValue, "/pool/minReady", "inverted App pool bounds");
     require_valid(ConfigDocument::kApplication,
-                  R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":4,"maxWorkers":4}})json",
-                  "four-worker static App pool");
+                  R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":4,"maxWorkers":4}})json",
+                  "four-worker App pool");
     require_error(
         ConfigDocument::kApplication,
-        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":4097,"maxWorkers":4097}})json",
+        R"json({"apiVersion":"capsid/app-v2","pool":{"minReady":4097,"maxWorkers":4097}})json",
         ConfigErrorCode::kResourceLimit, "/pool/minReady",
         "App pool beyond the fixed worker limit");
 }
@@ -470,7 +364,7 @@ std::string host_document_with_array_nesting(std::size_t array_count) {
 }
 
 void test_config_resource_limits_precede_json_dom_work() {
-    const std::string minimal_host = R"json({"apiVersion":"capsid/host-v1"})json";
+    const std::string minimal_host = host_v2_with();
     require(minimal_host.size() < kMaxConfigBytes,
             "minimal Host fixture exceeds the configured byte limit");
 
@@ -484,7 +378,7 @@ void test_config_resource_limits_precede_json_dom_work() {
                   "Host config over the byte limit");
 
     std::string over_app_byte_limit =
-        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"maxWorkers":1}})json";
+        R"json({"apiVersion":"capsid/app-v2","pool":{"workers":1}})json";
     over_app_byte_limit.resize(kMaxConfigBytes + 1, ' ');
     require_error(ConfigDocument::kApplication, over_app_byte_limit,
                   ConfigErrorCode::kResourceLimit, "", "App config over the byte limit");
@@ -504,8 +398,8 @@ void test_config_resource_limits_precede_json_dom_work() {
     std::string bracket_text(kMaxConfigNesting * 2, '[');
     bracket_text.append(kMaxConfigNesting * 2, ']');
     const std::string app_with_brackets_in_string =
-        R"json({"apiVersion":"capsid/app-v1","entry":")json" + bracket_text +
-        R"json(","pool":{"minReady":1,"maxWorkers":1}})json";
+        R"json({"apiVersion":"capsid/app-v2","permissions":{"env":{"BRACKETS":{"value":")json" +
+        bracket_text + R"json("}}},"pool":{"workers":1}})json";
     require_valid(ConfigDocument::kApplication, app_with_brackets_in_string,
                   "brackets inside an App string");
 }
@@ -516,7 +410,7 @@ void test_request_timeout_reaches_typed_app_request() {
     const auto document = [](const std::string& request) {
         const std::string text =
             std::string(
-                R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1},"request":)json") +
+                R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"workers":1},"request":)json") +
             request + "}";
         return std::vector<std::uint8_t>(text.begin(), text.end());
     };
@@ -538,11 +432,11 @@ void test_request_timeout_reaches_typed_app_request() {
 
 void test_ipv6_fetch_authorities_reach_the_app_policy() {
     using capsid::host::FetchTarget;
-    using capsid::host::parse_fetch_target_text;
+    using capsid::host::parse_outbound_target_text;
     const auto document = [](const std::string& authority) {
         const auto text =
             std::string(
-                R"({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","pool":{"minReady":1,"maxWorkers":1},"permissions":{"fetch":{"allow":[")") +
+                R"({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","pool":{"workers":1},"permissions":{"fetch":{"allow":[")") +
             authority + R"("]}}})";
         return std::vector<std::uint8_t>(text.begin(), text.end());
     };
@@ -557,15 +451,21 @@ void test_ipv6_fetch_authorities_reach_the_app_policy() {
                 "IPv6 fetch authority or explicit ports changed in App policy");
     }
     FetchTarget target;
-    require(parse_fetch_target_text("[::1]", &target) && target.host == "::1" &&
+    require(parse_outbound_target_text("[::1]", &target) && target.host == "::1" &&
                 target.ports.empty(),
             "bare bracketed IPv6 authority lost any-port semantics");
-    require(parse_fetch_target_text("api.example:443", &target) && target.host == "api.example" &&
-                target.ports == std::vector<std::uint16_t>({443}),
+    require(parse_outbound_target_text("api.example:443", &target) &&
+                target.host == "api.example" && target.ports == std::vector<std::uint16_t>({443}),
             "existing hostname authority changed");
-    require(parse_fetch_target_text("api.example:0000443", &target) &&
+    require(parse_outbound_target_text("api.example:0000443", &target) &&
                 target.ports == std::vector<std::uint16_t>({443}),
             "existing decimal leading-zero port changed");
+    {
+        capsid::host::AppRequest cidr_app;
+        std::string cidr_error;
+        require(capsid::host::parse_app_request(document("[::1/128]:443"), &cidr_app, &cidr_error),
+                "v2 App fetch.allow rejected valid IPv6 CIDR target: " + cidr_error);
+    }
     for (const auto& authority :
          std::vector<std::string>{"",
                                   "::1",
@@ -585,12 +485,12 @@ void test_ipv6_fetch_authorities_reach_the_app_policy() {
                                   "[fe80::1%25lo0]:443",
                                   "[::ffff:127.0.0.1%1]:443",
                                   "[::1%1]",
-                                  "[::1/128]:443",
+                                  "[::1/129]:443",
                                   "api.example:443,",
                                   std::string("[::1") + '\0' + "ignored]:443",
                                   std::string("api.example") + '\0' + ":443"}) {
         FetchTarget retained{"unchanged.example", {123}};
-        require(!parse_fetch_target_text(authority, &retained) &&
+        require(!parse_outbound_target_text(authority, &retained) &&
                     retained.host == "unchanged.example" &&
                     retained.ports == std::vector<std::uint16_t>({123}),
                 "malformed fetch authority changed the policy destination: " + authority);
@@ -707,9 +607,6 @@ void test_v2_orthogonal_host_and_app_validation() {
                   ConfigErrorCode::kResourceLimit, "/pool/workers",
                   "App v2 pool.workers exceeds limit");
     // Stage 3: host-v2 capacity.memory (string shorthand + object) & tenancy.
-    require_unknown_field(ConfigDocument::kApplication,
-                          R"json({"apiVersion":"capsid/app-v1","tenant":"acme"})json", "/tenant",
-                          "App v1 rejects tenant");
     require_valid(ConfigDocument::kHost,
                   R"json({
           "apiVersion":"capsid/host-v2",
@@ -768,17 +665,16 @@ void test_v2_orthogonal_host_and_app_validation() {
 
 int main() {
     test_minimal_documents_are_valid();
-    test_complete_v1_document_shapes_are_valid();
-    test_complete_v1_shapes_remain_recursively_fail_closed();
-    test_listener_public_authority_is_a_frozen_v1_shape();
-    test_complete_v1_collections_and_limits_are_typed();
+    test_complete_v2_document_shapes_remain_recursively_fail_closed();
+    test_listener_public_origin_is_typed();
+    test_complete_v2_collections_and_limits_are_typed();
     test_environment_request_schema_is_fail_closed();
     test_network_namespace_is_not_in_either_schema();
     test_unrelated_unknown_fields_use_the_same_fail_closed_path();
     test_json_envelope_is_strict();
     test_api_versions_are_exact();
     test_unknown_fields_precede_value_validation();
-    test_static_pool_is_explicit_positive_and_fixed_size();
+    test_pool_bounds_are_validated();
     test_config_resource_limits_precede_json_dom_work();
     test_request_timeout_reaches_typed_app_request();
     test_ipv6_fetch_authorities_reach_the_app_policy();

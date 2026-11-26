@@ -57,8 +57,9 @@ The current compatibility boundary (delivered foundations and remaining gaps) is
 - the current model does not expose Module Worker ctx.waitUntil() or arbitrary
   post-response background work; a delivered incoming WebSocket has its own
   bounded connection owner, not general background authority;
-- legacy FetchRPC v3 remains HTTP-only by default; independent duplex channels
-  are delivered through explicitly negotiated v4, not a silent v3 upgrade;
+- `capsid_worker_spawn_ex(&config, NULL, &worker)` is HTTP-only by default on
+  FetchRPC v4; independent duplex channels require explicit v4 capability
+  negotiation;
 - Binding v1 only transports bounded structured values and rejects Streams,
   Sockets, remote objects, and native handles;
 - WebSocketPair, inbound HTTP Upgrade and outbound ws/wss are delivered in the
@@ -147,8 +148,7 @@ error. Capsid must never silently ignore it.
 
 - During `0.x`, workerd behavior is opt-in and the existing Capsid profile
   remains the default.
-- Existing `capsid/app-v1` and `capsid/app-v2` applications retain their
-  current behavior.
+- The v0.3.2 Host requires `capsid/app-v2` and `capsid/host-v2`. Each later schema defines its own support window.
 - A future `capsid/app-v3` schema carries runtime profile, compatibility date,
   compatibility flags, and platform Binding declarations.
 - In `1.0`, newly created App v3 and Wrangler applications default to the
@@ -367,7 +367,7 @@ compatibility report.
 ### v1.0.0: Stable Compatibility Contract
 
 - New App v3 and Wrangler projects default to the workerd profile.
-- App v1/v2 applications remain pinned to the legacy Capsid profile.
+- The Capsid runtime profile is available to applications using a supported configuration schema.
 - Stabilize App v3, the current C ABI, Binding v2, the supported Wrangler
   configuration subset, and compatibility-date policy.
 - Require every future behavior change to enter through a new compatibility

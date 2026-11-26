@@ -62,7 +62,7 @@ struct Fleet {
             capsid_worker_config_init(&config);
             config.worker_path = worker_path;
             config.strict_sandbox = 0;
-            if (capsid_worker_spawn(&config, out) != CAPSID_OK) {
+            if (capsid_worker_spawn_ex(&config, NULL, out) != CAPSID_OK) {
                 *error = "spawn real observation Worker";
                 return false;
             }

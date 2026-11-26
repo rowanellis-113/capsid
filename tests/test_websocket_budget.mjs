@@ -446,70 +446,63 @@ try {
       return { full, empty: await idle(backend) };
     },
   );
-  await run(
-    'pending-dials',
-    { channelCapacity: { channelsTotal: 4, pendingDialsTotal: 1 } },
-    async (backend, peer) => {
-      peer.stall = true;
-      const pending = await beginDial(backend, peer);
-      await until(
-        () => peer.accepted,
-        (count) => count === 1,
-        'first real handshake is pending',
-      );
-      const denied = await dial(backend, peer);
-      assert.deepEqual(denied, [{ type: 'error' }, { type: 'close', code: 1006 }]);
-      assert.equal(peer.accepted, 1, 'dial budget rejects before TCP');
-      const full = await until(
-        () => snapshot(backend),
-        (value) => value.service.dials.used === 1 && value.service.httpInflight === 1,
-        'unfinished HTTP body owns one pending constructor',
-      );
-      assert.equal(full.service.dials.limit, 1);
-      assert.equal(full.service.dials.highWater, 1);
-      assert.equal(full.service.dials.rejected, 1);
-      peer.destroy();
+  await run('pending-dials', { channelCapacity: { channelsTotal: 32 } }, async (backend, peer) => {
+    // host-v2 derives pendingDialsTotal = clamp(channelsTotal / 8, 16, 1024) = 16.
+    const limit = 16;
+    peer.stall = true;
+    const pending = [];
+    for (let i = 0; i < limit; i++) {
+      pending.push(await beginDial(backend, peer));
+    }
+    await until(
+      () => peer.accepted,
+      (count) => count === limit,
+      'all derived pending handshakes are held',
+    );
+    const denied = await dial(backend, peer);
+    assert.deepEqual(denied, [{ type: 'error' }, { type: 'close', code: 1006 }]);
+    assert.equal(peer.accepted, limit, 'dial budget rejects before TCP');
+    const full = await until(
+      () => snapshot(backend),
+      (value) => value.service.dials.used === limit && value.service.httpInflight === limit,
+      'unfinished HTTP bodies own all pending constructors',
+    );
+    assert.equal(full.service.dials.limit, limit);
+    assert.equal(full.service.dials.highWater, limit);
+    assert.equal(full.service.dials.rejected, 1);
+    peer.destroy();
+    for (const item of pending) {
       assert.deepEqual(
-        await pending.complete,
+        await item.complete,
         [{ type: 'error' }, { type: 'close', code: 1006 }],
         'held dial failure settles',
       );
-      await idle(backend);
-      peer.stall = false;
-      assert.deepEqual(await dial(backend, peer), [{ type: 'open' }], 'returned dial slot reused');
-      assert.equal(peer.accepted, 2);
-      peer.destroy();
-      return { full, empty: await idle(backend) };
+    }
+    await idle(backend);
+    peer.stall = false;
+    assert.deepEqual(await dial(backend, peer), [{ type: 'open' }], 'returned dial slot reused');
+    assert.equal(peer.accepted, limit + 1);
+    peer.destroy();
+    return { full, empty: await idle(backend) };
+  });
+  await run(
+    'derived-queue-budget',
+    { channelCapacity: { channelsTotal: 4, maxChannelMessageSize: '2MiB' } },
+    async (backend) => {
+      // host-v2 derives queueBytes = max(16MiB, maxChannelMessageSize * 16) = 32MiB.
+      const expectedLimit = 32 * 1024 * 1024;
+      const burst = await upgrade(backend, '/burst');
+      assert.equal(burst.status, 101);
+      const received = new Promise((resolve) => burst.socket.once('data', resolve));
+      triggerBurst(burst.socket);
+      await within(received, 'burst frame echoed under derived queue budget');
+      const live = await snapshot(backend);
+      assert.equal(live.service.queueBytes.limit, expectedLimit);
+      assert.equal(live.listener.queueBytes.limit, expectedLimit);
+      await burst.close();
+      return { live, empty: await idle(backend) };
     },
   );
-  for (const scope of ['service', 'listener']) {
-    await run(
-      `${scope}-queue`,
-      {
-        channelCapacity: { channelQueueBytesTotal: scope === 'service' ? '1KiB' : '64KiB' },
-        listenerChannelQueueBytes: scope === 'listener' ? '1KiB' : '16KiB',
-      },
-      async (backend) => {
-        const burst = await upgrade(backend, '/burst');
-        assert.equal(burst.status, 101);
-        triggerBurst(burst.socket);
-        await within(burst.closed, 'oversized network buffer must terminate channel');
-        const empty = await idle(backend);
-        assert.ok(empty[scope].queueBytes.rejected >= 1, 'network queue refusal recorded');
-        assert.ok(
-          empty[scope].queueBytes.highWater <= 1024,
-          'network write high-water remains bounded',
-        );
-        if (scope === 'listener')
-          assert.equal(
-            empty.service.queueBytes.rejected,
-            0,
-            'local refusal never charges ancestor',
-          );
-        return { empty };
-      },
-    );
-  }
 } finally {
   for (const socket of sockets) socket.destroy();
   for (const peer of peers)

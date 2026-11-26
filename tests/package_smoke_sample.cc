@@ -6,7 +6,7 @@
 // CapabilityPolicyBuilder (application identity + module allowlist), then
 // the same worker round trip through the C API with the built policy wired
 // into the config — proving a consumer can build a policy and hand it to
-// capsid_worker_spawn() without the build tree.
+// capsid_worker_spawn_ex() without the build tree.
 //
 // Compiled with a strict -std=c++17, where glibc hides poll()/clock_gettime()
 // unless the POSIX feature macro is requested (macOS exposes them
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
     config.capability_policy = &policy.descriptor();
 
     capsid_worker* worker = nullptr;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_OK, "could not spawn worker");
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_OK, "could not spawn worker");
 
     // Contract: load the bundle BEFORE waiting for READY (mirrors
     // test_worker_integration — the HELLO/READY handshake completes once

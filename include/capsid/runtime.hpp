@@ -210,7 +210,7 @@ class Error : public std::runtime_error {
 class Worker {
   public:
     explicit Worker(const capsid_worker_config& config) : handle_(NULL) {
-        const capsid_result result = capsid_worker_spawn(&config, &handle_);
+        const capsid_result result = capsid_worker_spawn_ex(&config, NULL, &handle_);
         if (result != CAPSID_OK) {
             throw Error(result);
         }

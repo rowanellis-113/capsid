@@ -27,21 +27,14 @@ uint64_t load_u64(const uint8_t* input) {
     return value;
 }
 
-bool valid_type(uint16_t type) { return type >= kHello && type <= kLoadBinding; }
-
-bool valid_type_versioned(uint16_t type, uint16_t version) {
-    if (version == kVersionV4) {
-        return type >= kHello && type <= kConnectionLifetime;
-    }
-    return valid_type(type);
-}
+bool valid_type(uint16_t type) { return type >= kHello && type <= kConnectionLifetime; }
 
 // Hello v4 payload validation (docs/reference/fetchrpc-v4.md §1.2, amended): the
-// v3 startup-config payload (variable length) plus an 8-byte
+// startup-config payload (variable length) plus an 8-byte
 // capability tail; only the tail is validated here - known capability
 // bits only, reserved word zero.
 bool valid_hello_v4_payload(const std::vector<uint8_t>& payload) {
-    if (payload.size() < kHelloFixedPayloadSize + kHelloV4TailSize) {
+    if (payload.size() < kHelloFixedPayloadSize) {
         return false;
     }
     const uint8_t* cursor = payload.data() + payload.size() - kHelloV4TailSize;
@@ -64,13 +57,12 @@ bool valid_flags(uint16_t type, uint32_t flags) {
         // The binding blob is opaque: only the chunk start/end flags apply.
         return (flags & ~(kFlagStart | kFlagEnd)) == 0;
     }
-    if (type == kRequestHead) {
-        // kFlagRequestEnd: request has no body.
-        return (flags & ~kFlagRequestEnd) == 0;
-    }
-    if (type == kResponseHead) {
-        return (flags & ~kFlagResponseFixedBody) == 0;
-    }
+    if (type == kRequestHead)
+        return (flags & ~(kFlagRequestEnd | kFlagRequestUpgrade)) == 0;
+    if (type == kResponseHead)
+        return (flags & ~(kFlagResponseFixedBody | kFlagResponseUpgrade)) == 0;
+    if (type == kChannelData)
+        return (flags & ~(kFlagStart | kFlagEnd | kFlagChanText)) == 0;
     if (type == kError) {
         return (flags & ~kErrorFlagTimeout) == 0;
     }
@@ -83,31 +75,10 @@ bool valid_flags(uint16_t type, uint32_t flags) {
     return flags == 0;
 }
 
-// v4 flag rules (docs/reference/fetchrpc-v4.md §2-3): Upgrade flags ride the
-// existing head frames, channel frames carry their own namespace.
-bool valid_flags_versioned(uint16_t type, uint32_t flags, uint16_t version) {
-    if (version != kVersionV4) {
-        return valid_flags(type, flags);
-    }
-    switch (type) {
-    case kRequestHead:
-        return (flags & ~(kFlagRequestEnd | kFlagRequestUpgrade)) == 0;
-    case kResponseHead:
-        return (flags & ~(kFlagResponseFixedBody | kFlagResponseUpgrade)) == 0;
-    case kChannelOpen:
-        return flags == 0;
-    case kChannelData:
-        return (flags & ~(kFlagStart | kFlagEnd | kFlagChanText)) == 0;
-    default:
-        return valid_flags(type, flags);
-    }
-}
-
 } // namespace
 
 // Debug STL proxy allocation must propagate to the caller's error guard.
-Parser::Parser(uint16_t expected_version)
-    : buffer_(0), offset_(0), error_(""), expected_version_(expected_version) {}
+Parser::Parser() : buffer_(0), offset_(0), error_("") {}
 
 bool Parser::append(const uint8_t* data, size_t size) {
     if (!error_.empty()) {
@@ -151,31 +122,22 @@ ParseResult Parser::next(Frame* frame, std::vector<uint8_t>* payload) {
         return kParseError;
     }
     const uint16_t wire_version = load_u16(header + 4);
-    if (expected_version_ == kVersionNegotiate) {
-        // Bootstrap (amended §1.2): the first frame locks the
-        // connection's version; later frames must match.
-        if (wire_version != kVersion && wire_version != kVersionV4) {
-            error_ = "unsupported protocol version";
-            return kParseError;
-        }
-        expected_version_ = wire_version;
-    } else if (wire_version != expected_version_) {
+    if (wire_version != kVersion) {
         error_ = "unsupported protocol version";
         return kParseError;
     }
 
     const uint16_t type = load_u16(header + 6);
-    if (!valid_type_versioned(type, expected_version_)) {
+    if (!valid_type(type)) {
         error_ = "invalid frame type";
         return kParseError;
     }
     const uint32_t flags = load_u32(header + 8);
-    if (!valid_flags_versioned(type, flags, expected_version_)) {
+    if (!valid_flags(type, flags)) {
         error_ = "invalid frame flags";
         return kParseError;
     }
-    if (expected_version_ == kVersionV4 && type >= kChannelOpen && type <= kConnectionLifetime &&
-        load_u64(header + 12) != 0) {
+    if (type >= kChannelOpen && type <= kConnectionLifetime && load_u64(header + 12) != 0) {
         error_ = "invalid channel payload";
         return kParseError;
     }
@@ -193,13 +155,13 @@ ParseResult Parser::next(Frame* frame, std::vector<uint8_t>* payload) {
     frame->type = type;
     frame->flags = flags;
     frame->request_id = load_u64(header + 12);
-    frame->version = expected_version_;
+    frame->version = kVersion;
     payload->assign(buffer_.begin() + static_cast<ptrdiff_t>(offset_ + kHeaderSize),
                     buffer_.begin() + static_cast<ptrdiff_t>(offset_ + frame_size));
     if (payload != &frame->payload) {
         frame->payload.clear();
     }
-    if (expected_version_ == kVersionV4 && type == kHello && !valid_hello_v4_payload(*payload)) {
+    if (type == kHello && !valid_hello_v4_payload(*payload)) {
         error_ = "invalid hello capabilities";
         return kParseError;
     }
@@ -212,75 +174,36 @@ ParseResult Parser::next(Frame* frame, std::vector<uint8_t>* payload) {
 }
 
 bool encode(const Frame& frame, std::vector<uint8_t>* output) {
-    if (!output) {
-        return false;
-    }
-    output->clear();
-    if (frame.payload.size() <= kMaxPayloadSize) {
-        output->reserve(kHeaderSize + frame.payload.size());
-    }
-    return append_encoded(frame.type, frame.flags, frame.request_id,
-                          frame.payload.empty() ? NULL : &frame.payload[0], frame.payload.size(),
-                          output);
+    return encode_versioned(frame.version, frame, output);
 }
 
 bool encode_versioned(uint16_t version, const Frame& frame, std::vector<uint8_t>* output) {
-    if (!output || (version != kVersion && version != kVersionV4)) {
-        return false;
-    }
-    if (!valid_type_versioned(frame.type, version) ||
-        !valid_flags_versioned(frame.type, frame.flags, version)) {
-        return false;
-    }
-    if (version == kVersionV4 && frame.type >= kChannelOpen && frame.type <= kConnectionLifetime &&
-        frame.request_id != 0)
-        return false;
-    if (frame.payload.size() > kMaxPayloadSize ||
-        (frame.payload.size() != 0 && frame.payload.empty())) {
+    if (!output || version != kVersion || !valid_type(frame.type) ||
+        !valid_flags(frame.type, frame.flags) || frame.payload.size() > kMaxPayloadSize ||
+        (frame.type >= kChannelOpen && frame.request_id != 0)) {
         return false;
     }
     output->clear();
-    output->reserve(kHeaderSize + frame.payload.size());
-    append_u32(output, kMagic);
-    append_u16(output, version);
-    append_u16(output, frame.type);
-    append_u32(output, frame.flags);
-    append_u64(output, frame.request_id);
-    append_u32(output, static_cast<uint32_t>(frame.payload.size()));
-    if (!frame.payload.empty()) {
-        output->insert(output->end(), frame.payload.begin(), frame.payload.end());
-    }
-    return true;
+    return append_encoded(frame.type, frame.flags, frame.request_id, frame.payload.data(),
+                          frame.payload.size(), output);
 }
 
 bool append_encoded(uint16_t type, uint32_t flags, uint64_t request_id, const uint8_t* payload,
                     size_t payload_size, std::vector<uint8_t>* output) {
-    if (!output || !valid_type(type) || !valid_flags(type, flags) ||
-        payload_size > kMaxPayloadSize || (payload_size != 0 && !payload) ||
-        output->size() > std::numeric_limits<size_t>::max() - kHeaderSize - payload_size) {
-        return false;
-    }
-    append_u32(output, kMagic);
-    append_u16(output, kVersion);
-    append_u16(output, type);
-    append_u32(output, flags);
-    append_u64(output, request_id);
-    append_u32(output, static_cast<uint32_t>(payload_size));
-    if (payload_size != 0) {
-        output->insert(output->end(), payload, payload + payload_size);
-    }
-    return true;
+    return append_encoded_versioned(kVersion, type, flags, request_id, payload, payload_size,
+                                    output);
 }
 
 bool append_encoded_versioned(uint16_t version, uint16_t type, uint32_t flags, uint64_t request_id,
                               const uint8_t* payload, size_t payload_size,
                               std::vector<uint8_t>* output) {
-    if (!output || (version != kVersion && version != kVersionV4) ||
-        !valid_type_versioned(type, version) || !valid_flags_versioned(type, flags, version) ||
-        payload_size > kMaxPayloadSize || (payload_size != 0 && !payload) ||
+    if (!output || version != kVersion || !valid_type(type) || !valid_flags(type, flags) ||
+        (type >= kChannelOpen && request_id != 0) || payload_size > kMaxPayloadSize ||
+        (payload_size != 0 && !payload) ||
         output->size() > std::numeric_limits<size_t>::max() - kHeaderSize - payload_size) {
         return false;
     }
+    output->reserve(output->size() + kHeaderSize + payload_size);
     append_u32(output, kMagic);
     append_u16(output, version);
     append_u16(output, type);
@@ -289,6 +212,41 @@ bool append_encoded_versioned(uint16_t version, uint16_t type, uint32_t flags, u
     append_u32(output, static_cast<uint32_t>(payload_size));
     if (payload_size != 0) {
         output->insert(output->end(), payload, payload + payload_size);
+    }
+    return true;
+}
+
+bool append_encoded_scatter_versioned(uint16_t version, uint16_t type, uint32_t flags,
+                                      uint64_t request_id, const PayloadSpan* spans,
+                                      size_t span_count, size_t total_payload_size,
+                                      std::vector<uint8_t>* output) {
+    if (!output || version != kVersion || !valid_type(type) || !valid_flags(type, flags) ||
+        (type >= kChannelOpen && request_id != 0) || total_payload_size > kMaxPayloadSize ||
+        (span_count != 0 && !spans) || (total_payload_size != 0 && span_count == 0) ||
+        output->size() > std::numeric_limits<size_t>::max() - kHeaderSize - total_payload_size) {
+        return false;
+    }
+    size_t summed = 0;
+    for (size_t i = 0; i < span_count; ++i) {
+        if ((spans[i].size != 0 && !spans[i].data) || spans[i].size > total_payload_size - summed) {
+            return false;
+        }
+        summed += spans[i].size;
+    }
+    if (summed != total_payload_size) {
+        return false;
+    }
+    output->reserve(output->size() + kHeaderSize + total_payload_size);
+    append_u32(output, kMagic);
+    append_u16(output, version);
+    append_u16(output, type);
+    append_u32(output, flags);
+    append_u64(output, request_id);
+    append_u32(output, static_cast<uint32_t>(total_payload_size));
+    for (size_t i = 0; i < span_count; ++i) {
+        if (spans[i].size != 0) {
+            output->insert(output->end(), spans[i].data, spans[i].data + spans[i].size);
+        }
     }
     return true;
 }
@@ -981,7 +939,7 @@ bool decode_channel_data_id(const uint8_t* data, size_t size, uint32_t* channel_
 }
 
 bool decode_upgrade_head(const Frame& frame, UpgradeTail* tail, std::string* error) {
-    if (frame.version != kVersionV4 || frame.request_id == 0 || frame.payload.size() < 12) {
+    if (frame.version != kVersion || frame.request_id == 0 || frame.payload.size() < 12) {
         return reject_payload(error, "invalid channel payload");
     }
     const uint8_t* cursor = frame.payload.data();

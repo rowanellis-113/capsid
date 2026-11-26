@@ -88,7 +88,7 @@ config.capability_policy = &capability;
 
 If `allowed_modules` contains `tjs:*`, unknown modules, duplicate modules, or
 permanently forbidden items, it does not wait for a JavaScript import to fail;
-instead `capsid_worker_spawn()` returns `CAPSID_INVALID_ARGUMENT` directly.
+instead `capsid_worker_spawn_ex()` returns `CAPSID_INVALID_ARGUMENT` directly.
 
 Applications must be bundled as self-contained ESM at release time. Relative,
 absolute, remote, or npm runtime imports left in the bundle are rejected.

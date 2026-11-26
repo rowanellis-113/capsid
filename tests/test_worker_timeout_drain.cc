@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
     config.request_timeout_ms = 200;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
     require_result(capsid_worker_begin_bodyless_request(worker, 1, "GET",
                                                         "https://example.test/hang", NULL, 0),
                    "begin request 1");

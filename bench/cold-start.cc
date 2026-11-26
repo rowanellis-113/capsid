@@ -335,7 +335,7 @@ void run(const Args& args) {
         config.worker_path = args.worker.c_str();
         config.strict_sandbox = 1;
         capsid_worker* raw = nullptr;
-        const auto spawned = capsid_worker_spawn(&config, &raw);
+        const auto spawned = capsid_worker_spawn_ex(&config, NULL, &raw);
         std::unique_ptr<capsid_worker, decltype(&capsid_worker_destroy)> worker(
             raw, capsid_worker_destroy);
         if (spawned != CAPSID_OK || !worker)

@@ -583,7 +583,7 @@ func main() {
 	config.strict_sandbox = 0
 
 	var spawned *C.capsid_worker
-	if result := C.capsid_worker_spawn(&config, &spawned); result != C.CAPSID_OK {
+	if result := C.capsid_worker_spawn_ex(&config, nil, &spawned); result != C.CAPSID_OK {
 		fatal("spawn worker: %s", C.GoString(C.capsid_result_string(result)))
 	}
 	worker = spawned

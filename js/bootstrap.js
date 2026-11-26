@@ -674,56 +674,6 @@ function pumpStreamResponse(state, response, body) {
         settleRequest(state);
         return;
       }
-      if (useNativeReader && body._state === 'readable') {
-        const ctrl = body._readableStreamController;
-        if (
-          ctrl !== undefined &&
-          ctrl !== null &&
-          objectHasOwn(ctrl, '_controlledReadableByteStream') &&
-          ctrl._closeRequested === true &&
-          ctrl._queueTotalSize > 0 &&
-          ctrl._pendingPullIntos.length === 0 &&
-          reader._readRequests.length === 0
-        ) {
-          try {
-            while (ctrl._queueTotalSize > 0 && ctrl._queue.length > 0) {
-              if (state.cancelled) {
-                if (state.responseReader === reader) {
-                  state.responseReader = null;
-                }
-                settleRequest(state);
-                return;
-              }
-              const entry = ctrl._queue.shift();
-              ctrl._queueTotalSize -= entry.byteLength;
-              body._disturbed = true;
-              const pending = core.capsidResponseWriteBuffer(
-                id,
-                entry.buffer,
-                entry.byteOffset,
-                entry.byteLength,
-              );
-              if (pending !== undefined) {
-                promiseThen(pending, drainReads, onError);
-                return;
-              }
-            }
-          } catch (error) {
-            onError(error);
-            return;
-          }
-          ctrl._pullAlgorithm = undefined;
-          ctrl._cancelAlgorithm = undefined;
-          body._state = 'closed';
-          if (reader._closedPromise_resolve !== undefined) {
-            reader._closedPromise_resolve(undefined);
-            reader._closedPromise_resolve = undefined;
-            reader._closedPromise_reject = undefined;
-          }
-          finishStream();
-          return;
-        }
-      }
       let readPromise;
       try {
         readPromise = useNativeReader ? intrinsicCall(nativeRead, reader) : reader.read();

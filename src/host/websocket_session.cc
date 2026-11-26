@@ -442,7 +442,8 @@ void WebSocketSession::pump_input() {
             close.close_code = item.code;
             close.close_kind = 1;
             if (item.payload.size() > 2)
-                close.close_reason.assign(item.payload.begin() + 2, item.payload.end());
+                close.ensure_channel_extra().close_reason.assign(item.payload.begin() + 2,
+                                                                 item.payload.end());
             if (!shutting_down_ && !submit(std::move(close)))
                 break;
             peer_closed_ = host_closed_ = true;

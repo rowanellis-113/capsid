@@ -66,7 +66,7 @@ void rejects_accept(const std::vector<uint8_t>& bytes, uint32_t caps = fetch_cap
 using Side = capsid::ChannelSide;
 p::Frame frame(uint8_t type) {
     p::Frame value;
-    value.version = p::kVersionV4;
+    value.version = p::kVersion;
     value.type = type;
     return value;
 }
@@ -133,7 +133,7 @@ struct Peers {
         options.local_side = Side::Worker;
         registry[1] = capsid::ChannelRegistry(options);
         auto hello = frame(p::kHello);
-        hello.payload.resize(p::kHelloFixedPayloadSize);
+        hello.payload.resize(p::kHelloFixedPayloadSize - p::kHelloV4TailSize);
         require(p::append_hello_a2_extension(&hello.payload, p::ChannelLimits()), "test A2 limits");
         p::append_u32(&hello.payload, host);
         p::append_u32(&hello.payload, 0);
@@ -146,8 +146,8 @@ struct Peers {
     void both(Side from, const p::Frame& input) {
         // Exercise actual frame encoding/parsing in addition to the registry.
         std::vector<uint8_t> bytes;
-        require(p::encode_versioned(p::kVersionV4, input, &bytes), "test wire encode");
-        p::Parser parser(p::kVersionV4);
+        require(p::encode_versioned(p::kVersion, input, &bytes), "test wire encode");
+        p::Parser parser;
         require(parser.append(bytes.data(), bytes.size()), "test wire append");
         p::Frame parsed;
         require(parser.next(&parsed) == p::kParseFrame, "test wire parse");
@@ -302,7 +302,7 @@ void registry_tests() {
             return from == local ? io.commit_local(input) : io.receive(input);
         };
         auto hello = frame(p::kHello);
-        hello.payload.resize(p::kHelloFixedPayloadSize);
+        hello.payload.resize(p::kHelloFixedPayloadSize - p::kHelloV4TailSize);
         require(p::append_hello_a2_extension(&hello.payload, p::ChannelLimits()), "IO test limits");
         p::append_u32(&hello.payload, fetch_caps);
         p::append_u32(&hello.payload, 0);

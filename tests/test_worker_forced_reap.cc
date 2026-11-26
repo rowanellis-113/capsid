@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
         capsid_worker_config_init(&config);
         config.worker_path = argv[1];
         capsid_worker* worker = nullptr;
-        if (capsid_worker_spawn(&config, &worker) != CAPSID_OK || !worker)
+        if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK || !worker)
             return 2;
         const int64_t raw = capsid_worker_pid(worker);
         if (raw <= 0 || raw == getpid() || static_cast<int64_t>(static_cast<pid_t>(raw)) != raw) {

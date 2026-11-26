@@ -182,7 +182,7 @@ int run(const char* worker_path, const char* fixture_path) {
     config.sandbox_network_namespace_fd = target_namespace;
     config.sandbox_required_features = CAPSID_SANDBOX_FEATURE_NETWORK_NAMESPACE;
     capsid_worker* worker = NULL;
-    const capsid_result spawn = capsid_worker_spawn(&config, &worker);
+    const capsid_result spawn = capsid_worker_spawn_ex(&config, NULL, &worker);
     if (spawn != CAPSID_OK) {
         fail(std::string("worker spawn failed: ") + capsid_result_string(spawn));
     }

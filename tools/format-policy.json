@@ -33,10 +33,6 @@
   ],
   "dataGlobs": ["examples/*/package.json", "examples/*/package-lock.json"],
   "preservedInputs": {
-    "tests/compat/runtime_v7.h": {
-      "sha256": "e991b7b92aae43badbaefdb701f596402a49675a66021db8e2b006dfa7225e8e",
-      "references": ["tests/test_abi_v7_original_consumer.c"]
-    },
     "tests/helpers/workerd_listener_control.mjs": {
       "sha256": "addaf82e17ee86e81e3de68273cc0683c1c282571c7db62e3c676b1fa24399ba",
       "references": [

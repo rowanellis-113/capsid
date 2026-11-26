@@ -53,6 +53,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -126,6 +127,8 @@ struct GenerationPoolOptions {
     // always the last event of its executor.
     std::function<void(const WorkerExecutor*, WorkerEvent)> event_sink;
     std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> shared_event_sink;
+    std::function<void(const std::shared_ptr<WorkerExecutor>&, std::vector<WorkerEvent>&)>
+        shared_event_batch_sink;
     // §9.4 reaper-finished notification: called exactly once, on the pump
     // thread, after the pool entered kDead and its workers were reaped
     // (finalize_drain) — the "reaper completed" instant after which the
@@ -189,7 +192,19 @@ struct GenerationPoolOptions {
     std::function<bool(const GenerationPool* requester, std::string* rejection_reason)>
         acquire_worker_slot;
     std::function<void()> release_elastic_slot;
+    // Bounded asynchronous reaping handoff: when set, an evicted elastic slot
+    // transfers into the reaping budget before process exit only while reaping
+    // headroom is available; otherwise the elastic slot remains held until the
+    // retired executor exits and is joined.
+    std::function<bool()> handoff_elastic_to_reaping;
+    // Charge a live predecessor while its replacement uses the reserved floor slot.
+    std::function<bool()> try_acquire_reaping_slot;
+    std::function<void()> release_reaping_slot;
     std::function<void(const std::string& reason)> on_eviction;
+    // Optional deterministic recovery jitter sampler returning a signed basis-point
+    // offset in [-max_jitter_bps, +max_jitter_bps]. When unset, GenerationPool
+    // samples uniformly from [-policy.jitter_basis_points, +policy.jitter_basis_points].
+    std::function<std::int32_t(std::uint32_t max_jitter_bps)> jitter_sampler;
     // Optional hook run outside the pool mutex right before forced shutdown on an
     // expired drain deadline with non-idle slots (lets listeners flush kCancel
     // before kShutdown).
@@ -382,6 +397,9 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     void set_event_sink(std::function<void(const WorkerExecutor*, WorkerEvent)> sink);
     void
     set_shared_event_sink(std::function<void(std::shared_ptr<WorkerExecutor>, WorkerEvent)> sink);
+    void set_shared_event_batch_sink(
+        std::function<void(const std::shared_ptr<WorkerExecutor>&, std::vector<WorkerEvent>&)>
+            sink);
 
     // ---- diagnostics / load signal -------------------------------------
 
@@ -470,6 +488,11 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     // slot under mutex_ and returns true so the caller frees one slot.
     struct Slot;
     bool settle_evicted_slot_elastic_locked(Slot& victim);
+    bool retire_surplus_locked(Slot& slot);
+    std::int32_t sample_recovery_jitter_locked();
+    void complete_retired_handoffs(const std::vector<WorkerExecutor*>& targets,
+                                   const std::function<bool()>& handoff_cb,
+                                   const std::function<void()>& release_cb);
 
     GenerationPoolOptions options_;
     WorkerRecoveryPolicy policy_; // validated copy
@@ -498,14 +521,20 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     std::vector<Slot> slots_;
     // Rotating tie-breaker when multiple ready workers share the same minimum load.
     std::size_t next_pick_index_ = 0;
+    struct RetiredExecutor {
+        enum class Charge { kNone, kElastic, kReaping, kHandoffPending };
+        std::shared_ptr<WorkerExecutor> executor;
+        Charge charge = Charge::kNone;
+    };
     // Replaced (dead or asynchronously reaping) executors kept alive until
     // exit + drain complete (§8.2 pinning / §8.3 async reaping buffer).
-    std::vector<std::shared_ptr<WorkerExecutor>> retired_;
+    std::vector<RetiredExecutor> retired_;
     // When an external contract observer installs options_.on_worker_started
     // (bare const WorkerExecutor*), keep exited retired executors pinned here
     // (after removing from retired_ and joining) until finalize_drain() finishes
     // running on_drain_complete. Production paths leave on_worker_started unset.
     std::vector<std::shared_ptr<WorkerExecutor>> observed_retired_;
+    std::vector<WorkerEvent> drain_scratch_;
     std::function<void()> on_worker_ready_;
     std::function<void(const std::string& reason)> on_scale_out_failed_;
     // Slots covered by a scheduled-or-running replacement: the per-App
@@ -516,6 +545,9 @@ class GenerationPool : public std::enable_shared_from_this<GenerationPool> {
     std::uint64_t replacements_in_flight_ = 0;
     // Concurrent synchronous slot-admission calls running outside mutex_.
     std::uint64_t scale_admissions_in_flight_ = 0;
+    // Concurrent retired elastic->reaping handoff callbacks running outside mutex_.
+    std::uint64_t reaping_handoffs_in_flight_ = 0;
+    std::mt19937_64 jitter_rng_;
     std::atomic<std::uint64_t> drain_check_cycles_{0};
     // Slot → spawn due time (monotonic ms) for the exponential backoff.
     std::vector<std::uint64_t> replacement_due_ms_;

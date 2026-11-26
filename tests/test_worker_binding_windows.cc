@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
     config.worker_path = worker_path.c_str();
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
     require(worker != NULL, "spawn returned a null worker");
 
     const char* modules[] = {"capsid:utils", "capsid:getopts"};

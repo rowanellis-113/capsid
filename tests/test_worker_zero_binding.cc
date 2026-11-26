@@ -25,6 +25,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -196,6 +197,9 @@ capsid::protocol::Frame minimal_hello() {
     capsid::protocol::append_u16(&hello.payload, 0);
     capsid::protocol::append_u32(&hello.payload, CAPSID_EGRESS_DENY);
     capsid::protocol::append_u32(&hello.payload, 0);
+    capsid::protocol::append_u16(&hello.payload, 0); // environment entries
+    capsid::protocol::append_u32(&hello.payload, 0); // capabilities
+    capsid::protocol::append_u32(&hello.payload, 0); // reserved
     return hello;
 }
 
@@ -232,7 +236,10 @@ void test_zero_binding_ready_baseline(const char* worker_path, const char* p0_pa
     require((frame.flags & ~capsid::protocol::kReadySandboxFeatureMask) == 0,
             "READY carries non-sandbox flags");
     const std::string expected(CAPSID_BUILD_COMPATIBILITY_ID);
-    require(expected.size() == 71 && frame.payload.size() == expected.size() &&
+    require(expected.size() == 71 &&
+                frame.payload.size() == expected.size() + capsid::protocol::kHelloV4TailSize &&
+                std::all_of(frame.payload.begin() + expected.size(), frame.payload.end(),
+                            [](uint8_t byte) { return byte == 0; }) &&
                 std::memcmp(frame.payload.data(), expected.data(), expected.size()) == 0,
             "zero-binding READY payload diverged from the baseline identity");
     finish_worker(fd, pid, true);
@@ -436,6 +443,9 @@ void test_binding_ready_proof(const char* worker_path, const char* p0_path) {
     capsid::WorkerReadyProof proof;
     std::string compat_id;
     std::string error;
+    require(frame.payload.size() >= capsid::protocol::kHelloV4TailSize,
+            "missing READY capabilities");
+    frame.payload.resize(frame.payload.size() - capsid::protocol::kHelloV4TailSize);
     require(capsid::parse_ready_proof(frame.payload, &compat_id, &proof, &error),
             "binding READY proof was rejected: " + error);
     require(compat_id == CAPSID_BUILD_COMPATIBILITY_ID && proof.extended,

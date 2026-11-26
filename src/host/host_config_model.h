@@ -86,19 +86,14 @@ struct ListenerConfig {
 // Host-side defaults/maximums worker tier. All strings are the "256MiB" /
 // "5s" grammars except the plain integers.
 struct WorkerTierConfig {
-    std::string js_heap;               // size text, empty when absent
-    std::string process_address_space; // size text
-    std::string memory_max;            // size text
+    std::string js_heap;    // size text, empty when absent
+    std::string memory_max; // size text
     std::uint64_t file_descriptors = 0;
-    std::uint64_t pids_max = 0;
 };
 
 struct RequestTierConfig {
     std::string timeout; // duration text
     std::uint64_t max_inflight_per_worker = 0;
-    std::uint64_t max_streaming_inflight_per_worker = 0;
-    std::uint64_t stream_idle_timeout_ms = 0;
-    std::uint64_t write_timeout_ms = 0;
 };
 
 struct PoolTierConfig {
@@ -110,7 +105,6 @@ struct PoolTierConfig {
     std::uint64_t idle_timeout_ms = 0;
     bool has_queue_requests = false;
     std::uint64_t queue_requests = 0;
-    std::uint64_t queue_header_bytes = 0;
     std::uint64_t queue_timeout_ms = 0;
 };
 
@@ -145,21 +139,12 @@ struct TenancyConfig {
     TenantQuotaConfig quota_for(const std::string& tenant) const;
 };
 
-// §9.4: workersTotal is the steady-state budget; the remaining capacity
-// fields are carried typed for the PR-10 weighted ledger. startupsConcurrent
-// is the startup-permit limit, NOT the Admin pending-queue ceiling.
+// Machine-wide budgets derived from host.json capacity settings.
 struct CapacityConfig {
     ChannelBudgetLimits channels;
     std::uint64_t workers_total = 1;
-    // §9.4: the extra budget for the new-warming + old-draining overlap
-    // of a replacement deploy. v1 default 0 — a zero-downtime replace of
-    // a serving pool is refused without surge/headroom (never silently
-    // over-spawned); a fresh deploy never needs it.
+    // Reserved for overlapping generations during replacement.
     std::uint64_t activation_surge_workers = 0;
-    std::uint64_t startups_concurrent = 0; // 0 = Host default
-    std::uint64_t queued_requests_total = 0;
-    std::uint64_t queued_header_bytes_total = 0;
-    std::uint64_t worker_memory_commit_total = 0;
     std::uint64_t max_channel_message_size = 1024ULL * 1024ULL;
     std::uint64_t channel_idle_timeout_ms = 60000;
     MemoryBudgetConfig memory;
@@ -204,7 +189,6 @@ struct RecoveryConfig {
 // ---- the model ----------------------------------------------------------
 
 struct ParsedHostConfig {
-    bool is_v2 = false;
     std::string applications_root;
     std::string state_root;
     std::string secret_root_template; // contains "{application}"

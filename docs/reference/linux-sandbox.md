@@ -51,7 +51,7 @@ When namespaces are required, the runtime first establishes a user namespace; al
 
 `sandbox_cgroup_path` must be an existing, absolute, delegated cgroup v2 directory. The host is responsible for creating the directory and enabling controllers at the parent level; the runtime does not modify `cgroup.subtree_control`.
 
-ABI v7 `capsid_resource_limits.enabled_fields` distinguishes "unset" from "explicitly zero". Supported fields:
+ABI v8 `capsid_resource_limits.enabled_fields` distinguishes "unset" from "explicitly zero". Supported fields:
 
 - `file_descriptors` → `RLIMIT_NOFILE`;
 - CPU quota/period → `cpu.max`;

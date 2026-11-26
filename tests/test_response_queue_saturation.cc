@@ -111,7 +111,7 @@ capsid_worker* spawn_with(const char* worker_path, const std::string& bundle,
     config.request_timeout_ms = request_timeout_ms;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "load bundle");

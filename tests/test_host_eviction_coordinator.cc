@@ -31,6 +31,7 @@
 #include "host/metrics.h"
 #include "host/protocol_launch.h"
 #include "host/routing_snapshot.h"
+#include "host/structured_log.h"
 #include "host/worker_capacity_ledger.h"
 #include "host/worker_cgroup.h"
 
@@ -1459,7 +1460,6 @@ void run_admin_deploy_tenant_and_persistence(const std::string& worker_path) {
         opts->application = app;
         opts->worker_path = worker_path;
         opts->runtime_compatibility_id = build_info.compatibility_id;
-        opts->host_policy.is_v2 = true;
         opts->host_policy.max_workers = 8;
         opts->host_policy.max_requests_per_worker = 64;
         opts->host_policy.max_worker_memory_bytes = 256ULL * 1024ULL * 1024ULL;
@@ -1811,6 +1811,152 @@ void run_real_cgroup_memory_current(const std::string& worker_path) {
 #endif
 }
 
+void run_three_surface_reason_parity(const std::string& worker_path) {
+    // C1: verify eviction and rejection reasons are recorded simultaneously
+    // across all three operational surfaces: /metrics, Admin app status
+    // diagnostics (MetricsRegistry::app_pool_diagnostics), and StructuredLog.
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    MemoryBudgetConfig mem;
+    mem.configured = true;
+    mem.limit_bytes = 100ULL * kMiB;
+    mem.high_watermark_percent = 80;
+    mem.low_watermark_percent = 50;
+    mem.min_residency_ms = 0;
+    mem.check_interval_ms = 0;
+
+    TenancyConfig tenancy;
+    tenancy.configured = true;
+    tenancy.overrides["tenant-b"].max_workers = 1;
+
+    std::mutex fp_mutex;
+    std::unordered_map<std::int64_t, std::uint64_t> pid_bytes;
+    MemorySampler sampler({}, [&](std::int64_t pid, std::uint64_t* bytes_out) {
+        std::lock_guard<std::mutex> lock(fp_mutex);
+        const auto found = pid_bytes.find(pid);
+        if (found == pid_bytes.end()) {
+            return false;
+        }
+        *bytes_out = found->second;
+        return true;
+    });
+
+    std::mutex log_mutex;
+    std::vector<std::string> log_lines;
+    capsid::host::StructuredLog structured_log([&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        log_lines.push_back(line);
+    });
+
+    WorkerCapacityLedger ledger(4, 0);
+    MetricsRegistry metrics;
+    GlobalEvictionCoordinator coordinator(mem, tenancy, &ledger, &sampler, &metrics,
+                                          &structured_log);
+
+    auto make_logged_pool = [&](const std::string& app, const std::string& tenant,
+                                std::uint32_t max_workers) {
+        GenerationPoolOptions opts;
+        opts.application_id = app;
+        opts.tenant_id = tenant;
+        opts.version = "v1";
+        opts.generation_digest = "sha256:" + std::string(64, app.empty() ? 'x' : app.back());
+        opts.workers = max_workers;
+        opts.has_min_ready = true;
+        opts.min_ready = 0;
+        opts.idle_timeout_ms = 60000;
+        opts.max_inflight_per_worker = 1;
+        opts.max_queued_requests = 0;
+        opts.queue_timeout_ms = 5000;
+        opts.metrics = &metrics;
+        opts.log = &structured_log;
+        opts.factory = spawn_factory(worker_path, 5000, kWorkerBundle);
+        opts.recovery = default_recovery_policy();
+        opts.acquire_worker_slot = [&coordinator](const GenerationPool* req, std::string* reason) {
+            return coordinator.acquire_worker_slot(req, reason);
+        };
+        opts.release_elastic_slot = [&ledger, app] { ledger.release_elastic(app, 1); };
+        std::string err;
+        auto pool = GenerationPool::create(std::move(opts), &err);
+        require(pool != nullptr, "failed to create pool " + app + ": " + err);
+        coordinator.register_pool(pool);
+        return pool;
+    };
+
+    auto pool_a = make_logged_pool("app-a", "tenant-a", 2);
+    auto pool_b = make_logged_pool("app-b", "tenant-b", 2);
+
+    // Warm 1 worker in app-a and 1 worker in app-b.
+    require(pool_a->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight &&
+                wait_for([&] { return pool_a->ready_workers() == 1; }, std::chrono::seconds(5)),
+            "app-a did not warm");
+    require(pool_b->request_scale_out() == GenerationPool::ScaleOutResult::kSpawnInFlight &&
+                wait_for([&] { return pool_b->ready_workers() == 1; }, std::chrono::seconds(5)),
+            "app-b did not warm");
+
+    // Trigger tenant_max_workers rejection on app-b (maxWorkers=1 already occupied
+    // by a busy worker so tenant_quota_swap cannot evict it).
+    std::string reject_reason;
+    {
+        auto busy_b = pool_b->acquire_worker();
+        require(static_cast<bool>(busy_b), "failed to acquire busy lease on app-b");
+        require(pool_b->request_scale_out(&reject_reason) ==
+                        GenerationPool::ScaleOutResult::kCapacityRejected &&
+                    reject_reason == "tenant_max_workers",
+                "expected tenant_max_workers rejection on app-b, got: " + reject_reason);
+    }
+
+    // Push app-a above watermark and trigger global_lru eviction.
+    assign_pid_footprints(pool_a, 45ULL * kMiB, &fp_mutex, &pid_bytes);
+    assign_pid_footprints(pool_b, 45ULL * kMiB, &fp_mutex, &pid_bytes);
+    require(coordinator.run_eviction_cycle(/*refresh_samples=*/true) == 1 &&
+                pool_a->ready_workers() == 0,
+            "expected global_lru eviction of app-a");
+
+    pool_a->stop_and_join();
+    pool_b->stop_and_join();
+    structured_log.flush();
+
+    // Surface 1: /metrics
+    const std::string prom = metrics.render_prometheus_text();
+    require(prom.find("capsid_pool_evictions_total{app=\"app-a\",tenant=\"tenant-a\","
+                      "reason=\"global_lru\"} 1") != std::string::npos,
+            "/metrics missing app-a global_lru eviction:\n" + prom);
+    require(prom.find("capsid_pool_rejections_total{app=\"app-b\",tenant=\"tenant-b\","
+                      "reason=\"tenant_max_workers\"} 1") != std::string::npos,
+            "/metrics missing app-b tenant_max_workers rejection:\n" + prom);
+
+    // Surface 2: Admin App status diagnostics
+    const auto diag_a = metrics.app_pool_diagnostics("app-a");
+    const auto diag_b = metrics.app_pool_diagnostics("app-b");
+    require(diag_a.evictions.count("global_lru") == 1 && diag_a.evictions.at("global_lru") == 1 &&
+                diag_a.last_eviction_reason == "global_lru",
+            "Admin diagnostics missing app-a global_lru eviction");
+    require(diag_b.rejections.count("tenant_max_workers") == 1 &&
+                diag_b.rejections.at("tenant_max_workers") == 1 &&
+                diag_b.last_rejection_reason == "tenant_max_workers",
+            "Admin diagnostics missing app-b tenant_max_workers rejection");
+
+    // Surface 3: StructuredLog JSONL
+    bool logged_eviction = false;
+    bool logged_rejection = false;
+    for (const std::string& line : log_lines) {
+        if (line.find("\"event\":\"pool_eviction\"") != std::string::npos &&
+            line.find("\"app\":\"app-a\"") != std::string::npos &&
+            line.find("\"tenant\":\"tenant-a\"") != std::string::npos &&
+            line.find("\"reason\":\"global_lru\"") != std::string::npos) {
+            logged_eviction = true;
+        }
+        if (line.find("\"event\":\"pool_rejection\"") != std::string::npos &&
+            line.find("\"app\":\"app-b\"") != std::string::npos &&
+            line.find("\"tenant\":\"tenant-b\"") != std::string::npos &&
+            line.find("\"reason\":\"tenant_max_workers\"") != std::string::npos) {
+            logged_rejection = true;
+        }
+    }
+    require(logged_eviction, "StructuredLog missing canonical pool_eviction entry");
+    require(logged_rejection, "StructuredLog missing canonical pool_rejection entry");
+    std::cout << "PASS: three_surface_reason_parity" << std::endl;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1878,6 +2024,10 @@ int main(int argc, char** argv) {
     }
     if (mode == "real_cgroup_memory_current") {
         run_real_cgroup_memory_current(worker_path);
+        return 0;
+    }
+    if (mode == "three_surface_reason_parity") {
+        run_three_surface_reason_parity(worker_path);
         return 0;
     }
     fail("unknown eviction coordinator test case: " + mode);

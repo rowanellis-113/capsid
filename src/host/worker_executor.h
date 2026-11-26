@@ -50,6 +50,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <unordered_set>
@@ -96,6 +97,12 @@ enum class CommandType {
 // request); kProbeCancel releases its slot on the Runtime.
 inline constexpr std::uint64_t kProbeRequestIdBase = 1ULL << 62;
 
+struct CommandChannelExtra {
+    std::string close_reason;
+    protocol::FetchUpgradeResponse http_response;
+    std::shared_ptr<void> channel_reservation;
+};
+
 // A command from the owner thread to the worker thread. Strings are copied
 // so the worker thread never reads owner-thread-owned buffers.
 struct Command {
@@ -125,12 +132,68 @@ struct Command {
     std::uint64_t channel_max_message = 0;
     std::uint16_t close_code = 0;
     std::uint32_t close_kind = 0;
-    std::string close_reason;
     bool fetch_upgrade = false;
-    protocol::FetchUpgradeResponse http_response;
     bool upgrade_request = false;
     std::size_t channel_charge = 0;
-    std::shared_ptr<void> channel_reservation;
+    std::unique_ptr<CommandChannelExtra> channel_extra;
+
+    Command() = default;
+    ~Command() = default;
+    Command(Command&&) noexcept = default;
+    Command& operator=(Command&&) noexcept = default;
+    Command(const Command& other)
+        : type(other.type), request_id(other.request_id), method(other.method), url(other.url),
+          headers(other.headers), body(other.body), credit(other.credit),
+          end_request(other.end_request), probe_id(other.probe_id), channel_id(other.channel_id),
+          dial_id(other.dial_id), channel_flags(other.channel_flags),
+          channel_credit(other.channel_credit), channel_max_message(other.channel_max_message),
+          close_code(other.close_code), close_kind(other.close_kind),
+          fetch_upgrade(other.fetch_upgrade), upgrade_request(other.upgrade_request),
+          channel_charge(other.channel_charge),
+          channel_extra(other.channel_extra
+                            ? std::make_unique<CommandChannelExtra>(*other.channel_extra)
+                            : nullptr) {}
+    Command& operator=(const Command& other) {
+        if (this == &other) {
+            return *this;
+        }
+        type = other.type;
+        request_id = other.request_id;
+        method = other.method;
+        url = other.url;
+        headers = other.headers;
+        body = other.body;
+        credit = other.credit;
+        end_request = other.end_request;
+        probe_id = other.probe_id;
+        channel_id = other.channel_id;
+        dial_id = other.dial_id;
+        channel_flags = other.channel_flags;
+        channel_credit = other.channel_credit;
+        channel_max_message = other.channel_max_message;
+        close_code = other.close_code;
+        close_kind = other.close_kind;
+        fetch_upgrade = other.fetch_upgrade;
+        upgrade_request = other.upgrade_request;
+        channel_charge = other.channel_charge;
+        channel_extra = other.channel_extra
+                            ? std::make_unique<CommandChannelExtra>(*other.channel_extra)
+                            : nullptr;
+        return *this;
+    }
+
+    CommandChannelExtra& ensure_channel_extra() {
+        if (!channel_extra) {
+            channel_extra = std::make_unique<CommandChannelExtra>();
+        }
+        return *channel_extra;
+    }
+    std::string_view close_reason_view() const noexcept {
+        return channel_extra ? std::string_view(channel_extra->close_reason) : std::string_view();
+    }
+    const char* close_reason_cstr() const noexcept {
+        return channel_extra ? channel_extra->close_reason.c_str() : "";
+    }
 };
 
 // M2 item 6 (design §7.4): the active-health probe verdict, written on the
@@ -145,6 +208,22 @@ struct ProbeState {
     bool healthy = false;
     std::int32_t status = 0;
     std::uint64_t body_bytes = 0;
+};
+
+struct WorkerChannelDialExtra {
+    protocol::FetchUpgradeRequest http_request;
+    std::vector<std::string> protocols;
+};
+
+struct WorkerLogExtra {
+    bool binding_log = false;
+    std::string log_level;
+    std::string binding_id;
+    std::string log_fields_json;
+    // Host-owned identity attached by the executor/pool, never accepted
+    // from worker payload bytes.
+    std::string application_id;
+    std::string generation_digest;
 };
 
 // An event decoded from the capsid_event protocol on the worker thread and
@@ -179,8 +258,6 @@ struct WorkerEvent {
     std::uint64_t channel_max_message = 0;
     bool outbound = false, dial_refused = false;
     std::uint8_t channel_kind = protocol::kChannelKindWebSocket;
-    protocol::FetchUpgradeRequest http_request;
-    std::vector<std::string> protocols;
     std::uint32_t channel_flags = 0;
     std::uint64_t channel_credit = 0;
     std::uint32_t close_kind = 0;
@@ -191,15 +268,71 @@ struct WorkerEvent {
     std::vector<std::pair<std::string, std::string>> headers;
     std::vector<std::uint8_t> body;
     std::string text;
-    // Populated only for authenticated kFlagBindingLog envelopes.
-    bool binding_log = false;
-    std::string log_level;
-    std::string binding_id;
-    std::string log_fields_json;
-    // Host-owned identity attached by the executor/pool, never accepted
-    // from worker payload bytes.
-    std::string application_id;
-    std::string generation_digest;
+    std::unique_ptr<WorkerChannelDialExtra> dial_extra;
+    std::unique_ptr<WorkerLogExtra> log_extra;
+
+    WorkerEvent() = default;
+    ~WorkerEvent() = default;
+    WorkerEvent(WorkerEvent&&) noexcept = default;
+    WorkerEvent& operator=(WorkerEvent&&) noexcept = default;
+    WorkerEvent(const WorkerEvent& other)
+        : type(other.type), request_id(other.request_id), credit(other.credit),
+          status(other.status), fixed_body(other.fixed_body), upgrade(other.upgrade),
+          channel_id(other.channel_id), dial_id(other.dial_id),
+          channel_max_message(other.channel_max_message), outbound(other.outbound),
+          dial_refused(other.dial_refused), channel_kind(other.channel_kind),
+          channel_flags(other.channel_flags), channel_credit(other.channel_credit),
+          close_kind(other.close_kind), close_code(other.close_code), ack_kind(other.ack_kind),
+          channel_charge(other.channel_charge), fixed_body_size(other.fixed_body_size),
+          headers(other.headers), body(other.body), text(other.text),
+          dial_extra(other.dial_extra ? std::make_unique<WorkerChannelDialExtra>(*other.dial_extra)
+                                      : nullptr),
+          log_extra(other.log_extra ? std::make_unique<WorkerLogExtra>(*other.log_extra)
+                                    : nullptr) {}
+    WorkerEvent& operator=(const WorkerEvent& other) {
+        if (this == &other) {
+            return *this;
+        }
+        type = other.type;
+        request_id = other.request_id;
+        credit = other.credit;
+        status = other.status;
+        fixed_body = other.fixed_body;
+        upgrade = other.upgrade;
+        channel_id = other.channel_id;
+        dial_id = other.dial_id;
+        channel_max_message = other.channel_max_message;
+        outbound = other.outbound;
+        dial_refused = other.dial_refused;
+        channel_kind = other.channel_kind;
+        channel_flags = other.channel_flags;
+        channel_credit = other.channel_credit;
+        close_kind = other.close_kind;
+        close_code = other.close_code;
+        ack_kind = other.ack_kind;
+        channel_charge = other.channel_charge;
+        fixed_body_size = other.fixed_body_size;
+        headers = other.headers;
+        body = other.body;
+        text = other.text;
+        dial_extra = other.dial_extra ? std::make_unique<WorkerChannelDialExtra>(*other.dial_extra)
+                                      : nullptr;
+        log_extra = other.log_extra ? std::make_unique<WorkerLogExtra>(*other.log_extra) : nullptr;
+        return *this;
+    }
+
+    WorkerChannelDialExtra& ensure_dial_extra() {
+        if (!dial_extra) {
+            dial_extra = std::make_unique<WorkerChannelDialExtra>();
+        }
+        return *dial_extra;
+    }
+    WorkerLogExtra& ensure_log_extra() {
+        if (!log_extra) {
+            log_extra = std::make_unique<WorkerLogExtra>();
+        }
+        return *log_extra;
+    }
 };
 
 // Strict decoder shared by WorkerExecutor and the managed warmup path.
@@ -209,10 +342,7 @@ bool decode_worker_log_event(const capsid_event& event, WorkerEvent* output, std
 
 class WorkerExecutor {
   public:
-    // GLM T08: the negotiated protocol state after READY. Zero for a
-    // v3 worker (channels never negotiated); listeners gate upgrade
-    // and dial requests on this instead of pretending WebSocket is an
-    // unfinished HTTP response.
+    // Effective channel capabilities negotiated at READY.
     std::uint32_t effective_channel_caps() const { return effective_channel_caps_; }
     const capsid::protocol::ChannelLimits& channel_limits() const { return channel_limits_; }
     // Produces a prepared (spawned, bundle loaded and flushed, not yet
@@ -349,6 +479,8 @@ class WorkerExecutor {
     // Must be called before start()/adopt(). These fields are Host-owned
     // metadata appended to decoded log events; the worker cannot forge them.
     void set_log_identity(std::string application_id, std::string generation_digest);
+    // Drains every currently queued event into *out cleanly under one lock.
+    void drain_events_into(std::vector<WorkerEvent>* out);
     // Swaps the event queue out under the mutex. The owner drains all
     // events in one call; the notifier fires on every empty→non-empty
     // transition and for the always-last kExit event.
@@ -444,7 +576,8 @@ class WorkerExecutor {
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<Command> commands_;
-    std::deque<WorkerEvent> events_;
+    std::vector<WorkerEvent> events_;
+    bool batch_has_channel_credit_ = false;
     std::size_t channel_event_bytes_ = 0;
     std::set<std::uint32_t> live_channel_ids_;
     std::set<std::uint32_t> outbound_channel_ids_;

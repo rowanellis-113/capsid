@@ -1,3 +1,4 @@
+#include "capsid/runtime.h"
 // Exercise actual A2 state transitions, rejected-frame rollback and teardown.
 // This target does not exercise the WebSocket wire parser or real sockets.
 #include "channel_registry.h"
@@ -61,7 +62,7 @@ std::vector<uint64_t> snapshot(const Registry& r) {
 
 std::vector<uint8_t> hello() {
     std::vector<uint8_t> v;
-    p::append_u32(&v, 7);
+    p::append_u32(&v, CAPSID_ABI_VERSION);
     p::append_u64(&v, 64u * 1024u * 1024u);
     p::append_u64(&v, 0);
     p::append_u32(&v, 64);
@@ -103,7 +104,7 @@ std::vector<uint8_t> hello() {
 
 p::Frame frame(uint16_t type) {
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = type;
     return f;
 }

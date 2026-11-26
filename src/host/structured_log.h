@@ -85,6 +85,8 @@ inline constexpr char kAppLog[] = "app_log";
 inline constexpr char kAppAudit[] = "app_audit";
 inline constexpr char kLogDrop[] = "log_drop";
 inline constexpr char kWorkerCommandError[] = "worker_command_error";
+inline constexpr char kPoolEviction[] = "pool_eviction";
+inline constexpr char kPoolRejection[] = "pool_rejection";
 } // namespace log_events
 
 // Single-writer structured log. log() is thread-safe; one writer thread

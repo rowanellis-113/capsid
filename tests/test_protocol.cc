@@ -1,7 +1,9 @@
 #include "protocol.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -23,8 +25,9 @@ void test_default_frame_is_empty() {
     capsid::protocol::Frame value_initialized{};
     require(frame.payload.empty() && value_initialized.payload.empty(),
             "both default construction forms produce an empty payload");
-    require(frame.type == 0 && frame.flags == 0 && frame.request_id == 0 && frame.version == 0,
-            "default metadata starts at zero");
+    require(frame.type == 0 && frame.flags == 0 && frame.request_id == 0 &&
+                frame.version == capsid::protocol::kVersion,
+            "default frame uses the current wire version with empty metadata");
     frame.type = capsid::protocol::kShutdown;
     std::vector<uint8_t> wire;
     require(capsid::protocol::encode(frame, &wire), "empty frame encodes");
@@ -372,12 +375,12 @@ void test_connection_lifetime_wire() {
     frame.payload = bytes;
     std::vector<uint8_t> wire;
     require(p::encode_versioned(4, frame, &wire), "v4 lifetime frame encodes");
-    p::Parser v4(4);
+    p::Parser v4;
     p::Frame output;
     require(v4.append(wire.data(), wire.size()) && v4.next(&output) == p::kParseFrame &&
                 output.type == 28,
             "v4 lifetime frame parses");
-    require(!p::encode(frame, &wire), "legacy encoder never emits lifetime frames");
+    require(p::encode(frame, &wire), "default encoder emits lifetime frames");
     require(!p::encode_versioned(3, frame, &wire), "v3 never encodes lifetime frame");
     frame.flags = 1;
     require(!p::encode_versioned(4, frame, &wire), "lifetime flags rejected");
@@ -385,6 +388,134 @@ void test_connection_lifetime_wire() {
     frame.request_id = 1;
     require(!p::encode_versioned(4, frame, &wire),
             "lifetime cannot borrow request header identity");
+}
+
+void test_append_encoded_scatter() {
+    namespace p = capsid::protocol;
+    const std::vector<uint8_t> kPrefix = {0x2a, 0x7f};
+
+    // Multi-span v4 equivalence with append_encoded_versioned across lengths and step sizes.
+    {
+        const uint16_t version = p::kVersion;
+        for (size_t length :
+             {size_t{0}, size_t{1}, size_t{31}, size_t{257}, size_t{8192}, size_t{65536}}) {
+            std::vector<uint8_t> body(length);
+            for (size_t i = 0; i < length; ++i) {
+                body[i] = static_cast<uint8_t>(i * 13);
+            }
+            for (size_t step : {size_t{1}, size_t{17}, size_t{4096}, size_t{65536}}) {
+                std::vector<p::PayloadSpan> parts;
+                parts.push_back(p::PayloadSpan{NULL, 0});
+                for (size_t i = 0; i < length; i += step) {
+                    parts.push_back(p::PayloadSpan{body.data() + i, std::min(step, length - i)});
+                }
+                parts.push_back(p::PayloadSpan{NULL, 0});
+
+                std::vector<uint8_t> contiguous = kPrefix;
+                std::vector<uint8_t> scatter = kPrefix;
+                require(p::append_encoded_versioned(version, p::kResponseBody, 0, 7, body.data(),
+                                                    length, &contiguous),
+                        "contiguous reference frame encodes");
+                require(p::append_encoded_scatter_versioned(version, p::kResponseBody, 0, 7,
+                                                            parts.data(), parts.size(), length,
+                                                            &scatter),
+                        "scatter frame encodes");
+                require(contiguous == scatter, "scatter output matches contiguous frame bytes");
+            }
+        }
+    }
+
+    // Null spans with span_count == 0 and total_payload_size == 0 encodes a valid 0-byte frame.
+    {
+        std::vector<uint8_t> contiguous = kPrefix;
+        std::vector<uint8_t> scatter = kPrefix;
+        require(
+            p::append_encoded_versioned(p::kVersion, p::kResponseBody, 0, 7, NULL, 0, &contiguous),
+            "contiguous 0-byte frame encodes");
+        require(p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7, NULL, 0, 0,
+                                                    &scatter),
+                "null 0-span 0-byte scatter frame encodes");
+        require(contiguous == scatter, "null 0-span matches contiguous 0-byte frame");
+    }
+
+    // F3 regression: spans == nullptr with span_count > 0 and total_payload_size == 0 must reject
+    // transactionally without dereferencing spans or mutating output.
+    {
+        const uint16_t version = p::kVersion;
+        std::vector<uint8_t> wire = kPrefix;
+        require(!p::append_encoded_scatter_versioned(version, p::kResponseBody, 0, 7, NULL, 2, 0,
+                                                     &wire),
+                "null spans with non-zero span_count rejected");
+        require(wire == kPrefix, "null spans rejection preserves prefix");
+    }
+
+    const uint8_t sample[4] = {1, 2, 3, 4};
+    {
+        std::vector<uint8_t> wire = kPrefix;
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7, NULL, 1,
+                                                     4, &wire) &&
+                    wire == kPrefix,
+                "null spans with non-zero payload rejected");
+        const p::PayloadSpan empty_span{sample, 4};
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7,
+                                                     &empty_span, 0, 4, &wire) &&
+                    wire == kPrefix,
+                "zero span_count with non-zero payload rejected");
+    }
+    {
+        std::vector<uint8_t> wire = kPrefix;
+        const p::PayloadSpan bad_data{NULL, 3};
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7, &bad_data,
+                                                     1, 3, &wire) &&
+                    wire == kPrefix,
+                "null span data with non-zero size rejected");
+    }
+    {
+        std::vector<uint8_t> wire = kPrefix;
+        const p::PayloadSpan two_bytes{sample, 2};
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7,
+                                                     &two_bytes, 1, 4, &wire) &&
+                    wire == kPrefix,
+                "under-summed spans rejected");
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7,
+                                                     &two_bytes, 1, 1, &wire) &&
+                    wire == kPrefix,
+                "over-summed spans rejected");
+    }
+    {
+        std::vector<uint8_t> wire = kPrefix;
+        const p::PayloadSpan overflow_spans[2] = {
+            {sample, 4},
+            {sample, std::numeric_limits<size_t>::max()},
+        };
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7,
+                                                     overflow_spans, 2, 4, &wire) &&
+                    wire == kPrefix,
+                "size_t overflow in span sum rejected");
+    }
+    {
+        std::vector<uint8_t> wire = kPrefix;
+        const p::PayloadSpan one_span{sample, 4};
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7, &one_span,
+                                                     1, p::kMaxPayloadSize + 1, &wire) &&
+                    wire == kPrefix,
+                "oversized total_payload_size rejected");
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0, 7, &one_span,
+                                                     1, 4, NULL),
+                "null output rejected");
+        require(!p::append_encoded_scatter_versioned(p::kVersion + 10, p::kResponseBody, 0, 7,
+                                                     &one_span, 1, 4, &wire) &&
+                    wire == kPrefix,
+                "invalid version rejected");
+        require(
+            !p::append_encoded_scatter_versioned(p::kVersion, 999, 0, 7, &one_span, 1, 4, &wire) &&
+                wire == kPrefix,
+            "invalid type rejected");
+        require(!p::append_encoded_scatter_versioned(p::kVersion, p::kResponseBody, 0xffu, 7,
+                                                     &one_span, 1, 4, &wire) &&
+                    wire == kPrefix,
+                "invalid flags rejected");
+    }
 }
 } // namespace
 
@@ -408,5 +539,6 @@ int main() {
     test_memory_metrics_frame_types();
     test_enforces_total_parser_buffer_limit();
     test_connection_lifetime_wire();
+    test_append_encoded_scatter();
     return 0;
 }

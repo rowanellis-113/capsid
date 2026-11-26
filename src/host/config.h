@@ -14,12 +14,6 @@ namespace capsid::host {
 struct AppRequest;
 struct FetchTarget;
 
-// Shared Host/App fetch authority grammar: host[:port[,port...]] or a
-// bracketed IPv6 literal with the same optional decimal port list. IPv6
-// addresses are stored without brackets in canonical numeric form.
-// Failure leaves the destination unchanged.
-bool parse_fetch_target_text(std::string_view text, FetchTarget* out);
-
 // Config v2 unified outbound target grammar: <host>[:<p1>[,<p2>...]] where
 // <host> is "*", a DNS hostname, a leading-*. wildcard DNS hostname, an IPv4
 // address or IPv4/CIDR, or a bracketed IPv6 literal with optional /prefix.
@@ -91,7 +85,7 @@ bool valid_binding_id(std::string_view value);
 // Tenant ID grammar: [a-z0-9][a-z0-9._-]{0,62} (matching application IDs).
 bool valid_tenant_id(std::string_view value);
 
-// Parses capsid.json (capsid/app-v1 and capsid/app-v2) into AppRequest.
+// Parses capsid.json (capsid/app-v2) into AppRequest.
 // The schema boundary (validate_config_json) runs first in the deploy
 // pipeline; this parse maps the schema's fields onto the request and stays
 // fail-closed on any shape it cannot map. Shared with LocalDevHost so local

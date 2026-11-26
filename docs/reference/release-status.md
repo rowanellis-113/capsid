@@ -4,7 +4,7 @@ The [machine-readable release record](../data/current-status.json) binds the 202
 
 ## Development Checkout
 
-The working branch `dev/v0.3.2` develops Config v2, elastic pools and tenant memory limits. Its [design](../design/config-v2.md) and [verification record](../history/v0.3.2/README.md) track implementation and remaining release work.
+The v0.3.2 development SDK requires ABI v8 and FetchRPC v4 with Build Info v2 and Capability Policy v2. Rebuild embedders against this SDK. The working branch `dev/v0.3.2` develops Config v2, elastic pools and tenant memory limits. Its [design](../design/config-v2.md) and [verification record](../history/v0.3.2/README.md) track implementation and remaining release work.
 
 ### Source of the published beta
 
@@ -54,8 +54,8 @@ for the five-platform archive matrix.
 | Stable `0.2.x` release | [v0.2.2](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2) | Install by tag |
 | Beta runtime version | `0.3.1` | An archive/runtime string, not a stable-channel claim |
 | Qualified beta source | `845ae5dee5833c1bed1c2630cfb65e6ed76af7d7` | Tree `7894f8a984c7344a904ac0e08c6099e282036b1a`; 5492 frozen git entries |
-| Public interface | C ABI v7; capability policy v2 | Existing layouts remain frozen; new interfaces are additive |
-| Protocol | FetchRPC v3 by default; explicit negotiated v4 | Never mix versions on one connection |
+| Published beta interface | C ABI v7; capability policy v2 | Existing layouts remain frozen; new interfaces are additive |
+| Published beta protocol | FetchRPC v3 by default; explicit negotiated v4 | Never mix versions on one connection |
 | Pinned vendor (`v0.3.1-beta.1`) | txiki.js `v26.6.0` + quickjs-turbo `v0.15.1-turbo.8` (`8fcb4751`), 79 SDK patches | Earlier `v0.3.0-beta.5` retained txiki.js `v26.6.0` (QuickJS-NG 0.15.1), 78 SDK patches |
 
 The [read-only release capture](../data/release-status.json) records its actual UTC

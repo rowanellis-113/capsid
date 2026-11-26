@@ -58,7 +58,7 @@ class RegistryTarget : public fetchrpc_sequences::SequenceTarget {
 };
 
 capsid::protocol::Frame parse_frame(const std::vector<uint8_t>& wire) {
-    capsid::protocol::Parser parser(4);
+    capsid::protocol::Parser parser;
     capsid::protocol::Frame frame;
     parser.append(wire.data(), wire.size());
     if (parser.next(&frame) != capsid::protocol::kParseFrame) {
@@ -74,7 +74,7 @@ void negotiate_full(capsid::ChannelRegistry* registry, uint32_t capabilities = 1
     const uint32_t caps = capabilities;
     capsid::protocol::Frame hello;
     hello.type = p::kHello;
-    hello.version = p::kVersionV4;
+    hello.version = p::kVersion;
     hello.payload = fetchrpc_sequences::canonical_startup_payload();
     p::ChannelLimits limits;
     limits.max_channels = max_channels;
@@ -92,7 +92,7 @@ void negotiate_full(capsid::ChannelRegistry* registry, uint32_t capabilities = 1
 
     capsid::protocol::Frame ready;
     ready.type = p::kReady;
-    ready.version = p::kVersionV4;
+    ready.version = p::kVersion;
     ready.payload.assign(20, 0);
     p::append_u32(&ready.payload, caps);
     p::append_u32(&ready.payload, 0);
@@ -104,7 +104,7 @@ capsid::protocol::Frame data_frame(uint32_t channel, const std::vector<uint8_t>&
     namespace p = capsid::protocol;
     capsid::protocol::Frame frame;
     frame.type = p::kChannelData;
-    frame.version = p::kVersionV4;
+    frame.version = p::kVersion;
     frame.flags = flags;
     p::append_u32(&frame.payload, channel);
     frame.payload.insert(frame.payload.end(), message.begin(), message.end());
@@ -118,7 +118,7 @@ capsid::protocol::Frame credit_frame(uint32_t channel, uint64_t amount) {
     grant.credit = amount;
     capsid::protocol::Frame frame;
     frame.type = p::kChannelCredit;
-    frame.version = p::kVersionV4;
+    frame.version = p::kVersion;
     p::encode_channel_credit(grant, &frame.payload);
     return frame;
 }
@@ -133,7 +133,7 @@ capsid::protocol::Frame open_frame(uint64_t dial, uint64_t max_message) {
     open.url = "wss://unit.test/echo";
     capsid::protocol::Frame frame;
     frame.type = p::kChannelOpen;
-    frame.version = p::kVersionV4;
+    frame.version = p::kVersion;
     p::encode_channel_open(open, &frame.payload);
     return frame;
 }
@@ -146,7 +146,7 @@ capsid::protocol::Frame accept_frame(uint64_t dial, uint32_t channel) {
     accept.accepted_max_message_bytes = 1024 * 1024;
     capsid::protocol::Frame frame;
     frame.type = p::kChannelAccept;
-    frame.version = p::kVersionV4;
+    frame.version = p::kVersion;
     p::encode_channel_accept(accept, &frame.payload);
     return frame;
 }
@@ -244,7 +244,7 @@ void test_aggregate_quota() {
     close.code = 1000;
     capsid::protocol::Frame close_frame;
     close_frame.type = p::kChannelClose;
-    close_frame.version = p::kVersionV4;
+    close_frame.version = p::kVersion;
     p::encode_channel_close(close, &close_frame.payload);
     const capsid::ChannelRegistry::ApplyResult closed =
         registry.apply(capsid::ChannelSide::Host, close_frame);
@@ -306,7 +306,7 @@ void test_handshake_to_duplex_handover() {
     negotiate_full(&registry);
     capsid::protocol::Frame request;
     request.type = p::kRequestHead;
-    request.version = p::kVersionV4;
+    request.version = p::kVersion;
     request.flags = p::kFlagRequestUpgrade;
     request.request_id = 91;
     p::append_u16(&request.payload, 3);
@@ -332,7 +332,7 @@ void test_handshake_to_duplex_handover() {
     require(!early.accepted && early.error == "channel sequence", "no data before the 101 commit");
     capsid::protocol::Frame response;
     response.type = p::kResponseHead;
-    response.version = p::kVersionV4;
+    response.version = p::kVersion;
     response.flags = p::kFlagResponseUpgrade;
     response.request_id = 91;
     p::append_u16(&response.payload, 101);
@@ -396,7 +396,7 @@ void test_terminal_data_and_reclamation() {
     close.flags = p::kCloseFlagCodePresent;
     close.code = 1000;
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = p::kChannelClose;
     p::encode_channel_close(close, &f.payload);
     require(registry.apply(capsid::ChannelSide::Host, f).accepted, "host closes");
@@ -459,7 +459,7 @@ void test_resource_rejection_can_be_acknowledged() {
     reject.dial_id = 1;
     reject.reason_code = 8;
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = p::kChannelReject;
     p::encode_channel_reject(reject, &f.payload);
     require(registry.apply(capsid::ChannelSide::Host, f).accepted,
@@ -482,7 +482,7 @@ void test_tail_owner_refused() {
     open.url = "wss://tail.test/";
     capsid::protocol::Frame frame;
     frame.type = p::kChannelOpen;
-    frame.version = p::kVersionV4;
+    frame.version = p::kVersion;
     p::encode_channel_open(open, &frame.payload);
     const capsid::ChannelRegistry::ApplyResult result =
         registry.apply(capsid::ChannelSide::Worker, frame);

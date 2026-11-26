@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
     config.capability_policy = &capability;
 
     capsid_worker* worker = nullptr;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
 
     const std::string bundle = "import { permissions } from 'capsid:permissions';\n"
                                "import { stdio } from 'capsid:stdio';\n"

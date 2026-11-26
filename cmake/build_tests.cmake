@@ -861,7 +861,7 @@ if(BUILD_TESTING)
                     host_managed_fixed_pool_warm_failure_is_atomic
                     host_managed_admin_fixed_pool_handoff
                     host_managed_admin_worker_lifecycle
-                    host_managed_admin_legacy_unclaimed_pool
+                    host_managed_admin_requires_activation_transaction
                     host_managed_trusted_bytecode
                     host_managed_compatibility_fallback
                     host_managed_fallback_identity_retains_attestation
@@ -1134,7 +1134,8 @@ if(BUILD_TESTING)
                 ledger_elastic_during_replace
                 ledger_concurrent_shrink_surge
                 ledger_mixed_resize_abort_and_drain
-                ledger_elastic_two_tier)
+                ledger_elastic_two_tier
+                ledger_reaping_budget)
             add_test(
                 NAME "host_worker_capacity_ledger_${CAPSID_LEDGER_TEST_ID}"
                 COMMAND test-host-worker-capacity-ledger
@@ -1838,24 +1839,6 @@ if(BUILD_TESTING)
                 list(APPEND CAPSID_WS_SECONDARY_MODES managed)
             endif()
             set(CAPSID_WS_BACKEND_MODES single-worker ${CAPSID_WS_SECONDARY_MODES})
-            # Original ABI v7 consumer: compiled against the frozen
-            # v0.2.2 snapshot with compile-time size assertions.
-            add_executable(
-                test-abi-v7-original-consumer
-                tests/test_abi_v7_original_consumer.c)
-            target_include_directories(
-                test-abi-v7-original-consumer PRIVATE tests/compat)
-            target_link_libraries(
-                test-abi-v7-original-consumer PRIVATE capsid_runtime)
-            add_test(
-                NAME abi_v7_original_consumer
-                COMMAND test-abi-v7-original-consumer
-                    $<TARGET_FILE:capsid-worker>)
-            set_tests_properties(
-                abi_v7_original_consumer PROPERTIES
-                LABELS "abi"
-                TIMEOUT 20)
-
             # Protocol options descriptor: two-way size negotiation,
             # spawn_ex gating, protocol-info lifecycle.
             add_executable(
@@ -2704,12 +2687,10 @@ if(BUILD_TESTING)
             add_test(NAME worker_outbound_result_ack_pressure
                 COMMAND test-worker-outbound $<TARGET_FILE:test-worker-writer-fixture> ack-pressure)
             set_tests_properties(worker_outbound_result_ack_pressure PROPERTIES LABELS "worker;protocol;backpressure" TIMEOUT 30)
-            foreach(head_version IN ITEMS v3 v4)
-                add_test(NAME "worker_response_head_pressure_${head_version}"
-                    COMMAND test-worker-outbound $<TARGET_FILE:capsid-worker> "head-pressure-${head_version}")
-                set_tests_properties("worker_response_head_pressure_${head_version}" PROPERTIES
-                    LABELS "worker;protocol;backpressure" TIMEOUT 30)
-            endforeach()
+            add_test(NAME worker_response_head_pressure_v4
+                COMMAND test-worker-outbound $<TARGET_FILE:capsid-worker> head-pressure-v4)
+            set_tests_properties(worker_response_head_pressure_v4 PROPERTIES
+                LABELS "worker;protocol;backpressure" TIMEOUT 30)
             add_executable(test-host-outbound-policy tests/test_host_outbound_policy.cc)
             set_target_properties(test-host-outbound-policy PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
             target_include_directories(test-host-outbound-policy PRIVATE include src)
@@ -3831,30 +3812,6 @@ if(BUILD_TESTING)
             NAME runtime_build_identity
             COMMAND test-build-identity)
 
-        # WP-07, spec §11.4: a caller compiled against the build-info v1
-        # headers (frozen fixture) links against the current library and
-        # negotiates with the smaller struct_size. This is RED while the
-        # library demands struct_size >= sizeof(current struct).
-        add_executable(test-build-info-v1-link
-            tests/test_build_info_v1_link.c)
-        target_include_directories(test-build-info-v1-link PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests")
-        target_link_libraries(test-build-info-v1-link PRIVATE
-            capsid_runtime
-            capsid_sanitizers)
-        if(CAPSID_STRICT_WARNINGS)
-            if(MSVC)
-                target_compile_options(test-build-info-v1-link PRIVATE
-                    /W4 /WX)
-            else()
-                target_compile_options(test-build-info-v1-link PRIVATE
-                    -Wall -Wextra -Wpedantic -Werror)
-            endif()
-        endif()
-        add_test(
-            NAME runtime_build_info_v1_negotiation
-            COMMAND test-build-info-v1-link)
-
         if(CAPSID_BUILD_WORKER)
             if(NOT TARGET capsid-bytecode-compile)
                 message(FATAL_ERROR
@@ -4026,7 +3983,7 @@ if(BUILD_TESTING)
         src/protocol.cc
     )
     target_include_directories(test-channel-registry PRIVATE
-        src)
+        include src)
     target_link_libraries(test-channel-registry PRIVATE
         capsid_sanitizers capsid_jansson)
     add_test(
@@ -4165,16 +4122,6 @@ if(BUILD_TESTING)
     add_executable(test-public-header tests/test_public_header.c)
     target_link_libraries(test-public-header PRIVATE capsid_runtime)
     add_test(NAME public_header COMMAND test-public-header)
-
-    add_executable(
-        test-abi-v7-compat tests/test_abi_v7_compat.c)
-    target_include_directories(
-        test-abi-v7-compat PRIVATE tests/compat)
-    target_link_libraries(
-        test-abi-v7-compat PRIVATE capsid_runtime)
-    add_test(
-        NAME abi_v7_current_header_current_library
-        COMMAND test-abi-v7-compat)
 
     add_executable(test-cpp-header tests/test_cpp_header.cc)
     target_link_libraries(test-cpp-header PRIVATE capsid_runtime)
@@ -5855,6 +5802,15 @@ if(BUILD_TESTING)
         set_tests_properties(
             worker_incoming_request_invalid_header_value PROPERTIES TIMEOUT 20)
         add_test(
+            NAME worker_response_stream_adversarial
+            COMMAND test-worker-integration
+                $<TARGET_FILE:capsid-worker>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/stream-response-adversarial.js"
+                stream-response-adversarial
+        )
+        set_tests_properties(
+            worker_response_stream_adversarial PROPERTIES TIMEOUT 20)
+        add_test(
             NAME worker_wasm_minimal
             COMMAND test-worker-integration
                 $<TARGET_FILE:capsid-worker>
@@ -7009,7 +6965,10 @@ if(BUILD_TESTING)
                     direct_begin_after_exit
                     health_recycle_returns_elastic_slot
                     http_selection_skips_full_worker
-                    dispatch_handoff_blocks_eviction)
+                    dispatch_handoff_blocks_eviction
+                    health_replacement_reaping_budget
+                    reaping_budget_bounds_async_handoff
+                    recovery_jitter_and_permit_refusal_backoff)
                 add_test(
                     NAME "host_elastic_pool_${CAPSID_ELASTIC_CASE}"
                     COMMAND test-host-elastic-pool $<TARGET_FILE:capsid-worker> "${CAPSID_ELASTIC_CASE}")
@@ -7075,7 +7034,8 @@ if(BUILD_TESTING)
                     draining_generation_counted_in_memory
                     active_retiring_worker_counted_in_soft_watermark
                     on_demand_watermark_counts_previous_victim
-                    tenant_quota_swap_and_rejections)
+                    tenant_quota_swap_and_rejections
+                    three_surface_reason_parity)
                 add_test(
                     NAME "host_eviction_${CAPSID_EVICTION_CASE}"
                     COMMAND test-host-eviction-coordinator $<TARGET_FILE:capsid-worker> "${CAPSID_EVICTION_CASE}")
@@ -7705,6 +7665,22 @@ if(BUILD_TESTING)
         )
         set_tests_properties(
             worker_build_identity_matrix PROPERTIES TIMEOUT 300)
+
+        # Build identity auto-refresh on git HEAD change: advancing git HEAD
+        # without editing CMakeLists.txt must trigger configure via
+        # CMAKE_CONFIGURE_DEPENDS on incremental `cmake --build` so packages
+        # and runtime build info never ship a stale commit SHA.
+        add_test(
+            NAME worker_build_identity_git_refresh
+            COMMAND "${CMAKE_COMMAND}"
+                "-DCAPSID_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+                "-DCAPSID_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/identity-git-refresh"
+                "-DCAPSID_TEST_GENERATOR=${CMAKE_GENERATOR}"
+                "-DCAPSID_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build_identity_git_refresh.cmake"
+        )
+        set_tests_properties(
+            worker_build_identity_git_refresh PROPERTIES TIMEOUT 60)
 
         # Install tree and package contents (P0-6): the frozen runtime
         # manifest must exist in a fresh install prefix and inside the

@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
     /* Invalid argument is a return code; the guard clears the error slot. */
     {
         capsid_worker* null_worker = (capsid_worker*)1;
-        CHECK(capsid_worker_spawn(NULL, &null_worker) == CAPSID_INVALID_ARGUMENT);
+        CHECK(capsid_worker_spawn_ex(NULL, NULL, &null_worker) == CAPSID_INVALID_ARGUMENT);
         CHECK(capsid_last_error() == NULL);
     }
 
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
         capsid_worker_config_init(&config);
         config.worker_path = worker_path;
         capsid_worker* worker = NULL;
-        CHECK(capsid_worker_spawn(&config, &worker) == CAPSID_OK);
+        CHECK(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_OK);
         CHECK(worker != NULL);
         CHECK(capsid_worker_pid(worker) > 0);
         CHECK(capsid_worker_fd(worker) >= 0);

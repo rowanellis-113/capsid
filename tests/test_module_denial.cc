@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
         }
 
         capsid_worker* worker = NULL;
-        require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+        require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
 
         const std::string bundle = make_bundle(specifier.c_str());
         require_result(capsid_worker_load_bundle(

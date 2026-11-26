@@ -393,7 +393,9 @@ for (const [label, release] of [
     `README.md must link the recorded ${label.toLowerCase()} release explicitly`,
   );
 }
-assert.ok(readme.includes(`Public C ABI v${currentStatus.runtime.publicAbi}.`));
+const sdkHeader = await readFile(path.join(root, 'include/capsid/runtime.h'), 'utf8');
+const abiVersion = sdkHeader.match(/^#define CAPSID_ABI_VERSION (\d+)u$/m)[1];
+assert.ok(readme.includes(`v0.3.2 development SDK uses C ABI v${abiVersion}.`));
 const { repository } = JSON.parse(
   await readFile(path.join(root, 'docs/data/release-status.json'), 'utf8'),
 );

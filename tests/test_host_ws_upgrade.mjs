@@ -162,10 +162,10 @@ async function startHost(args) {
     fs.writeFileSync(
       path.join(localDir, 'capsid.json'),
       JSON.stringify({
-        apiVersion: 'capsid/app-v1',
+        apiVersion: 'capsid/app-v2',
         entry: 'bundle.mjs',
         permissions: { modules: ['capsid:env'] },
-        pool: { minReady: workers, maxWorkers: workers },
+        pool: { workers },
         request: { timeout: '10s' },
       }),
     );
@@ -173,11 +173,13 @@ async function startHost(args) {
     fs.writeFileSync(
       localHostConfig,
       JSON.stringify({
-        apiVersion: 'capsid/host-v1',
-        applicationsRoot: '/var/lib/capsid/apps',
-        stateRoot: '/var/lib/capsid/state',
-        secretRootTemplate: '/run/capsid/secrets/{application}',
-        admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+        apiVersion: 'capsid/host-v2',
+        paths: {
+          applications: '/var/lib/capsid/apps',
+          state: '/var/lib/capsid/state',
+          secrets: '/run/capsid/secrets/{application}',
+        },
+        admin: { unix: '/run/capsid/admin.sock' },
         permissions: {
           modules: ['capsid:env'],
           environmentNames: [],
@@ -187,13 +189,12 @@ async function startHost(args) {
           stdioStreams: [],
         },
         isolation: { mode: 'strict', required: [] },
-        capacity: { workersTotal: workers, startupsConcurrent: workers },
+        capacity: { workersTotal: workers },
         listeners: [
           {
             name: 'public',
             tcp: '127.0.0.1:0',
-            publicScheme: 'http',
-            publicAuthority: 'public.example',
+            publicOrigin: 'http://public.example',
             trusted: false,
             routing: { mode: 'path' },
           },
@@ -233,10 +234,10 @@ async function startHost(args) {
     fs.writeFileSync(
       path.join(versionRoot, 'capsid.json'),
       JSON.stringify({
-        apiVersion: 'capsid/app-v1',
+        apiVersion: 'capsid/app-v2',
         entry: 'bundle.mjs',
         permissions: { modules: ['capsid:env'] },
-        pool: { minReady: 1, maxWorkers: 1 },
+        pool: { workers: 1 },
       }),
     );
     socketPath = path.join(runRoot, 'admin.sock');
@@ -244,11 +245,13 @@ async function startHost(args) {
     fs.writeFileSync(
       config,
       JSON.stringify({
-        apiVersion: 'capsid/host-v1',
-        applicationsRoot,
-        stateRoot,
-        secretRootTemplate: path.join(secrets, '{application}'),
-        admin: { unix: socketPath, mode: '0600' },
+        apiVersion: 'capsid/host-v2',
+        paths: {
+          applications: applicationsRoot,
+          state: stateRoot,
+          secrets: path.join(secrets, '{application}'),
+        },
+        admin: { unix: socketPath },
         permissions: {
           modules: ['capsid:env'],
           environmentNames: [],
@@ -258,13 +261,12 @@ async function startHost(args) {
           stdioStreams: [],
         },
         isolation: { mode: 'strict', required: [] },
-        capacity: { workersTotal: 1, startupsConcurrent: 1 },
+        capacity: { workersTotal: 1 },
         listeners: [
           {
             name: 'public',
             tcp: `127.0.0.1:${port}`,
-            publicScheme: 'http',
-            publicAuthority: 'public.example',
+            publicOrigin: 'http://public.example',
             trusted: false,
             routing: { mode: 'path' },
           },

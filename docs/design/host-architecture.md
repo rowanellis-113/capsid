@@ -9,7 +9,7 @@ Use [current status](../reference/release-status.md) for source, release, test a
 
 | Layer | Owns | Does not imply |
 | --- | --- | --- |
-| Runtime/C ABI v7 | Worker creation, IPC, bounded queues, request credit, lifecycle and OS sandbox installation | An HTTP listener, deployment policy or tenant scheduler |
+| Runtime/C ABI v8 | Worker creation, IPC, bounded queues, request credit, lifecycle and OS sandbox installation | An HTTP listener, deployment policy or tenant scheduler |
 | First-party Host | HTTP admission/routing, worker pools, Upgrade framing, outbound channel dialer, generation rollout, Admin API and metrics | A stable deployment interface or a complete external gateway |
 | Application | A self-contained ESM Fetch handler and explicitly authorized capability calls | Ambient filesystem/environment, a raw socket, listener or process |
 | Deployment | TLS/gateway policy, DNS/network namespace/firewall, delegated resource roots, secrets and host hardening | Isolation merely because a process started |
@@ -51,7 +51,7 @@ Windows fd as a Unix descriptor or claim Linux security feature bits.
 
 ## v4 Channels and WebSocket
 
-The legacy ABI entry remains FetchRPC v3. Channel-aware hosts use the separately
+The default spawn entry uses FetchRPC v4. Channel-aware hosts use the separately
 sized protocol descriptor and explicitly verify effective v4 capabilities.
 Matching first-party peers implement A2 layout, confirmation, final Close,
 Upgrade-fetch and connection-lifetime extensions. Old peers are not silently

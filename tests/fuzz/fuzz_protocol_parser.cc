@@ -12,7 +12,7 @@ void check_round_trip(const capsid::protocol::Frame& frame) {
     if (!capsid::protocol::encode_versioned(frame.version, frame, &encoded)) {
         std::abort();
     }
-    capsid::protocol::Parser parser(frame.version);
+    capsid::protocol::Parser parser;
     if (!parser.append(&encoded[0], encoded.size())) {
         std::abort();
     }
@@ -52,7 +52,7 @@ void exercise_valid_frame(const uint8_t* data, size_t size, uint16_t version) {
         std::abort();
     }
 
-    capsid::protocol::Parser parser(version);
+    capsid::protocol::Parser parser;
     size_t offset = 0;
     while (offset < encoded.size()) {
         const size_t desired =
@@ -72,7 +72,7 @@ void exercise_valid_frame(const uint8_t* data, size_t size, uint16_t version) {
 } // namespace
 
 void exercise_wire_version(const uint8_t* data, size_t size, uint16_t version) {
-    capsid::protocol::Parser parser(version);
+    capsid::protocol::Parser parser;
     if (size == 0) {
         parser.append(NULL, 0);
         drain(&parser);
@@ -99,9 +99,7 @@ void exercise_wire_version(const uint8_t* data, size_t size, uint16_t version) {
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    // Preserve the complete legacy corpus path and independently parse v4.
     // In particular, v4 seeds must reach payload validation before rejection.
     exercise_wire_version(data, size, capsid::protocol::kVersion);
-    exercise_wire_version(data, size, capsid::protocol::kVersionV4);
     return 0;
 }

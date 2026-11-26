@@ -191,7 +191,7 @@ capsid_worker* spawn(const char* worker_path, const capsid_capability_policy* ca
     config.capability_policy = capability;
 
     capsid_worker* worker = nullptr;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
     const std::string bundle = "import { permissions } from 'capsid:permissions';\n"
                                "import { stdio } from 'capsid:stdio';\n"
                                "function emit(name) {\n"

@@ -4,6 +4,7 @@
 // real capsid-worker, active.json persistence, retire and recovery.
 
 #include "host/managed_host.h"
+#include "managed_deploy_fixture.h"
 #include "host/managed_admin_backend.h"
 #include "host/bytecode_attestation.h"
 #include "host/generation_pool.h"
@@ -230,21 +231,18 @@ Fixtures make_fixtures(const char* worker_path, const char* compiler_tool,
 
 const char* kSourceBundle = "export default { fetch: () => new Response('managed-ok') };";
 
-// Managed deployment consumes the same frozen capsid/app-v1 document as the
-// M0 config boundary. Keeping a second legacy {modules,env} shape in this
-// integration suite would let the coordinator bypass the authoritative
-// schema while all happy-path tests still passed.
+// Managed deployment consumes the authoritative capsid/app-v2 document.
 const char* kMinimalAppConfig =
-    R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1}})json";
+    R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1}})json";
 
 const char* kSecretAppConfig =
-    R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_TOKEN":{"valueFrom":"api-token"}}},"pool":{"minReady":1,"maxWorkers":1}})json";
+    R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_TOKEN":{"valueFrom":"api-token"}}},"pool":{"workers":1}})json";
 
 const char* kLiteralEnvAppConfig =
-    R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_MODE":{"value":"literal-managed"}}},"pool":{"minReady":1,"maxWorkers":1}})json";
+    R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_MODE":{"value":"literal-managed"}}},"pool":{"workers":1}})json";
 
 const char* kThreeWorkerAppConfig =
-    R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":3,"maxWorkers":3}})json";
+    R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":3}})json";
 
 void create_version(const Fixtures& fixtures, const std::string& version, const std::string& config,
                     const std::string& bundle) {
@@ -259,7 +257,6 @@ capsid::host::HostPolicy default_host_policy() {
     host.module_allowlist = {"capsid:env"};
     host.env_patterns = {"APP_*"};
     host.max_workers = 1;
-    host.min_ready = 1;
     host.max_requests_per_worker = 10000;
     host.max_worker_memory_bytes = 256U * 1024U * 1024U;
     return host;
@@ -543,8 +540,8 @@ bool recovery_fails_promptly(capsid::host::ManagedHostOptions* options,
             capsid::host::OperationStatus status;
             const capsid::host::DeployOutcome recovered =
                 capsid::host::managed_recover(options, &status);
-            if (recovered.worker != nullptr) {
-                capsid_worker_destroy(recovered.worker);
+            for (capsid_worker* worker : recovered.workers) {
+                capsid_worker_destroy(worker);
             }
             _exit(!recovered.ok && status.state == capsid::host::OperationState::kFailed ? 0 : 1);
         } catch (...) {
@@ -614,18 +611,6 @@ std::string run_request(capsid_worker* worker) {
         descriptor.events = POLLIN;
         poll(&descriptor, 1, 50);
     }
-}
-
-template <typename Outcome> std::vector<capsid_worker*> outcome_workers(const Outcome& outcome) {
-    if constexpr (requires(const Outcome& value) { value.workers; }) {
-        if (!outcome.workers.empty()) {
-            return outcome.workers;
-        }
-    }
-    if (outcome.worker != nullptr) {
-        return {outcome.worker};
-    }
-    return {};
 }
 
 void destroy_workers(const std::vector<capsid_worker*>& workers) {
@@ -1247,8 +1232,8 @@ int main(int argc, char** argv) {
             pool_options.recovery = generation_recovery_policy();
             ManagedPoolObservation observation;
             observation.wire(&pool_options);
-            auto pool = capsid::host::GenerationPool::create_adopted(
-                std::move(pool_options), outcome_workers(prepared), error);
+            auto pool = capsid::host::GenerationPool::create_adopted(std::move(pool_options),
+                                                                     prepared.workers, error);
             require(pool != nullptr, "adopt real warmed worker before a refused prepare");
             pool->stop_and_join();
             observation.require_completed(1);
@@ -1267,25 +1252,28 @@ int main(int argc, char** argv) {
                 "misconfigured transaction must be rejected before prepare");
         require(ledger.steady_used() == 0 && ledger.surge_used() == 0,
                 "failed prepare returns its held capacity after actual cleanup");
-        std::istringstream pids(read_file(pid_log));
-        std::int64_t pid = -1;
-        pids >> pid;
-        require(pid > 0, "failed activation really spawned a Worker");
-        int child_status = 0;
-        pid_t child;
-        do {
-            child = waitpid(static_cast<pid_t>(pid), &child_status, WNOHANG);
-        } while (child < 0 && errno == EINTR);
-        require(child == -1 && errno == ECHILD,
-                "failed prepare's Worker was already collected by the product");
-        if (misconfigured)
-            std::cout << "PREPARE_REAP {\"pid\":" << pid
-                      << ",\"reapedByProduct\":true,\"exitStatusAvailable\":false}" << std::endl;
+        if (misconfigured) {
+            require(status.error == "activation transaction misconfigured" &&
+                        access(pid_log.c_str(), F_OK) == -1 && errno == ENOENT,
+                    "missing transaction callback must fail before spawning");
+        } else {
+            std::istringstream pids(read_file(pid_log));
+            std::int64_t pid = -1;
+            pids >> pid;
+            require(pid > 0, "failed activation really spawned a Worker");
+            int child_status = 0;
+            pid_t child;
+            do {
+                child = waitpid(static_cast<pid_t>(pid), &child_status, WNOHANG);
+            } while (child < 0 && errno == EINTR);
+            require(child == -1 && errno == ECHILD,
+                    "failed prepare's Worker was already collected by the product");
+        }
         TransactionHarness harness;
         wire_admin_transactions(&options, &harness);
         const auto retried = capsid::host::managed_deploy(&options, "v1", &status);
-        require(retried.ok && harness.active_pool,
-                "returned capacity permits a real idempotent retry");
+        require(retried.ok && retried.workers.empty() && harness.active_pool,
+                "retry publishes the fleet and leaves ownership with the active pool");
         generation_round_trip(*harness.active_pool, 18001);
         harness.active_pool->stop_and_join();
         harness.generations.at(0)->require_completed(1);
@@ -1299,20 +1287,28 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(outcome.ok, "source deploy failed: " + outcome.error);
         require(status.state == capsid::host::OperationState::kActive, "deploy not Active");
-        require(outcome.worker != nullptr, "no warmed worker returned");
+        require(outcome.workers.size() == 1, "no warmed worker returned");
         // The warmed worker serves requests.
-        require(run_request(outcome.worker) == "managed-ok",
+        require(run_request(outcome.workers.at(0)) == "managed-ok",
                 "warmed worker did not serve the bundle");
-        capsid_worker_destroy(outcome.worker);
+        capsid_worker_destroy(outcome.workers.at(0));
         // active.json persisted with the generation.
         const std::string active = read_file(fixtures.state_root + "/apps/orders/active.json");
         require(active.find("capsid-active-v1") != std::string::npos &&
                     active.find("\"generation\"") != std::string::npos,
                 "active.json missing generation");
         // Retire: tombstone persisted; recovery then starts no worker.
+        capsid::host::OperationStatus rejected_status;
+        const auto rejected = capsid::host::managed_retire(&options, &rejected_status);
+        require(!rejected.ok && rejected_status.state == capsid::host::OperationState::kFailed &&
+                    rejected_status.error == "retire transaction misconfigured" &&
+                    read_file(fixtures.state_root + "/apps/orders/active.json") == active,
+                "retire without a route owner changed the active generation");
+        TransactionHarness harness;
+        wire_admin_transactions(&options, &harness);
         capsid::host::OperationStatus retire_status;
         const capsid::host::DeployOutcome retired =
             capsid::host::managed_retire(&options, &retire_status);
@@ -1321,7 +1317,7 @@ int main(int argc, char** argv) {
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
         require(recovered.ok, "recovery failed after retire");
-        require(recovered.worker == nullptr, "retired recovery returned a worker");
+        require(recovered.workers.empty(), "retired recovery returned a worker");
         require(recover_status.state != capsid::host::OperationState::kActive,
                 "retired app must not start a worker");
         std::cout << "PASS" << std::endl;
@@ -1329,70 +1325,82 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_queue_config_deploy") {
-        // E-1 admission queue fields (pool.queue*, §10.3) ride the frozen
-        // capsid/app-v1 document and must parse, compile and deploy like
-        // any other pool field — a zero-consumption field would let a
-        // queue silently disappear from the effective contract.
+        // E-1 admission queue fields (pool.queue*, §10.3) ride capsid/app-v2
+        // and must parse, compile and deploy like any other pool field.
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1,"queueRequests":8,"queueHeaderBytes":"2MiB","queueTimeout":"250ms"}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1,"queueRequests":8,"queueTimeout":"250ms"}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(outcome.ok, "queue-config deploy failed: " + outcome.error);
         require(status.state == capsid::host::OperationState::kActive,
                 "queue-config deploy not Active");
-        require(outcome.worker != nullptr, "no warmed worker returned");
-        require(run_request(outcome.worker) == "managed-ok",
+        require(outcome.workers.size() == 1, "no warmed worker returned");
+        require(run_request(outcome.workers.at(0)) == "managed-ok",
                 "queue-config worker did not serve the bundle");
-        capsid_worker_destroy(outcome.worker);
+        capsid_worker_destroy(outcome.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
 
     if (mode == "host_managed_sse_permit_config_deploy") {
-        // E-2 SSE permit fields (request.*, §9.3) ride the frozen
-        // capsid/app-v1 document like the E-1 queue fields — a
-        // zero-consumption field would let the streaming budget silently
-        // disappear from the effective contract.
+        // In app-v2, legacy per-app streaming fields moved to host listeners[].limits;
+        // verify retired app-v1 fields are rejected while valid app-v2 deploys cleanly.
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"request":{"maxStreamingInflightPerWorker":3,"streamIdleTimeoutMs":90000}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"request":{"maxStreamingInflightPerWorker":3,"streamIdleTimeoutMs":90000}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
+        const capsid::host::DeployOutcome rejected =
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : rejected.workers) {
+            capsid_worker_destroy(worker);
+        }
+        require(!rejected.ok && status.state == capsid::host::OperationState::kFailed,
+                "app-v2 accepted retired request streaming fields");
+        write_file(
+            fixtures.vdir + "/capsid.json",
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"request":{"timeout":"15s","maxInflight":16}})json");
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(outcome.ok, "SSE-config deploy failed: " + outcome.error);
-        require(status.state == capsid::host::OperationState::kActive,
-                "SSE-config deploy not Active");
-        require(outcome.worker != nullptr, "no warmed worker returned");
-        require(run_request(outcome.worker) == "managed-ok",
-                "SSE-config worker did not serve the bundle");
-        capsid_worker_destroy(outcome.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(outcome.ok && status.state == capsid::host::OperationState::kActive &&
+                    outcome.workers.size() == 1,
+                "app-v2 request config deploy failed: " + outcome.error);
+        require(run_request(outcome.workers.at(0)) == "managed-ok",
+                "app-v2 worker did not serve the bundle");
+        capsid_worker_destroy(outcome.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
 
     if (mode == "host_managed_write_timeout_config_deploy") {
-        // E-3 §9.2: request.writeTimeoutMs rides the frozen capsid/app-v1
-        // document like the E-2 SSE-permit fields — a zero-consumption
-        // field would let the slow-client deadline silently disappear
-        // from the effective contract.
+        // In app-v2, request.writeTimeoutMs moved to listeners[].limits.writeTimeout;
+        // verify retired app-v1 writeTimeoutMs is rejected while app-v2 deploys cleanly.
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"request":{"writeTimeoutMs":5000}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"request":{"writeTimeoutMs":5000}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
+        const capsid::host::DeployOutcome rejected =
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : rejected.workers) {
+            capsid_worker_destroy(worker);
+        }
+        require(!rejected.ok && status.state == capsid::host::OperationState::kFailed,
+                "app-v2 accepted retired request.writeTimeoutMs");
+        write_file(
+            fixtures.vdir + "/capsid.json",
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"request":{"timeout":"5s"}})json");
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(outcome.ok, "write-timeout deploy failed: " + outcome.error);
-        require(status.state == capsid::host::OperationState::kActive,
-                "write-timeout deploy not Active");
-        require(outcome.worker != nullptr, "no warmed worker returned");
-        require(run_request(outcome.worker) == "managed-ok",
-                "write-timeout worker did not serve the bundle");
-        capsid_worker_destroy(outcome.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(outcome.ok && status.state == capsid::host::OperationState::kActive &&
+                    outcome.workers.size() == 1,
+                "app-v2 timeout deploy failed: " + outcome.error);
+        require(run_request(outcome.workers.at(0)) == "managed-ok",
+                "app-v2 worker did not serve the bundle");
+        capsid_worker_destroy(outcome.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -1404,11 +1412,11 @@ int main(int argc, char** argv) {
 
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok, "fixed 3/3 deploy failed: " + deployed.error);
         require(status.state == capsid::host::OperationState::kActive,
                 "fixed pool deploy did not become Active");
-        const std::vector<capsid_worker*> deployed_workers = outcome_workers(deployed);
+        const std::vector<capsid_worker*> deployed_workers = deployed.workers;
         require(deployed_workers.size() == 3,
                 "fixed 3/3 deploy did not return three READY workers");
         std::set<std::int64_t> deployed_pids;
@@ -1426,7 +1434,7 @@ int main(int argc, char** argv) {
         require(recovered.ok, "fixed 3/3 recovery failed: " + recovered.error);
         require(recover_status.state == capsid::host::OperationState::kActive,
                 "fixed pool recovery did not become Active");
-        const std::vector<capsid_worker*> recovered_workers = outcome_workers(recovered);
+        const std::vector<capsid_worker*> recovered_workers = recovered.workers;
         require(recovered_workers.size() == 3,
                 "fixed 3/3 recovery did not return three READY workers");
         std::set<std::int64_t> recovered_pids;
@@ -1453,11 +1461,11 @@ int main(int argc, char** argv) {
 
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok, "fixed 3/3 deploy failed: " + deployed.error);
         require(status.state == capsid::host::OperationState::kActive,
                 "fixed pool deploy did not become Active");
-        const std::vector<capsid_worker*> deployed_workers = outcome_workers(deployed);
+        const std::vector<capsid_worker*> deployed_workers = deployed.workers;
         require(deployed_workers.size() == 3,
                 "fixed 3/3 deploy did not return three READY workers");
         // PR-09c additive contract: the generation identity travels with
@@ -1598,7 +1606,7 @@ int main(int argc, char** argv) {
         auto options = make_options(fixtures);
         options.host_policy.max_workers = static_cast<std::uint32_t>(count);
         capsid::host::OperationStatus status;
-        const auto deployed = capsid::host::managed_deploy(&options, "v1", &status);
+        const auto deployed = capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok, "deploy actual Managed lifecycle fixture: " + deployed.error);
         ManagedPoolObservation observation;
         capsid::host::GenerationPoolOptions pool_options;
@@ -1621,7 +1629,7 @@ int main(int argc, char** argv) {
         };
         std::string error;
         auto pool = capsid::host::GenerationPool::create_adopted(std::move(pool_options),
-                                                                 outcome_workers(deployed), &error);
+                                                                 deployed.workers, &error);
         require(pool != nullptr && observation.count() == count,
                 "adopt actual Managed lifecycle fleet: " + error);
         auto* target = generation_round_trip(*pool, 9001);
@@ -1716,19 +1724,18 @@ int main(int argc, char** argv) {
                     parsed_seconds <= 300,
                 "benchmark worker count or duration is out of range");
         const std::uint32_t worker_count = static_cast<std::uint32_t>(parsed_workers);
-        const std::string config = "{\"apiVersion\":\"capsid/app-v1\",\"entry\":\"bundle.mjs\","
+        const std::string config = "{\"apiVersion\":\"capsid/app-v2\",\"entry\":\"bundle.mjs\","
                                    "\"permissions\":{\"modules\":[\"capsid:env\"]},\"pool\":"
-                                   "{\"minReady\":" +
-                                   std::to_string(worker_count) +
-                                   ",\"maxWorkers\":" + std::to_string(worker_count) + "}}";
+                                   "{\"workers\":" +
+                                   std::to_string(worker_count) + "}}";
         write_file(fixtures.vdir + "/capsid.json", config);
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         options.host_policy.max_workers = worker_count;
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok, "benchmark pool deploy failed: " + deployed.error);
-        const std::vector<capsid_worker*> workers = outcome_workers(deployed);
+        const std::vector<capsid_worker*> workers = deployed.workers;
         require(workers.size() == worker_count,
                 "benchmark did not receive the requested pool size");
 
@@ -1795,8 +1802,8 @@ int main(int argc, char** argv) {
         options.host_policy.max_workers = 3;
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr, "cannot establish the old active worker");
+            capsid::test::deploy_for_test(options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1, "cannot establish the old active worker");
         const std::string active_before =
             read_file(fixtures.state_root + "/apps/orders/active.json");
 
@@ -1823,13 +1830,13 @@ int main(int argc, char** argv) {
 
         capsid::host::OperationStatus failed_status;
         const capsid::host::DeployOutcome failed =
-            capsid::host::managed_deploy(&options, "v2", &failed_status);
+            capsid::test::deploy_for_test(options, "v2", &failed_status);
         require(!failed.ok && failed_status.state == capsid::host::OperationState::kFailed,
                 "pool activated after one worker failed to warm");
-        require(outcome_workers(failed).empty(), "failed pool returned partially warmed workers");
+        require(failed.workers.empty(), "failed pool returned partially warmed workers");
         require(read_file(fixtures.state_root + "/apps/orders/active.json") == active_before,
                 "failed pool warm changed the old active generation");
-        require(run_request(first.worker) == "managed-ok",
+        require(run_request(first.workers.at(0)) == "managed-ok",
                 "failed replacement damaged the old active worker");
 
         std::istringstream pids(read_file(pid_log));
@@ -1842,7 +1849,7 @@ int main(int argc, char** argv) {
                     "failed pool leaked a worker process");
         }
         require(pid_count == 3, "failure probe did not reach the third worker warm-up");
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -1966,26 +1973,20 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // PR-10 §9.3: a coordinator WITHOUT the transaction callbacks is the
-    // legacy path — it hands the owning pool back through the outcome. The
-    // Async layer has no publisher, so it fails the public operation closed
-    // and recycles every worker: an unclaimed pool must never leak.
-    if (mode == "host_managed_admin_legacy_unclaimed_pool") {
+    // A deployment needs an owner before it can warm or persist a generation.
+    if (mode == "host_managed_admin_requires_activation_transaction") {
         write_file(fixtures.vdir + "/capsid.json", kThreeWorkerAppConfig);
-        const std::string pid_log = fixtures.vdir + "/legacy-pids.log";
+        const std::string pid_log = fixtures.vdir + "/deploy-pids.log";
         std::ostringstream wrapper;
         wrapper << "#!/bin/sh\n"
                 << "printf '%s\\n' \"$$\" >> '" << pid_log << "'\n"
                 << "exec '" << fixtures.worker_path << "' \"$@\"\n";
-        const std::string wrapper_path = fixtures.vdir + "/legacy-worker";
+        const std::string wrapper_path = fixtures.vdir + "/deploy-worker";
         write_file(wrapper_path, wrapper.str());
-        require(chmod(wrapper_path.c_str(), 0700) == 0,
-                "cannot make legacy worker wrapper executable");
+        require(chmod(wrapper_path.c_str(), 0700) == 0, "cannot make worker wrapper executable");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         options.host_policy.max_workers = 3;
         options.worker_path = wrapper_path;
-        // No transaction callbacks: the legacy direct-call path hands the
-        // owning pool back through the deploy outcome.
         std::vector<capsid::host::ManagedHostOptions*> applications = {
             &options,
         };
@@ -1994,22 +1995,16 @@ int main(int argc, char** argv) {
         capsid::host::AsyncAdminBackend backend(&managed, async_options);
         capsid::host::OperationStatus submitted;
         const capsid::host::DeployOutcome deployment = backend.deploy("orders", "v1", &submitted);
-        require(deployment.ok, "legacy unclaimed deploy was not accepted");
+        require(deployment.ok, "async deploy was not queued");
         const capsid::host::OperationStatus terminal =
             wait_admin_operation(&backend, deployment.operation_id);
         require(terminal.state == capsid::host::OperationState::kFailed,
-                "unclaimed pool did not fail closed at the Async layer");
-        // Every spawned worker must have been recycled.
-        std::istringstream pids(read_file(pid_log));
-        std::int64_t pid = 0;
-        std::size_t pid_count = 0;
-        while (pids >> pid) {
-            ++pid_count;
-            errno = 0;
-            require(kill(static_cast<pid_t>(pid), 0) == -1 && errno == ESRCH,
-                    "unclaimed pool leaked a worker process");
-        }
-        require(pid_count == 3, "legacy pool did not warm all three workers");
+                "deployment without activation callbacks succeeded");
+        require(access(pid_log.c_str(), F_OK) == -1 && errno == ENOENT,
+                "deployment spawned a worker before validating its activation callbacks");
+        require(access((fixtures.state_root + "/apps/orders/active.json").c_str(), F_OK) == -1 &&
+                    errno == ENOENT,
+                "deployment persisted active state without an activation owner");
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2028,12 +2023,12 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(outcome.ok, "trusted bytecode deploy failed: " + outcome.error);
-        require(outcome.worker != nullptr, "no worker for trusted bytecode");
-        require(run_request(outcome.worker) == "managed-ok",
+        require(outcome.workers.size() == 1, "no worker for trusted bytecode");
+        require(run_request(outcome.workers.at(0)) == "managed-ok",
                 "trusted bytecode worker did not serve");
-        capsid_worker_destroy(outcome.worker);
+        capsid_worker_destroy(outcome.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2103,12 +2098,12 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(outcome.ok, "compatibility fallback deploy failed: " + outcome.error);
-        require(outcome.worker != nullptr, "no worker for fallback");
-        require(run_request(outcome.worker) == "managed-ok",
+        require(outcome.workers.size() == 1, "no worker for fallback");
+        require(run_request(outcome.workers.at(0)) == "managed-ok",
                 "fallback worker did not serve source");
-        capsid_worker_destroy(outcome.worker);
+        capsid_worker_destroy(outcome.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2123,10 +2118,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions source_options = make_options(source_only);
         capsid::host::OperationStatus source_status;
         const capsid::host::DeployOutcome source =
-            capsid::host::managed_deploy(&source_options, "v1", &source_status);
-        require(source.ok && source.worker != nullptr,
+            capsid::test::deploy_for_test(source_options, "v1", &source_status);
+        require(source.ok && source.workers.size() == 1,
                 "source-only baseline deploy failed: " + source.error);
-        capsid_worker_destroy(source.worker);
+        capsid_worker_destroy(source.workers.at(0));
         const std::string source_generation = json_string_field(
             read_file(source_only.state_root + "/apps/orders/active.json"), "generation");
 
@@ -2144,10 +2139,10 @@ int main(int argc, char** argv) {
         fallback_options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus fallback_status;
         const capsid::host::DeployOutcome fallback =
-            capsid::host::managed_deploy(&fallback_options, "v1", &fallback_status);
-        require(fallback.ok && fallback.worker != nullptr,
+            capsid::test::deploy_for_test(fallback_options, "v1", &fallback_status);
+        require(fallback.ok && fallback.workers.size() == 1,
                 "compatibility fallback deploy failed: " + fallback.error);
-        capsid_worker_destroy(fallback.worker);
+        capsid_worker_destroy(fallback.workers.at(0));
         const std::string fallback_generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         require(fallback_generation != source_generation,
@@ -2178,10 +2173,10 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(outcome.ok, "compatibility fallback deploy failed: " + outcome.error);
-        require(outcome.worker != nullptr, "no worker for fallback");
-        capsid_worker_destroy(outcome.worker);
+        require(outcome.workers.size() == 1, "no worker for fallback");
+        capsid_worker_destroy(outcome.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string artifact = read_file(fixtures.state_root + "/apps/orders/generations/" +
@@ -2209,10 +2204,10 @@ int main(int argc, char** argv) {
         trusted_options.trusted_keys.push_back(trusted_key);
         capsid::host::OperationStatus trusted_status;
         const capsid::host::DeployOutcome trusted_outcome =
-            capsid::host::managed_deploy(&trusted_options, "v1", &trusted_status);
-        require(trusted_outcome.ok && trusted_outcome.worker != nullptr,
+            capsid::test::deploy_for_test(trusted_options, "v1", &trusted_status);
+        require(trusted_outcome.ok && trusted_outcome.workers.size() == 1,
                 "trusted control deploy failed: " + trusted_outcome.error);
-        capsid_worker_destroy(trusted_outcome.worker);
+        capsid_worker_destroy(trusted_outcome.workers.at(0));
         const std::string trusted_generation = json_string_field(
             read_file(trusted_only.state_root + "/apps/orders/active.json"), "generation");
         const std::string trusted_artifact =
@@ -2245,10 +2240,10 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(first.ok && first.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(first.ok && first.workers.size() == 1,
                 "initial trusted deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         const std::string generation_before = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
 
@@ -2264,12 +2259,12 @@ int main(int argc, char** argv) {
                                                                    rotated_key.public_key.size());
         options.trusted_keys.push_back(rotated_trusted);
         const capsid::host::DeployOutcome rotated =
-            capsid::host::managed_deploy(&options, "v2", &status);
-        require(rotated.ok && rotated.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v2", &status);
+        require(rotated.ok && rotated.workers.size() == 1,
                 "rotated-key deploy failed: " + rotated.error);
-        require(run_request(rotated.worker) == "managed-ok",
+        require(run_request(rotated.workers.at(0)) == "managed-ok",
                 "rotated-key worker did not serve trusted bytecode");
-        capsid_worker_destroy(rotated.worker);
+        capsid_worker_destroy(rotated.workers.at(0));
         const std::string generation_after = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         require(generation_after != generation_before,
@@ -2303,10 +2298,10 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(first.ok && first.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(first.ok && first.workers.size() == 1,
                 "initial trusted deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         const std::string active_before =
             read_file(fixtures.state_root + "/apps/orders/active.json");
 
@@ -2324,9 +2319,9 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(replacement);
         capsid::host::OperationStatus revoked_status;
         const capsid::host::DeployOutcome revoked =
-            capsid::host::managed_deploy(&options, "v2", &revoked_status);
+            capsid::test::deploy_for_test(options, "v2", &revoked_status);
         require(!revoked.ok, "deploy signed by a revoked key was accepted");
-        require(revoked.worker == nullptr, "revoked-key deploy returned a worker");
+        require(revoked.workers.empty(), "revoked-key deploy returned a worker");
         require(revoked.error.find("bytecode attestation rejected") != std::string::npos,
                 "revoked-key deploy failed outside the attestation gate: " + revoked.error);
         require(revoked_status.state == capsid::host::OperationState::kFailed,
@@ -2357,10 +2352,10 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "trusted baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
 
@@ -2378,7 +2373,7 @@ int main(int argc, char** argv) {
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&restarted, &recover_status);
         require(!recovered.ok, "recovery re-verified a revoked-key generation as trusted");
-        require(recovered.worker == nullptr, "revoked-key recovery returned a worker");
+        require(recovered.workers.empty(), "revoked-key recovery returned a worker");
         require(recover_status.state == capsid::host::OperationState::kFailed,
                 "revoked-key recovery did not fail closed");
         std::cout << "PASS" << std::endl;
@@ -2405,10 +2400,10 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "trusted baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation_before = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string artifact_before =
@@ -2422,11 +2417,11 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        require(recovered.ok && recovered.worker != nullptr,
+        require(recovered.ok && recovered.workers.size() == 1,
                 "trusted restart failed: " + recovered.error);
-        require(run_request(recovered.worker) == "managed-ok",
+        require(run_request(recovered.workers.at(0)) == "managed-ok",
                 "trusted restart served the wrong bundle");
-        capsid_worker_destroy(recovered.worker);
+        capsid_worker_destroy(recovered.workers.at(0));
         const std::string generation_after = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         require(generation_after == generation_before,
@@ -2447,9 +2442,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(first.ok, "initial deploy failed");
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         const std::string active_before =
             read_file(fixtures.state_root + "/apps/orders/active.json");
         // Corrupt the bundle.qjsb (a version with broken bytecode).
@@ -2458,9 +2453,9 @@ int main(int argc, char** argv) {
         write_file(fixtures.vdir + "/bytecode.sig", "short-sig");
         capsid::host::OperationStatus fail_status;
         const capsid::host::DeployOutcome failed =
-            capsid::host::managed_deploy(&options, "v1", &fail_status);
+            capsid::test::deploy_for_test(options, "v1", &fail_status);
         require(!failed.ok, "corrupt bytecode deploy accepted");
-        require(failed.worker == nullptr, "failed deploy returned a worker");
+        require(failed.workers.empty(), "failed deploy returned a worker");
         const std::string active_after =
             read_file(fixtures.state_root + "/apps/orders/active.json");
         require(active_after == active_before, "failed deploy changed the old active");
@@ -2510,8 +2505,7 @@ int main(int argc, char** argv) {
         const capsid::host::DeployOutcome failed =
             capsid::host::managed_deploy(&options, "v2", &fail_status);
         require(!failed.ok, "deploy with a failing persist was accepted");
-        require(failed.worker == nullptr && failed.workers.empty(),
-                "aborted deploy returned a worker");
+        require(failed.workers.empty(), "aborted deploy returned a worker");
         require(fail_status.error.find("persist") != std::string::npos,
                 "aborted deploy lost its persist diagnostic");
         // The v1 fleet survives the failed v2, exactly as §9.6-2 requires.
@@ -2587,19 +2581,19 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(outcome.ok, "secret deploy failed: " + outcome.error);
-        require(outcome.worker != nullptr, "no worker for secret deploy");
-        require(run_request(outcome.worker) == "secret-value-managed-1",
+        require(outcome.workers.size() == 1, "no worker for secret deploy");
+        require(run_request(outcome.workers.at(0)) == "secret-value-managed-1",
                 "secret value did not reach the worker");
-        capsid_worker_destroy(outcome.worker);
+        capsid_worker_destroy(outcome.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
 
     if (mode == "host_managed_secret_snapshot_limit_precedes_staging") {
         const std::string value(13U * 1024U, 'x');
-        const std::string config = "{\"apiVersion\":\"capsid/app-v1\",\"entry\":\"bundle.mjs\","
+        const std::string config = "{\"apiVersion\":\"capsid/app-v2\",\"entry\":\"bundle.mjs\","
                                    "\"permissions\":{\"modules\":[\"capsid:env\"],\"env\":{"
                                    "\"APP_A\":{\"value\":\"" +
                                    value +
@@ -2613,14 +2607,14 @@ int main(int argc, char** argv) {
                                    "\"APP_D\":{\"value\":\"" +
                                    value +
                                    "\"}}},"
-                                   "\"pool\":{\"minReady\":1,\"maxWorkers\":1}}";
+                                   "\"pool\":{\"workers\":1}}";
         write_file(fixtures.vdir + "/capsid.json", config);
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(!outcome.ok, "oversized environment snapshot was accepted");
-        require(outcome.worker == nullptr, "oversized environment snapshot returned a worker");
+        require(outcome.workers.empty(), "oversized environment snapshot returned a worker");
         require(outcome.error.find("/permissions/env") != std::string::npos,
                 "secret snapshot compiler diagnostic lost its JSON Pointer");
         struct stat mapping = {};
@@ -2642,9 +2636,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(!outcome.ok, "managed deploy followed the secret App directory symlink");
-        require(outcome.worker == nullptr, "secret App symlink rejection returned a worker");
+        require(outcome.workers.empty(), "secret App symlink rejection returned a worker");
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2658,10 +2652,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "secret deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
 
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
@@ -2693,10 +2687,10 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus status;
 
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(first.ok && first.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(first.ok && first.workers.size() == 1,
                 "initial secret deploy failed: " + first.error);
-        require(run_request(first.worker) == "secret-rotation-v1",
+        require(run_request(first.workers.at(0)) == "secret-rotation-v1",
                 "initial snapshot missing from the first worker");
         const std::string generation_before = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
@@ -2704,10 +2698,10 @@ int main(int argc, char** argv) {
         // No rotation: the same version and secret resolve to the same
         // generation — idempotent redeploy reuses the committed snapshot.
         const capsid::host::DeployOutcome reused =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(reused.ok && reused.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(reused.ok && reused.workers.size() == 1,
                 "idempotent redeploy failed: " + reused.error);
-        require(run_request(reused.worker) == "secret-rotation-v1",
+        require(run_request(reused.workers.at(0)) == "secret-rotation-v1",
                 "idempotent redeploy lost the snapshot");
         const std::string generation_reused = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
@@ -2723,10 +2717,10 @@ int main(int argc, char** argv) {
         write_file(secret_file, "secret-rotation-v2-different-length");
         create_version(fixtures, "v2", kSecretAppConfig, bundle);
         const capsid::host::DeployOutcome rotated =
-            capsid::host::managed_deploy(&options, "v2", &status);
-        require(rotated.ok && rotated.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v2", &status);
+        require(rotated.ok && rotated.workers.size() == 1,
                 "rotated redeploy failed: " + rotated.error);
-        require(run_request(rotated.worker) == "secret-rotation-v2-different-length",
+        require(run_request(rotated.workers.at(0)) == "secret-rotation-v2-different-length",
                 "rotated value did not reach the new worker");
         const std::string generation_after = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
@@ -2734,7 +2728,7 @@ int main(int argc, char** argv) {
                 "secret rotation did not change the generation digest");
 
         // The old worker keeps its frozen snapshot and stays healthy.
-        require(run_request(first.worker) == "secret-rotation-v1",
+        require(run_request(first.workers.at(0)) == "secret-rotation-v1",
                 "old worker lost its pre-rotation env snapshot");
 
         // Row 5: the provider's file-v1: revision also changes when the
@@ -2744,10 +2738,10 @@ int main(int argc, char** argv) {
         write_file(secret_file, "secret-rotation-v3-replaced-inode");
         create_version(fixtures, "v3", kSecretAppConfig, bundle);
         const capsid::host::DeployOutcome replaced =
-            capsid::host::managed_deploy(&options, "v3", &status);
-        require(replaced.ok && replaced.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v3", &status);
+        require(replaced.ok && replaced.workers.size() == 1,
                 "inode-replaced redeploy failed: " + replaced.error);
-        require(run_request(replaced.worker) == "secret-rotation-v3-replaced-inode",
+        require(run_request(replaced.workers.at(0)) == "secret-rotation-v3-replaced-inode",
                 "replaced value did not reach the new worker");
         const std::string generation_third = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
@@ -2756,7 +2750,7 @@ int main(int argc, char** argv) {
                 "the generation digest");
 
         // Every prior worker is still healthy with its frozen snapshot.
-        require(run_request(rotated.worker) == "secret-rotation-v2-different-length",
+        require(run_request(rotated.workers.at(0)) == "secret-rotation-v2-different-length",
                 "v2 worker lost its mid-rotation env snapshot");
 
         // All three generations stay committed: content-addressed
@@ -2772,10 +2766,10 @@ int main(int argc, char** argv) {
                     "a committed generation was cleaned up by redeploy");
         }
 
-        capsid_worker_destroy(first.worker);
-        capsid_worker_destroy(reused.worker);
-        capsid_worker_destroy(rotated.worker);
-        capsid_worker_destroy(replaced.worker);
+        capsid_worker_destroy(first.workers.at(0));
+        capsid_worker_destroy(reused.workers.at(0));
+        capsid_worker_destroy(rotated.workers.at(0));
+        capsid_worker_destroy(replaced.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2783,7 +2777,7 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_recovery_accepts_large_valid_env_metadata") {
         require(mkdirat(fixtures.secrets_fd, "orders", 0700) == 0,
                 "cannot create large-metadata secret directory");
-        std::string config = "{\"apiVersion\":\"capsid/app-v1\",\"entry\":\"bundle.mjs\","
+        std::string config = "{\"apiVersion\":\"capsid/app-v2\",\"entry\":\"bundle.mjs\","
                              "\"permissions\":{\"modules\":[\"capsid:env\"],\"env\":{";
         constexpr std::size_t kEntryCount = 256;
         for (std::size_t index = 0; index < kEntryCount; ++index) {
@@ -2798,16 +2792,16 @@ int main(int argc, char** argv) {
             config += "\"" + env_name + "\":{\"valueFrom\":\"" + key_id + "\"}";
             write_file(fixtures.secret_root + "/orders/" + key_id, "x");
         }
-        config += "}},\"pool\":{\"minReady\":1,\"maxWorkers\":1}}";
+        config += "}},\"pool\":{\"workers\":1}}";
         write_file(fixtures.vdir + "/capsid.json", config);
 
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "large valid metadata deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string env_json =
@@ -2818,9 +2812,9 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        require(recovered.ok && recovered.worker != nullptr,
+        require(recovered.ok && recovered.workers.size() == 1,
                 "recovery rejected metadata produced by the compiler: " + recovered.error);
-        capsid_worker_destroy(recovered.worker);
+        capsid_worker_destroy(recovered.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2829,9 +2823,11 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok, "deploy failed");
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
+        TransactionHarness harness;
+        wire_admin_transactions(&options, &harness);
         capsid::host::OperationStatus retire_status;
         const capsid::host::DeployOutcome retired =
             capsid::host::managed_retire(&options, &retire_status);
@@ -2848,9 +2844,9 @@ int main(int argc, char** argv) {
         write_file(v2 + "/bundle.mjs", kSourceBundle);
         capsid::host::OperationStatus deploy2_status;
         const capsid::host::DeployOutcome redeployed =
-            capsid::host::managed_deploy(&options, "v2", &deploy2_status);
+            capsid::test::deploy_for_test(options, "v2", &deploy2_status);
         require(redeployed.ok, "re-deploy failed: " + redeployed.error);
-        capsid_worker_destroy(redeployed.worker);
+        capsid_worker_destroy(redeployed.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2859,11 +2855,13 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
 
+        TransactionHarness harness;
+        wire_admin_transactions(&options, &harness);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
             capsid::host::managed_retire(&options, &first_status);
@@ -2892,10 +2890,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
 
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
@@ -2903,11 +2901,11 @@ int main(int argc, char** argv) {
         require(recovered.ok, "active recovery failed: " + recovered.error);
         require(recover_status.state == capsid::host::OperationState::kActive,
                 "active recovery did not report Active");
-        require(recovered.worker != nullptr,
+        require(recovered.workers.size() == 1,
                 "active recovery reported Active without a READY worker");
-        require(run_request(recovered.worker) == "managed-ok",
+        require(run_request(recovered.workers.at(0)) == "managed-ok",
                 "recovered worker did not serve the committed bundle");
-        capsid_worker_destroy(recovered.worker);
+        capsid_worker_destroy(recovered.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -2916,10 +2914,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1,
                 "initial version deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         const std::string active_before =
             read_file(fixtures.state_root + "/apps/orders/active.json");
 
@@ -2927,10 +2925,10 @@ int main(int argc, char** argv) {
         // the active worker or return a newly warmed equivalent worker.
         capsid::host::OperationStatus repeat_status;
         const capsid::host::DeployOutcome repeated =
-            capsid::host::managed_deploy(&options, "v1", &repeat_status);
+            capsid::test::deploy_for_test(options, "v1", &repeat_status);
         require(repeated.ok, "identical version redeploy was not idempotent");
-        if (repeated.worker != nullptr) {
-            capsid_worker_destroy(repeated.worker);
+        for (capsid_worker* worker : repeated.workers) {
+            capsid_worker_destroy(worker);
         }
         require(read_file(fixtures.state_root + "/apps/orders/active.json") == active_before,
                 "identical version redeploy changed active identity");
@@ -2939,9 +2937,9 @@ int main(int argc, char** argv) {
                    "export default { fetch: () => new Response('mutated') };");
         capsid::host::OperationStatus conflict_status;
         const capsid::host::DeployOutcome conflict =
-            capsid::host::managed_deploy(&options, "v1", &conflict_status);
+            capsid::test::deploy_for_test(options, "v1", &conflict_status);
         require(!conflict.ok, "same Version ID accepted different immutable content");
-        require(conflict.worker == nullptr, "version immutability conflict returned a worker");
+        require(conflict.workers.empty(), "version immutability conflict returned a worker");
         require(read_file(fixtures.state_root + "/apps/orders/active.json") == active_before,
                 "version immutability conflict changed old active state");
         std::cout << "PASS" << std::endl;
@@ -2952,9 +2950,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(deployed.ok && deployed.worker != nullptr, "deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(deployed.ok && deployed.workers.size() == 1, "deploy failed: " + deployed.error);
+        capsid_worker_destroy(deployed.workers.at(0));
         struct stat canonical = {};
         require(lstat((fixtures.state_root + "/apps/orders/versions/v1.json").c_str(),
                       &canonical) == 0 &&
@@ -2972,22 +2970,22 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr, "baseline deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+            capsid::test::deploy_for_test(options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1, "baseline deploy failed: " + first.error);
+        capsid_worker_destroy(first.workers.at(0));
         const std::string first_generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
 
         create_version(
             fixtures, "v2",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"worker":{"memoryMax":"64MiB"},"pool":{"minReady":1,"maxWorkers":1}})json",
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"worker":{"memoryMax":"64MiB"},"pool":{"workers":1}})json",
             kSourceBundle);
         capsid::host::OperationStatus second_status;
         const capsid::host::DeployOutcome second =
-            capsid::host::managed_deploy(&options, "v2", &second_status);
-        require(second.ok && second.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v2", &second_status);
+        require(second.ok && second.workers.size() == 1,
                 "resource-bearing deploy failed: " + second.error);
-        capsid_worker_destroy(second.worker);
+        capsid_worker_destroy(second.workers.at(0));
         const std::string second_generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         require(second_generation != first_generation,
@@ -2999,13 +2997,13 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_applies_worker_memory_limit") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"memoryMax":"1"},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"memoryMax":"1"},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!deployed.ok, "worker.memoryMax changed identity but was not enforced");
         require(status.state == capsid::host::OperationState::kFailed,
@@ -3021,14 +3019,14 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_rejects_request_limit_over_host") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","request":{"maxInflightPerWorker":10001},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","request":{"maxInflight":10001},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         options.host_policy.max_requests_per_worker = 10000;
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!deployed.ok, "App request limit above the Host maximum was ignored");
         require(status.state == capsid::host::OperationState::kFailed,
@@ -3041,9 +3039,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions first_options = make_options(fixtures);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&first_options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr, "baseline deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+            capsid::test::deploy_for_test(first_options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1, "baseline deploy failed: " + first.error);
+        capsid_worker_destroy(first.workers.at(0));
         const std::string first_generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
 
@@ -3054,10 +3052,10 @@ int main(int argc, char** argv) {
         changed_options.host_policy.max_worker_memory_bytes = 512U * 1024U * 1024U;
         capsid::host::OperationStatus changed_status;
         const capsid::host::DeployOutcome changed_outcome =
-            capsid::host::managed_deploy(&changed_options, "v1", &changed_status);
-        require(changed_outcome.ok && changed_outcome.worker != nullptr,
+            capsid::test::deploy_for_test(changed_options, "v1", &changed_status);
+        require(changed_outcome.ok && changed_outcome.workers.size() == 1,
                 "changed Host policy deploy failed: " + changed_outcome.error);
-        capsid_worker_destroy(changed_outcome.worker);
+        capsid_worker_destroy(changed_outcome.workers.at(0));
         const std::string changed_generation = json_string_field(
             read_file(changed.state_root + "/apps/orders/active.json"), "generation");
         require(changed_generation != first_generation,
@@ -3069,17 +3067,17 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_fetch_policy_warms_worker") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"fetch":{"allow":["api.example:443"]}},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"fetch":{"allow":["api.example:443"]}},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         options.host_policy.fetch_targets = {{"api.example", {443}}};
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok, "valid fetch policy could not warm a worker: " + deployed.error);
-        require(deployed.worker != nullptr, "valid fetch policy returned no READY worker");
-        require(run_request(deployed.worker) == "managed-ok",
+        require(deployed.workers.size() == 1, "valid fetch policy returned no READY worker");
+        require(run_request(deployed.workers.at(0)) == "managed-ok",
                 "fetch policy worker did not serve the bundle");
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3087,16 +3085,16 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_multiple_rules_stable") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"fs":{"read":{"allow":["/tmp/capsid-managed-a","/tmp/capsid-managed-b"]}}},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"fs":{"read":{"allow":["/tmp/capsid-managed-a","/tmp/capsid-managed-b"]}}},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         options.host_policy.fs_read_roots = {"/tmp/capsid-managed-a", "/tmp/capsid-managed-b"};
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok,
                 "multiple effective rules corrupted the Runtime descriptor: " + deployed.error);
-        require(deployed.worker != nullptr, "multiple effective rules returned no READY worker");
-        capsid_worker_destroy(deployed.worker);
+        require(deployed.workers.size() == 1, "multiple effective rules returned no READY worker");
+        capsid_worker_destroy(deployed.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3104,7 +3102,7 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_multiple_env_entries_stable") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_A":{"value":"one"},"APP_B":{"value":"two"}}},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_A":{"value":"one"},"APP_B":{"value":"two"}}},"pool":{"workers":1}})json");
         write_file(fixtures.vdir + "/bundle.mjs",
                    "import { env } from 'capsid:env';\n"
                    "export default { fetch: () => new Response("
@@ -3112,13 +3110,13 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(deployed.ok,
                 "multiple env entries corrupted the Runtime descriptor: " + deployed.error);
-        require(deployed.worker != nullptr, "multiple env entries returned no READY worker");
-        require(run_request(deployed.worker) == "one:two",
+        require(deployed.workers.size() == 1, "multiple env entries returned no READY worker");
+        require(run_request(deployed.workers.at(0)) == "one:two",
                 "multiple env entries reached the worker incorrectly");
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3127,21 +3125,21 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr, "initial deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+            capsid::test::deploy_for_test(options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1, "initial deploy failed: " + first.error);
+        capsid_worker_destroy(first.workers.at(0));
         const std::string active_before =
             read_file(fixtures.state_root + "/apps/orders/active.json");
 
         create_version(
             fixtures, "v2",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{},"pool":{"minReady":1,"maxWorkers":1},"mystery":true})json",
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{},"pool":{"workers":1},"mystery":true})json",
             "export default { fetch: () => new Response('v2-ok') };");
         capsid::host::OperationStatus invalid_status;
         const capsid::host::DeployOutcome invalid =
-            capsid::host::managed_deploy(&options, "v2", &invalid_status);
+            capsid::test::deploy_for_test(options, "v2", &invalid_status);
         require(!invalid.ok, "managed deploy accepted an unknown config field");
-        require(invalid.worker == nullptr, "invalid config returned a warmed worker");
+        require(invalid.workers.empty(), "invalid config returned a warmed worker");
         require(invalid.error.find("/mystery") != std::string::npos,
                 "unknown config diagnostic omitted its JSON Pointer");
         require(read_file(fixtures.state_root + "/apps/orders/active.json") == active_before,
@@ -3159,12 +3157,12 @@ int main(int argc, char** argv) {
         options.secret_root_template_fd = -1;
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(outcome.ok, "literal env required a secret root: " + outcome.error);
-        require(outcome.worker != nullptr, "literal env deploy returned no worker");
-        require(run_request(outcome.worker) == "literal-managed",
+        require(outcome.workers.size() == 1, "literal env deploy returned no worker");
+        require(run_request(outcome.workers.at(0)) == "literal-managed",
                 "literal env value did not reach the worker");
-        capsid_worker_destroy(outcome.worker);
+        capsid_worker_destroy(outcome.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3175,9 +3173,9 @@ int main(int argc, char** argv) {
             "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(!outcome.ok, "worker compatibility mismatch was accepted");
-        require(outcome.worker == nullptr, "worker compatibility mismatch returned a worker");
+        require(outcome.workers.empty(), "worker compatibility mismatch returned a worker");
         require(status.state == capsid::host::OperationState::kFailed,
                 "worker compatibility mismatch did not fail the operation");
         struct stat active = {};
@@ -3197,9 +3195,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(!outcome.ok, "managed deploy followed stateRoot/apps symlink");
-        require(outcome.worker == nullptr, "stateRoot symlink rejection returned a worker");
+        require(outcome.workers.empty(), "stateRoot symlink rejection returned a worker");
         struct stat escaped = {};
         require(stat((escape_root + "/orders/active.json").c_str(), &escaped) != 0 &&
                     errno == ENOENT,
@@ -3217,9 +3215,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(!outcome.ok, "managed deploy followed the stateRoot/staging symlink");
-        require(outcome.worker == nullptr, "staging symlink rejection returned a worker");
+        require(outcome.workers.empty(), "staging symlink rejection returned a worker");
         struct stat active = {};
         require(stat((fixtures.state_root + "/apps/orders/active.json").c_str(), &active) != 0 &&
                     errno == ENOENT,
@@ -3242,9 +3240,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome outcome =
-            capsid::host::managed_deploy(&options, "v1", &status);
+            capsid::test::deploy_for_test(options, "v1", &status);
         require(!outcome.ok, "managed deploy accepted a symlinked generations directory");
-        require(outcome.worker == nullptr, "generations symlink rejection returned a worker");
+        require(outcome.workers.empty(), "generations symlink rejection returned a worker");
         require(!directory_has_entries(escape_root),
                 "managed deploy published a generation outside stateRoot");
         std::cout << "PASS" << std::endl;
@@ -3277,7 +3275,7 @@ int main(int argc, char** argv) {
         const capsid::host::DeployOutcome outcome =
             capsid::host::managed_recover(&options, &status);
         require(!outcome.ok, "recovery accepted a symlink as the COMPLETE marker");
-        require(outcome.worker == nullptr, "invalid COMPLETE marker returned a worker");
+        require(outcome.workers.empty(), "invalid COMPLETE marker returned a worker");
         require(status.state == capsid::host::OperationState::kFailed,
                 "invalid COMPLETE marker did not fail recovery");
         std::cout << "PASS" << std::endl;
@@ -3295,8 +3293,8 @@ int main(int argc, char** argv) {
             threads.emplace_back([&, index]() {
                 start.arrive_and_wait();
                 capsid::host::OperationStatus status;
-                const capsid::host::DeployOutcome outcome = capsid::host::managed_deploy(
-                    &options, "missing-" + std::to_string(index), &status);
+                const capsid::host::DeployOutcome outcome = capsid::test::deploy_for_test(
+                    options, "missing-" + std::to_string(index), &status);
                 require(!outcome.ok, "missing concurrent version unexpectedly deployed");
                 operation_ids[index] = outcome.operation_id;
             });
@@ -3316,10 +3314,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
 
         // applicationsRoot is an upload boundary, not the recovery source.
         // Once active.json points at a complete internal generation, restart
@@ -3332,11 +3330,11 @@ int main(int argc, char** argv) {
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
         require(recovered.ok, "recovery depended on mutable applicationsRoot: " + recovered.error);
-        require(recovered.worker != nullptr,
+        require(recovered.workers.size() == 1,
                 "committed generation recovery returned no READY worker");
-        require(run_request(recovered.worker) == "managed-ok",
+        require(run_request(recovered.workers.at(0)) == "managed-ok",
                 "committed generation recovery served the wrong bundle");
-        capsid_worker_destroy(recovered.worker);
+        capsid_worker_destroy(recovered.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3345,10 +3343,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
 
         const std::string stale =
             fixtures.state_root + "/apps/orders/active.json.tmp.interrupted-operation";
@@ -3356,9 +3354,9 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        require(recovered.ok && recovered.worker != nullptr,
+        require(recovered.ok && recovered.workers.size() == 1,
                 "valid active state did not recover with a stale temp");
-        capsid_worker_destroy(recovered.worker);
+        capsid_worker_destroy(recovered.workers.at(0));
         struct stat stale_stat = {};
         require(stat(stale.c_str(), &stale_stat) != 0 && errno == ENOENT,
                 "startup recovery did not clean active.json.tmp.*");
@@ -3370,10 +3368,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         write_file(fixtures.state_root + "/apps/orders/generations/" + generation + "/bundle.bin",
@@ -3382,8 +3380,8 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        if (recovered.worker != nullptr) {
-            capsid_worker_destroy(recovered.worker);
+        for (capsid_worker* worker : recovered.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!recovered.ok, "recovery activated a tampered committed bundle");
         require(recover_status.state == capsid::host::OperationState::kFailed,
@@ -3396,10 +3394,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "snapshot FIFO baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string effective_path =
@@ -3418,10 +3416,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "optional FIFO baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string bytecode_path =
@@ -3449,10 +3447,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "snapshot-size baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string effective_path =
@@ -3477,10 +3475,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
 
         // Restart uses the current Host authority. Revoking a module must
         // not resurrect the effective policy stored by an older generation.
@@ -3488,8 +3486,8 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        if (recovered.worker != nullptr) {
-            capsid_worker_destroy(recovered.worker);
+        for (capsid_worker* worker : recovered.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!recovered.ok, "recovery bypassed the current Host module policy");
         require(recover_status.state == capsid::host::OperationState::kFailed,
@@ -3509,10 +3507,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial secret deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string old_active = read_file(fixtures.state_root + "/apps/orders/active.json");
         write_file(fixtures.secret_root + "/orders/api-token", "secret-v2");
 
@@ -3520,12 +3518,12 @@ int main(int argc, char** argv) {
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
         if (!recovered.ok) {
-            require(recovered.worker == nullptr, "failed secret revalidation returned a worker");
+            require(recovered.workers.empty(), "failed secret revalidation returned a worker");
         } else {
-            require(recovered.worker != nullptr, "successful secret rotation returned no worker");
-            require(run_request(recovered.worker) == "secret-v2",
+            require(recovered.workers.size() == 1, "successful secret rotation returned no worker");
+            require(run_request(recovered.workers.at(0)) == "secret-v2",
                     "recovery reused the stale committed secret value");
-            capsid_worker_destroy(recovered.worker);
+            capsid_worker_destroy(recovered.workers.at(0));
             require(read_file(fixtures.state_root + "/apps/orders/active.json") != old_active,
                     "secret rotation did not publish a new generation");
         }
@@ -3548,10 +3546,10 @@ int main(int argc, char** argv) {
 
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "trusted baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
 
@@ -3587,8 +3585,8 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        if (recovered.worker != nullptr) {
-            capsid_worker_destroy(recovered.worker);
+        for (capsid_worker* worker : recovered.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!recovered.ok, "recovery loaded bytecode not covered by the attestation");
         require(recover_status.state == capsid::host::OperationState::kFailed,
@@ -3611,10 +3609,10 @@ int main(int argc, char** argv) {
         options.trusted_keys.push_back(trusted);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "trusted baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string attestation_path =
@@ -3631,8 +3629,8 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        if (recovered.worker != nullptr) {
-            capsid_worker_destroy(recovered.worker);
+        for (capsid_worker* worker : recovered.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!recovered.ok, "trusted recovery ignored attestation document drift");
         require(recover_status.state == capsid::host::OperationState::kFailed,
@@ -3645,10 +3643,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "source baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string artifact_path =
@@ -3664,8 +3662,8 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        if (recovered.worker != nullptr) {
-            capsid_worker_destroy(recovered.worker);
+        for (capsid_worker* worker : recovered.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!recovered.ok, "recovery accepted a sourceName outside generation identity");
         require(recover_status.state == capsid::host::OperationState::kFailed,
@@ -3678,10 +3676,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "source baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string artifact_path =
@@ -3702,8 +3700,8 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        if (recovered.worker != nullptr) {
-            capsid_worker_destroy(recovered.worker);
+        for (capsid_worker* worker : recovered.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!recovered.ok, "sourceName parser accepted a non-slash path separator");
         require(recover_status.state == capsid::host::OperationState::kFailed,
@@ -3716,10 +3714,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "source baseline deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string generation = json_string_field(
             read_file(fixtures.state_root + "/apps/orders/active.json"), "generation");
         const std::string artifact_path =
@@ -3744,8 +3742,8 @@ int main(int argc, char** argv) {
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        if (recovered.worker != nullptr) {
-            capsid_worker_destroy(recovered.worker);
+        for (capsid_worker* worker : recovered.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!recovered.ok, "recovery accepted a different valid sourceName segment");
         require(recover_status.state == capsid::host::OperationState::kFailed,
@@ -3758,10 +3756,10 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string active_path = fixtures.state_root + "/apps/orders/active.json";
         const std::string active_before = read_file(active_path);
         const std::string generation = json_string_field(active_before, "generation");
@@ -3774,9 +3772,9 @@ int main(int argc, char** argv) {
 
         capsid::host::OperationStatus repeat_status;
         const capsid::host::DeployOutcome repeated =
-            capsid::host::managed_deploy(&options, "v1", &repeat_status);
-        if (repeated.worker != nullptr) {
-            capsid_worker_destroy(repeated.worker);
+            capsid::test::deploy_for_test(options, "v1", &repeat_status);
+        for (capsid_worker* worker : repeated.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!repeated.ok, "idempotent deploy reused a corrupt generation");
         require(repeat_status.state == capsid::host::OperationState::kFailed,
@@ -3791,17 +3789,17 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1,
                 "first shared-generation deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         create_version(fixtures, "v2", kMinimalAppConfig, kSourceBundle);
         capsid::host::OperationStatus second_status;
         const capsid::host::DeployOutcome second =
-            capsid::host::managed_deploy(&options, "v2", &second_status);
-        require(second.ok && second.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v2", &second_status);
+        require(second.ok && second.workers.size() == 1,
                 "second shared-generation deploy failed: " + second.error);
-        capsid_worker_destroy(second.worker);
+        capsid_worker_destroy(second.workers.at(0));
         require(!directory_has_entries(fixtures.state_root + "/staging"),
                 "shared generation left its complete staging tree behind");
         std::cout << "PASS" << std::endl;
@@ -3812,29 +3810,29 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1,
                 "first shared-generation deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         create_version(fixtures, "v2", kMinimalAppConfig, kSourceBundle);
         capsid::host::OperationStatus second_status;
         const capsid::host::DeployOutcome second =
-            capsid::host::managed_deploy(&options, "v2", &second_status);
-        require(second.ok && second.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v2", &second_status);
+        require(second.ok && second.workers.size() == 1,
                 "second shared-generation deploy failed: " + second.error);
-        capsid_worker_destroy(second.worker);
+        capsid_worker_destroy(second.workers.at(0));
 
         // versions/v2.json now legitimately points at a generation first
         // published by v1. Repeating v2 must validate and reuse that object;
         // the first-publisher sourceName is not evidence of corruption.
         capsid::host::OperationStatus repeat_status;
         const capsid::host::DeployOutcome repeated =
-            capsid::host::managed_deploy(&options, "v2", &repeat_status);
-        require(repeated.ok && repeated.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v2", &repeat_status);
+        require(repeated.ok && repeated.workers.size() == 1,
                 "idempotent v2 rejected its shared generation: " + repeated.error);
-        require(run_request(repeated.worker) == "managed-ok",
+        require(run_request(repeated.workers.at(0)) == "managed-ok",
                 "reused shared generation served the wrong source");
-        capsid_worker_destroy(repeated.worker);
+        capsid_worker_destroy(repeated.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3843,26 +3841,26 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus first_status;
         const capsid::host::DeployOutcome first =
-            capsid::host::managed_deploy(&options, "v1", &first_status);
-        require(first.ok && first.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &first_status);
+        require(first.ok && first.workers.size() == 1,
                 "first shared-generation deploy failed: " + first.error);
-        capsid_worker_destroy(first.worker);
+        capsid_worker_destroy(first.workers.at(0));
         create_version(fixtures, "v2", kMinimalAppConfig, kSourceBundle);
         capsid::host::OperationStatus second_status;
         const capsid::host::DeployOutcome second =
-            capsid::host::managed_deploy(&options, "v2", &second_status);
-        require(second.ok && second.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v2", &second_status);
+        require(second.ok && second.workers.size() == 1,
                 "second shared-generation deploy failed: " + second.error);
-        capsid_worker_destroy(second.worker);
+        capsid_worker_destroy(second.workers.at(0));
 
         capsid::host::OperationStatus recover_status;
         const capsid::host::DeployOutcome recovered =
             capsid::host::managed_recover(&options, &recover_status);
-        require(recovered.ok && recovered.worker != nullptr,
+        require(recovered.ok && recovered.workers.size() == 1,
                 "active v2 could not recover its shared generation: " + recovered.error);
-        require(run_request(recovered.worker) == "managed-ok",
+        require(run_request(recovered.workers.at(0)) == "managed-ok",
                 "recovered shared generation served the wrong source");
-        capsid_worker_destroy(recovered.worker);
+        capsid_worker_destroy(recovered.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3870,7 +3868,7 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_storage_namespace_reaches_worker") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:storage"],"storage":{"namespaces":["tenant-a"]}},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:storage"],"storage":{"namespaces":["tenant-a"]}},"pool":{"workers":1}})json");
         write_file(fixtures.vdir + "/bundle.mjs",
                    "import { storage } from 'capsid:storage';\n"
                    "export default { fetch() { storage.set('tenant-a', 'k', "
@@ -3882,12 +3880,12 @@ int main(int argc, char** argv) {
         (void)set_host_storage_namespaces(&options.host_policy, {"tenant-a"});
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "storage deploy failed: " + deployed.error);
-        require(run_request(deployed.worker) == "storage-ok",
+        require(run_request(deployed.workers.at(0)) == "storage-ok",
                 "compiled storage namespace did not reach the worker");
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3895,7 +3893,7 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_stdio_stream_reaches_worker") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:stdio"],"stdio":["stdout"]},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:stdio"],"stdio":["stdout"]},"pool":{"workers":1}})json");
         write_file(fixtures.vdir + "/bundle.mjs",
                    "import { stdio } from 'capsid:stdio';\n"
                    "export default { fetch() { stdio.write('stdout', "
@@ -3906,12 +3904,12 @@ int main(int argc, char** argv) {
         (void)set_host_stdio_streams(&options.host_policy, {"stdout"});
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "stdio deploy failed: " + deployed.error);
-        require(run_request(deployed.worker) == "stdio-ok",
+        require(run_request(deployed.workers.at(0)) == "stdio-ok",
                 "compiled stdio stream did not reach the worker");
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -3919,7 +3917,7 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_rejects_storage_namespace_over_host") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:storage"],"storage":{"namespaces":["tenant-a"]}},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:storage"],"storage":{"namespaces":["tenant-a"]}},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         options.host_policy.module_allowlist = {"capsid:storage"};
         options.host_policy.storage_allowed = true;
@@ -3927,9 +3925,9 @@ int main(int argc, char** argv) {
                 "HostPolicy cannot express exact storage namespaces");
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!deployed.ok, "Host bool-only storage permission widened tenant-a");
         require(status.state == capsid::host::OperationState::kFailed,
@@ -3941,7 +3939,7 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_rejects_stdio_stream_over_host") {
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:stdio"],"stdio":["stderr"]},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:stdio"],"stdio":["stderr"]},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         options.host_policy.module_allowlist = {"capsid:stdio"};
         options.host_policy.stdio_allowed = true;
@@ -3949,9 +3947,9 @@ int main(int argc, char** argv) {
                 "HostPolicy cannot express exact stdio streams");
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!deployed.ok, "Host bool-only stdio permission widened stderr");
         require(status.state == capsid::host::OperationState::kFailed,
@@ -3962,64 +3960,58 @@ int main(int argc, char** argv) {
 
     if (mode == "host_managed_resource_fields_affect_identity") {
         const std::string config_v1 =
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"jsHeap":"64MiB","processAddressSpace":"256MiB","memoryMax":"256MiB","fileDescriptors":64},"pool":{"minReady":1,"maxWorkers":1}})json";
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"jsHeap":"64MiB","memoryMax":"256MiB","fileDescriptors":64},"pool":{"workers":1}})json";
         write_file(fixtures.vdir + "/capsid.json", config_v1);
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         const auto deploy_generation = [&](const std::string& version) {
             capsid::host::OperationStatus status;
             const capsid::host::DeployOutcome deployed =
-                capsid::host::managed_deploy(&options, version, &status);
-            require(deployed.ok && deployed.worker != nullptr,
+                capsid::test::deploy_for_test(options, version, &status);
+            require(deployed.ok && deployed.workers.size() == 1,
                     "resource identity deploy failed for " + version + ": " + deployed.error);
-            capsid_worker_destroy(deployed.worker);
+            capsid_worker_destroy(deployed.workers.at(0));
             return json_string_field(read_file(fixtures.state_root + "/apps/orders/active.json"),
                                      "generation");
         };
         const std::string first_generation = deploy_generation("v1");
         create_version(
             fixtures, "v2",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"jsHeap":"32MiB","processAddressSpace":"256MiB","memoryMax":"256MiB","fileDescriptors":64},"pool":{"minReady":1,"maxWorkers":1}})json",
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"jsHeap":"32MiB","memoryMax":"256MiB","fileDescriptors":64},"pool":{"workers":1}})json",
             kSourceBundle);
         const std::string heap_generation = deploy_generation("v2");
         require(heap_generation != first_generation,
                 "worker.jsHeap was omitted from generation identity");
-        // This case compares identities after successful real deployments.
-        // Standalone GCC UBSan cannot initialize the full VM at 128MiB.
-        // Keep two distinct finite limits that admit the instrumented VM;
-        // the separate low-limit test still requires Runtime enforcement.
         create_version(
             fixtures, "v3",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"jsHeap":"32MiB","processAddressSpace":"192MiB","memoryMax":"256MiB","fileDescriptors":64},"pool":{"minReady":1,"maxWorkers":1}})json",
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"jsHeap":"32MiB","memoryMax":"192MiB","fileDescriptors":64},"pool":{"workers":1}})json",
             kSourceBundle);
-        const std::string address_generation = deploy_generation("v3");
-        require(address_generation != heap_generation,
-                "worker.processAddressSpace was omitted from generation identity");
+        const std::string memory_generation = deploy_generation("v3");
+        require(memory_generation != heap_generation,
+                "worker.memoryMax was omitted from generation identity");
         create_version(
             fixtures, "v4",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"jsHeap":"32MiB","processAddressSpace":"192MiB","memoryMax":"256MiB","fileDescriptors":32},"pool":{"minReady":1,"maxWorkers":1}})json",
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"jsHeap":"32MiB","memoryMax":"192MiB","fileDescriptors":32},"pool":{"workers":1}})json",
             kSourceBundle);
         const std::string descriptor_generation = deploy_generation("v4");
-        require(descriptor_generation != address_generation,
+        require(descriptor_generation != memory_generation,
                 "worker.fileDescriptors was omitted from generation identity");
         std::cout << "PASS" << std::endl;
         return 0;
     }
 
     if (mode == "host_managed_resource_limits_reach_worker") {
-        // The Runtime rejects processAddressSpace < jsHeap. If the managed
-        // compiler silently ignores those fields (or maps memoryMax onto the
-        // JS heap), this invalid effective worker configuration starts.
+        // The compiler rejects worker.memoryMax < worker.jsHeap in app-v2.
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"jsHeap":"128MiB","processAddressSpace":"64MiB","memoryMax":"256MiB"},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"jsHeap":"128MiB","memoryMax":"64MiB"},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
-        require(!deployed.ok, "managed Host ignored distinct JS/address-space limits");
+        require(!deployed.ok, "managed Host ignored distinct JS/memoryMax limits");
         require(status.state == capsid::host::OperationState::kFailed,
                 "invalid worker resource relation did not fail deployment");
         std::cout << "PASS" << std::endl;
@@ -4027,49 +4019,38 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_process_address_space_reaches_release_runtime") {
-#if CAPSID_TEST_ASAN_BUILD || CAPSID_TEST_TSAN_BUILD
-        // A finite RLIMIT_AS is incompatible with ASan's shadow-memory
-        // reservation. The production Release path remains required to
-        // forward this field; its sanitizer build is covered by the
-        // compiler/identity tests instead of imposing RLIMIT_AS.
-        std::cout << "PASS" << std::endl;
-        return 0;
-#else
+        // In app-v2, worker.processAddressSpace is removed from capsid.json;
+        // verify it is rejected fail-closed at schema validation.
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"processAddressSpace":"1MiB"},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"processAddressSpace":"1MiB"},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
-        require(!deployed.ok, "Release managed Host ignored processAddressSpace");
+        require(!deployed.ok, "managed Host accepted removed worker.processAddressSpace");
         require(status.state == capsid::host::OperationState::kFailed,
-                "unenforceable processAddressSpace did not fail deployment");
+                "removed worker.processAddressSpace did not fail deployment");
         std::cout << "PASS" << std::endl;
         return 0;
-#endif
     }
 
     if (mode == "host_managed_process_address_space_skipped_under_tsan") {
-#if CAPSID_TEST_TSAN_BUILD
-        // TSan, like ASan, reserves a vast shadow-memory address range. A
-        // finite RLIMIT_AS prevents an instrumented worker from reaching
-        // READY, so the managed Host must keep compile-time relation checks
-        // but skip forwarding processAddressSpace to the TSan worker.
+        // In app-v2, worker.memoryMax does not impose RLIMIT_AS, so a worker
+        // with memoryMax deploys cleanly under both Release and TSan/ASan.
         write_file(
             fixtures.vdir + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","worker":{"processAddressSpace":"1MiB"},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","worker":{"memoryMax":"64MiB"},"pool":{"workers":1}})json");
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        require(deployed.ok && deployed.worker != nullptr,
-                "TSan managed Host forwarded an incompatible RLIMIT_AS: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
-#endif
+            capsid::test::deploy_for_test(options, "v1", &status);
+        require(deployed.ok && deployed.workers.size() == 1,
+                "managed Host failed to deploy app-v2 worker.memoryMax: " + deployed.error);
+        capsid_worker_destroy(deployed.workers.at(0));
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -4086,9 +4067,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!deployed.ok, "generations symlink did not trigger staging failure");
         require(!directory_has_entries(fixtures.state_root + "/staging"),
@@ -4104,9 +4085,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!deployed.ok, "managed deploy accepted group/other-writable staging");
         require(status.state == capsid::host::OperationState::kFailed,
@@ -4126,9 +4107,9 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &status);
-        if (deployed.worker != nullptr) {
-            capsid_worker_destroy(deployed.worker);
+            capsid::test::deploy_for_test(options, "v1", &status);
+        for (capsid_worker* worker : deployed.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!deployed.ok, "managed deploy accepted group/other-writable generations");
         require(status.state == capsid::host::OperationState::kFailed,
@@ -4141,19 +4122,19 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome deployed =
-            capsid::host::managed_deploy(&options, "v1", &deploy_status);
-        require(deployed.ok && deployed.worker != nullptr,
+            capsid::test::deploy_for_test(options, "v1", &deploy_status);
+        require(deployed.ok && deployed.workers.size() == 1,
                 "initial deploy failed: " + deployed.error);
-        capsid_worker_destroy(deployed.worker);
+        capsid_worker_destroy(deployed.workers.at(0));
         const std::string mapping = fixtures.state_root + "/apps/orders/versions/v1.json";
         const std::string generation = json_string_field(read_file(mapping), "generation");
         write_file(mapping, "{\"generation\":\"" + generation + "\",\"mystery\":true}");
 
         capsid::host::OperationStatus repeat_status;
         const capsid::host::DeployOutcome repeated =
-            capsid::host::managed_deploy(&options, "v1", &repeat_status);
-        if (repeated.worker != nullptr) {
-            capsid_worker_destroy(repeated.worker);
+            capsid::test::deploy_for_test(options, "v1", &repeat_status);
+        for (capsid_worker* worker : repeated.workers) {
+            capsid_worker_destroy(worker);
         }
         require(!repeated.ok, "managed deploy accepted a corrupt Version mapping");
         require(repeat_status.state == capsid::host::OperationState::kFailed,
@@ -4166,7 +4147,7 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions options = make_options(fixtures);
         capsid::host::OperationStatus deploy_status;
         const capsid::host::DeployOutcome failed =
-            capsid::host::managed_deploy(&options, "missing", &deploy_status);
+            capsid::test::deploy_for_test(options, "missing", &deploy_status);
         require(!failed.ok && !failed.operation_id.empty(),
                 "failed deploy did not return an operation id");
         require(deploy_status.state == capsid::host::OperationState::kFailed,

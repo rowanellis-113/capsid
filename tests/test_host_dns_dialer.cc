@@ -367,7 +367,7 @@ void reserved_invalid_lifecycle() {
             "real NXDOMAIN reaches the dial result");
     require(packets == 2 && commands.size() == 1 && commands[0].type == CommandType::kDialReject &&
                 commands[0].dial_id == 29 && commands[0].channel_flags == 2 &&
-                commands[0].close_reason == "WebSocket DNS failed",
+                commands[0].close_reason_view() == "WebSocket DNS failed",
             "actual NXDOMAIN reports the exact DNS rejection, never a dial timeout");
     dialer.stop_and_join();
     require(recorder.take().empty() && budget->channels() == channels && budget->dials() == dials &&

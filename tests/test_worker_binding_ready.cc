@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
     binding.request.config_json = "{}";
     const std::vector<capsid::host::EffectiveBinding> bindings = {binding};
     capsid_worker* worker = nullptr;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn");
     std::string error;
     const bool loaded = capsid::host::load_effective_bindings_into_worker(worker, bindings, &error);
     require(loaded, "load Binding: " + error);

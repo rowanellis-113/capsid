@@ -41,7 +41,7 @@ capsid::protocol::Frame valid_hello(uint16_t version, uint32_t capabilities) {
     capsid::protocol::append_u16(&frame.payload, 0);
     capsid::protocol::append_u32(&frame.payload, CAPSID_EGRESS_DENY);
     capsid::protocol::append_u32(&frame.payload, 0);
-    if (version == capsid::protocol::kVersionV4) {
+    if (version == capsid::protocol::kVersion) {
         // The optional legacy environment section must end before the v4 tail.
         capsid::protocol::append_u16(&frame.payload, 0);
         if ((capabilities & capsid::protocol::kCapChannelLayoutA2) != 0 &&
@@ -153,8 +153,8 @@ void exercise_request(const uint8_t* data, size_t size) {
     }
 }
 
-void exercise_framing(const uint8_t* data, size_t size, uint16_t version) {
-    capsid::protocol::Parser parser(version);
+void exercise_framing(const uint8_t* data, size_t size) {
+    capsid::protocol::Parser parser;
     capsid::WorkerStartupState startup;
     size_t offset = 0;
     while (offset < size) {
@@ -190,11 +190,9 @@ void exercise_framing(const uint8_t* data, size_t size, uint16_t version) {
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     exercise_startup(data, size, capsid::protocol::kVersion, 0);
-    exercise_startup(data, size, capsid::protocol::kVersionV4, 0);
-    exercise_startup(data, size, capsid::protocol::kVersionV4,
+    exercise_startup(data, size, capsid::protocol::kVersion,
                      capsid::protocol::kCapabilitiesKnownMask);
     exercise_request(data, size);
-    exercise_framing(data, size, capsid::protocol::kVersion);
-    exercise_framing(data, size, capsid::protocol::kVersionV4);
+    exercise_framing(data, size);
     return 0;
 }

@@ -31,7 +31,8 @@ int main(int argc, char** argv) {
         config.worker_path = argv[1];
         config.strict_sandbox = 0;
         config.request_timeout_ms = 200;
-        ok(capsid_worker_spawn(&config, &worker.value), "spawn original stubborn native process");
+        ok(capsid_worker_spawn_ex(&config, NULL, &worker.value),
+           "spawn original stubborn native process");
         const auto start = std::chrono::steady_clock::now();
         ok(capsid_worker_begin_bodyless_request(worker.value, 1, "GET", "http://app.test/hang",
                                                 nullptr, 0),

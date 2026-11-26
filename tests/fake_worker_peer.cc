@@ -43,7 +43,7 @@ void send_frame(uint16_t type, uint32_t flags, uint64_t request_id,
     frame.type = type;
     frame.flags = flags;
     frame.request_id = request_id;
-    frame.version = capsid::protocol::kVersionV4;
+    frame.version = capsid::protocol::kVersion;
     frame.payload = payload;
     std::vector<uint8_t> wire;
     if (!capsid::protocol::encode_versioned(4, frame, &wire)) {
@@ -142,8 +142,7 @@ int main(int argc, char** argv) {
 
     capsid::protocol::Frame frame;
     const bool hello_ok = read_frame(&frame) && frame.type == capsid::protocol::kHello &&
-                          (frame.version == capsid::protocol::kVersionV4 ||
-                           (early_mode == "v3" && frame.version == capsid::protocol::kVersion));
+                          frame.version == capsid::protocol::kVersion;
     if (!hello_ok) {
         _exit(6);
     }
@@ -154,30 +153,6 @@ int main(int argc, char** argv) {
         capsid::protocol::load_u32_at(frame.payload.data() + frame.payload.size() - 8);
 
     const std::string mode = early_mode;
-    if (mode == "v3") {
-        // v3 spawn: plain READY, no capability tail
-        std::vector<uint8_t> payload(71, 0);
-        capsid::protocol::Frame ready;
-        ready.type = capsid::protocol::kReady;
-        ready.version = capsid::protocol::kVersion;
-        ready.payload = payload;
-        std::vector<uint8_t> wire;
-        if (!capsid::protocol::encode(ready, &wire)) {
-            _exit(7);
-        }
-        size_t written = 0;
-        while (written < wire.size()) {
-            const ssize_t n = write(ipc_fd, wire.data() + written, wire.size() - written);
-            if (n <= 0) {
-                _exit(4);
-            }
-            written += static_cast<size_t>(n);
-        }
-        while (read_frame(&frame)) {
-            log_frame(frame);
-        }
-        return 0;
-    }
     if (mode == "ready-bad-caps") {
         send_ready(1u << 9); // unknown bit -> client protocol error
         pause();
@@ -200,7 +175,8 @@ int main(int argc, char** argv) {
                           capsid::protocol::kCapDuplexChannel | capsid::protocol::kCapUpgrade |
                           capsid::protocol::kCapHalfClose;
     const bool confirm = mode == "confirm-pending" || mode == "confirm-crossed";
-    send_ready(full | (confirm ? capsid::protocol::kCapChannelConfirm : 0));
+    send_ready(mode == "no-channels" ? 0
+                                     : full | (confirm ? capsid::protocol::kCapChannelConfirm : 0));
     // mirror the host's own announcement so the effective set is the
     // intersection the test expects
     (void)caps;

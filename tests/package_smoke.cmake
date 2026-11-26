@@ -526,13 +526,18 @@ foreach(binary IN LISTS CAPSID_SMOKE_BINARIES)
         endif()
     elseif(CAPSID_SMOKE_SYSTEM_NAME STREQUAL "Linux")
         execute_process(
-            COMMAND readelf -d "${binary}"
+            COMMAND readelf -W -l -d "${binary}"
             RESULT_VARIABLE readelf_result
             OUTPUT_VARIABLE readelf_out
             ERROR_VARIABLE readelf_err)
         if(NOT readelf_result EQUAL 0)
-            message(FATAL_ERROR "readelf -d failed for ${binary_name}:\n"
+            message(FATAL_ERROR "readelf -W -l -d failed for ${binary_name}:\n"
                 "${readelf_err}")
+        endif()
+        string(REGEX MATCH "\n[ \t]*GNU_STACK[ \t]+[^\n]*" stack_header "${readelf_out}")
+        if(NOT stack_header MATCHES "[ \t]RW[ \t]+0x[0-9A-Fa-f]+[ \t]*$")
+            message(FATAL_ERROR "${binary_name} requires a read-write, non-executable "
+                "GNU_STACK program header. Found: '${stack_header}'")
         endif()
         string(REPLACE "\n" ";" readelf_lines "${readelf_out}")
         foreach(line IN LISTS readelf_lines)

@@ -5,7 +5,7 @@
 // HELLO/READY negotiation with live capability bits, typed channel
 // events on the pump, exact wire bytes for every host operation (the
 // peer logs each received frame), and the negative controls (bad
-// READY caps, short tail, closure violation; v3 callers gated).
+// READY caps, short tail, closure violation; default v4 callers gated).
 #include "capsid/runtime.h"
 
 #include <string.h>
@@ -87,7 +87,7 @@ capsid_worker_config base_config(const char* worker_path) {
 // Spawns the fake peer with full channel capabilities and a scenario.
 capsid_worker* spawn_peer(const char* scenario, const char* log_path,
                           uint32_t max_queued_bytes = 4u * 1024u * 1024u, bool confirm = false,
-                          bool legacy = false) {
+                          bool default_spawn = false) {
     const std::string launcher = peer_launcher(scenario, log_path);
     capsid_worker_config config = base_config(launcher.c_str());
     config.max_queued_bytes = max_queued_bytes;
@@ -100,8 +100,8 @@ capsid_worker* spawn_peer(const char* scenario, const char* log_path,
     if (confirm)
         options.capabilities |= CAPSID_PROTOCOL_CAP_CHANNEL_CONFIRM;
     capsid_worker* worker = nullptr;
-    const capsid_result spawned = legacy ? capsid_worker_spawn(&config, &worker)
-                                         : capsid_worker_spawn_ex(&config, &options, &worker);
+    const capsid_result spawned =
+        capsid_worker_spawn_ex(&config, default_spawn ? nullptr : &options, &worker);
     if (spawned != CAPSID_OK) {
         return nullptr;
     }
@@ -366,17 +366,15 @@ void test_typed_decoder_units() {
             "truncated credit payload rejected");
 }
 
-void test_v3_caller_gated() {
-    // A plain v3 spawn (legacy entry) never negotiates channels: the
-    // ops answer CAPSID_PROTOCOL_ERROR and the pump can never emit a
-    // channel event (the v3 parser rejects channel frame types).
-    capsid_worker* worker =
-        spawn_peer("v3", "/tmp/capsid-fake-peer-v3.log", 4u * 1024u * 1024u, false, true);
-    require(worker != nullptr, "v3 spawn of the fake peer");
+void test_default_caller_gated() {
+    // The default v4 connection has no channel capabilities.
+    capsid_worker* worker = spawn_peer("no-channels", "/tmp/capsid-fake-peer-no-channels.log",
+                                       4u * 1024u * 1024u, false, true);
+    require(worker != nullptr, "default v4 spawn of the fake peer");
     if (worker == nullptr) {
         return;
     }
-    require(capsid_worker_flush(worker) == CAPSID_OK, "flush the v3 HELLO");
+    require(capsid_worker_flush(worker) == CAPSID_OK, "flush the default v4 HELLO");
     capsid_event event;
     memset(&event, 0, sizeof(event));
     event.struct_size = sizeof(event);
@@ -389,22 +387,23 @@ void test_v3_caller_gated() {
                 nanosleep(&pause, NULL);
             }
         }
-        require(pumped == CAPSID_OK && event.type == CAPSID_EVENT_READY, "v3 READY arrives");
+        require(pumped == CAPSID_OK && event.type == CAPSID_EVENT_READY,
+                "default v4 READY arrives");
     }
     const uint8_t byte = 0x41;
     require(capsid_worker_channel_send(worker, 1, &byte, 1,
                                        CAPSID_CHANNEL_FLAG_START | CAPSID_CHANNEL_FLAG_END |
                                            CAPSID_CHANNEL_FLAG_TEXT) == CAPSID_PROTOCOL_ERROR,
-            "v3 channel send is gated");
+            "default v4 channel send is gated");
     require(capsid_worker_channel_grant(worker, 1, 1024) == CAPSID_PROTOCOL_ERROR,
-            "v3 grant is gated");
+            "default v4 grant is gated");
     require(capsid_worker_channel_close(worker, 1, 1000, "x") == CAPSID_PROTOCOL_ERROR,
-            "v3 close is gated");
+            "default v4 close is gated");
     capsid_protocol_info info;
     require(capsid_worker_get_protocol_info(worker, &info, sizeof(info)) == CAPSID_OK,
-            "protocol info after v3 spawn");
-    require(info.wire_version == 3 && info.effective_capabilities == 0,
-            "v3 info carries no capabilities");
+            "protocol info after default v4 spawn");
+    require(info.wire_version == 4 && info.effective_capabilities == 0,
+            "default v4 info carries no capabilities");
     capsid_worker_destroy(worker);
 }
 
@@ -683,7 +682,7 @@ int main(int argc, char** argv) {
     test_typed_decoder_units();
     test_queue_refusal_is_transactional();
     test_real_upgrade_head_and_lifetime();
-    test_v3_caller_gated();
+    test_default_caller_gated();
     test_negotiation_and_dial_flow();
     test_negative_controls();
     test_confirmation_races_on_real_ipc();

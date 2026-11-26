@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
     config.strict_sandbox = 0;
 
     capsid_worker* worker = NULL;
-    if (capsid_worker_spawn(&config, &worker) != CAPSID_OK) {
+    if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK) {
         fail("could not spawn worker");
     }
 

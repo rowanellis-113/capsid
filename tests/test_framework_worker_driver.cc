@@ -1015,7 +1015,7 @@ int main(int argc, char** argv) {
 
     std::cerr << "framework Worker jsStackBytes=" << config.js_stack_size << std::endl;
     capsid_worker* worker = NULL;
-    capsid_result result = capsid_worker_spawn(&config, &worker);
+    capsid_result result = capsid_worker_spawn_ex(&config, NULL, &worker);
     if (result != CAPSID_OK) {
         emit_fatal(std::string("spawn worker: ") + capsid_result_string(result));
         return 1;

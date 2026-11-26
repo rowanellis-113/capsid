@@ -9,6 +9,7 @@
 
 #include "host/config.h"
 #include "host/json_codec.h"
+#include "host/policy_compiler.h"
 #include "host/units.h"
 #include "ipc_validation.h"
 #include "net_target.h"
@@ -76,55 +77,39 @@ bool read_string_array(json_t* parent, const char* key, std::vector<std::string>
     return true;
 }
 
-// Normalizes "[<ipv6>/<prefix>]" to "[<ipv6>]/<prefix>" for net_target.cc,
-// and supports comma-separated port lists "<host>:<p1>[,<p2>...]" on app rules.
-std::string normalize_v2_net_target_for_match(const std::string& target) {
-    if (!target.empty() && target.front() == '[') {
-        const std::size_t close = target.find(']');
-        const std::size_t slash = target.find('/');
-        if (close != std::string::npos && slash != std::string::npos && slash < close) {
-            return target.substr(0, slash) + "]" + target.substr(slash, close - slash) +
-                   target.substr(close + 1);
+// Binding manifests grant one port per target. Compile the App's port lists into
+// the same concrete rule strings that the Worker and the committed snapshot consume.
+bool compile_binding_net_rules(const std::vector<std::string>& requested,
+                               const std::vector<std::string>& manifest,
+                               std::vector<std::string>* effective) {
+    std::vector<FetchTarget> grants;
+    for (const std::string& rule : manifest) {
+        FetchTarget grant;
+        if (!parse_outbound_target_text(rule, &grant) || grant.ports.size() != 1)
+            return false;
+        grants.push_back(std::move(grant));
+    }
+    std::unordered_set<std::string> seen;
+    for (const std::string& rule : requested) {
+        FetchTarget target;
+        if (!parse_outbound_target_text(rule, &target) || target.ports.empty())
+            return false;
+        const std::string wire_host =
+            target.host.find(':') == std::string::npos ? target.host : "[" + target.host + "]";
+        for (std::uint16_t port : target.ports) {
+            std::string endpoint = wire_host + ":" + std::to_string(port);
+            if (!seen.insert(endpoint).second)
+                continue;
+            if (seen.size() > capsid::kMaxBindingRules ||
+                std::none_of(grants.begin(), grants.end(), [&](const FetchTarget& grant) {
+                    return port == grant.ports.front() &&
+                           capsid::net_host_contained(target.host, grant.host);
+                }))
+                return false;
+            effective->push_back(std::move(endpoint));
         }
     }
-    return target;
-}
-
-inline bool net_target_contained(const std::string& app, const std::string& manifest) {
-    const std::string norm_manifest = normalize_v2_net_target_for_match(manifest);
-    const std::string norm_app = normalize_v2_net_target_for_match(app);
-    // Split comma-separated ports only if there is a single ':' after the host
-    // block (outside IPv6 brackets).
-    std::size_t host_end = 0;
-    if (!norm_app.empty() && norm_app.front() == '[') {
-        const std::size_t close = norm_app.find(']');
-        if (close != std::string::npos) {
-            host_end = close + 1;
-        }
-    }
-    const std::size_t colon = norm_app.find(':', host_end);
-    if (colon != std::string::npos && norm_app.find(':', colon + 1) == std::string::npos) {
-        const std::string ports = norm_app.substr(colon + 1);
-        if (ports.find(',') != std::string::npos) {
-            const std::string host = norm_app.substr(0, colon);
-            std::size_t begin = 0;
-            while (begin <= ports.size()) {
-                const std::size_t comma = ports.find(',', begin);
-                const std::string part = ports.substr(
-                    begin, comma == std::string::npos ? std::string::npos : comma - begin);
-                if (part.empty() ||
-                    !capsid::net_target_contained(host + ":" + part, norm_manifest)) {
-                    return false;
-                }
-                if (comma == std::string::npos) {
-                    break;
-                }
-                begin = comma + 1;
-            }
-            return true;
-        }
-    }
-    return capsid::net_target_contained(norm_app, norm_manifest);
+    return true;
 }
 
 inline bool fs_path_contained(const std::string& app, const std::string& manifest) {
@@ -1115,20 +1100,11 @@ BindingCompileResult compile_effective_bindings(const BindingRegistrySnapshot& r
 
         // Static subset proofs (§2.3): every App rule must be provably
         // covered by a manifest rule.
-        for (const std::string& app_rule : request.net_rules) {
-            bool covered = false;
-            for (const std::string& manifest_rule : manifest_net) {
-                if (net_target_contained(app_rule, manifest_rule)) {
-                    covered = true;
-                    break;
-                }
-            }
-            if (!covered) {
-                result.error = "binding net rule is not covered by the "
-                               "manifest: " +
-                               request.id + " " + app_rule;
-                return result;
-            }
+        binding.request.net_rules.clear();
+        if (!compile_binding_net_rules(request.net_rules, manifest_net,
+                                       &binding.request.net_rules)) {
+            result.error = "invalid or uncovered binding net rules: " + request.id;
+            return result;
         }
         for (const std::string& app_path : request.fs_read) {
             bool covered = false;

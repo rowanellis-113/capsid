@@ -948,7 +948,7 @@ Result run_policy_probe(const char* worker_path, const std::string& bundle,
     config.strict_sandbox = strict_worker ? 1 : 0;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn egress-policy worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn egress-policy worker");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "load egress-policy bundle");
@@ -985,7 +985,7 @@ int main(int argc, char** argv) {
     egress_policy.attach(&config);
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn matrix worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn matrix worker");
     const std::string bundle = read_file(argv[2]);
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
@@ -1039,7 +1039,7 @@ int main(int argc, char** argv) {
     egress_policy.attach(&config);
 
     worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn body-limit worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn body-limit worker");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "load body-limit bundle");

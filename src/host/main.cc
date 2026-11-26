@@ -465,7 +465,8 @@ std::string read_host_config(const std::string& path) {
     capsid::host::QuarantineDispatcher quarantine_dispatcher;
     capsid::host::MemorySampler memory_sampler;
     capsid::host::GlobalEvictionCoordinator eviction_coordinator(
-        config.capacity.memory, config.tenancy, &ledger, &memory_sampler, metrics.get());
+        config.capacity.memory, config.tenancy, &ledger, &memory_sampler, metrics.get(),
+        structured_log.get());
     const auto adopt_generation =
         [&](const std::string& application, const std::string& tenant,
             const std::vector<capsid_worker*>& workers,
@@ -497,14 +498,18 @@ std::string read_host_config(const std::string& path) {
         pool_options.release_elastic_slot = [&ledger, application] {
             ledger.release_elastic(application, 1);
         };
+        pool_options.handoff_elastic_to_reaping = [&ledger, application] {
+            return ledger.handoff_elastic_to_reaping(application);
+        };
+        pool_options.try_acquire_reaping_slot = [&ledger, application] {
+            return ledger.try_acquire_reaping(application);
+        };
+        pool_options.release_reaping_slot = [&ledger, application] {
+            ledger.finish_reaping(application, 1);
+        };
         pool_options.max_inflight_per_worker = effective.requests_per_worker;
         pool_options.max_queued_requests = effective.queue_requests;
-        pool_options.queue_header_bytes = effective.queue_header_bytes;
         pool_options.queue_timeout_ms = effective.queue_timeout_ms;
-        pool_options.max_streaming_inflight_per_worker =
-            effective.max_streaming_inflight_per_worker;
-        pool_options.stream_idle_timeout_ms = effective.stream_idle_timeout_ms;
-        pool_options.write_timeout_ms = effective.write_timeout_ms;
         pool_options.max_request_body_bytes =
             capsid::host::effective_max_request_body_bytes(effective.memory_bytes);
         pool_options.factory = factory;

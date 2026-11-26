@@ -227,6 +227,9 @@ void send_startup(int fd, const std::string& bundle) {
     capsid::protocol::append_u16(&hello.payload, 0);
     capsid::protocol::append_u32(&hello.payload, CAPSID_EGRESS_DENY);
     capsid::protocol::append_u32(&hello.payload, 0);
+    capsid::protocol::append_u16(&hello.payload, 0); // environment entries
+    capsid::protocol::append_u32(&hello.payload, 0); // capabilities
+    capsid::protocol::append_u32(&hello.payload, 0); // reserved
     send_frame(fd, hello);
 
     capsid::protocol::Frame load;

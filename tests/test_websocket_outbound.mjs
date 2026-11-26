@@ -484,7 +484,6 @@ async function ownedHttpCases(plainPort, ca) {
     {
       permissions: { modules: [], fetch: { allow } },
       fetchTargets: allow,
-      channelCapacity: { pendingDialsTotal: 2 },
     },
     ca,
   );

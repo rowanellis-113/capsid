@@ -140,7 +140,7 @@ struct PoolFixture {
             config.worker_path = worker_path.c_str();
             config.request_timeout_ms = 2000;
             capsid_worker* worker = nullptr;
-            if (capsid_worker_spawn(&config, &worker) != CAPSID_OK) {
+            if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK) {
                 *error = "real Worker spawn failed";
                 return false;
             }

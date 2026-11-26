@@ -577,12 +577,8 @@ try {
     fetchTargets: allow,
     requestTimeoutMs: longRunning ? 5000 : 1000,
     env: allocatorEnvironment,
-    hostCapacity: { workersTotal: 1, activationSurgeWorkers: 1 },
-    channelCapacity: { channelsTotal: scenario === 'deploy' ? 4 : 2, pendingDialsTotal: 2 },
-    channels: { dialTimeoutMs: 30000 },
-    recovery: {
-      restartBackoff: { initial: '20ms', maximum: '100ms', jitter: '0%', stableReset: '60s' },
-    },
+    hostCapacity: { workersTotal: 1 },
+    channelCapacity: { channelsTotal: scenario === 'deploy' ? 4 : 2 },
   });
   backend.agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
   versionFiles('v2');

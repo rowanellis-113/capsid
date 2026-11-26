@@ -30,9 +30,9 @@ struct Peers {
         options.local_side = Side::Worker;
         registry[1] = capsid::ChannelRegistry(options);
         p::Frame hello;
-        hello.version = p::kVersionV4;
+        hello.version = p::kVersion;
         hello.type = p::kHello;
-        hello.payload.resize(p::kHelloFixedPayloadSize);
+        hello.payload.resize(p::kHelloFixedPayloadSize - p::kHelloV4TailSize);
         if (caps & p::kCapChannelLayoutA2)
             require(p::append_hello_a2_extension(&hello.payload, p::ChannelLimits()),
                     "limits encode");
@@ -41,7 +41,7 @@ struct Peers {
         send(Side::Host, hello);
         receive(Side::Worker);
         p::Frame ready;
-        ready.version = p::kVersionV4;
+        ready.version = p::kVersion;
         ready.type = p::kReady;
         p::append_u32(&ready.payload, caps);
         p::append_u32(&ready.payload, 0);
@@ -50,8 +50,8 @@ struct Peers {
     }
     capsid::ChannelRegistry::ApplyResult send(Side from, const p::Frame& frame) {
         std::vector<uint8_t> bytes;
-        require(p::encode_versioned(p::kVersionV4, frame, &bytes), "wire encode");
-        p::Parser parser(p::kVersionV4);
+        require(p::encode_versioned(p::kVersion, frame, &bytes), "wire encode");
+        p::Parser parser;
         require(parser.append(bytes.data(), bytes.size()), "wire append");
         p::Frame decoded;
         require(parser.next(&decoded) == p::kParseFrame, "wire parse");
@@ -81,7 +81,7 @@ struct Peers {
         dial.max_message_bytes = 1024 * 1024;
         dial.url = "ws://race.test/";
         p::Frame frame;
-        frame.version = p::kVersionV4;
+        frame.version = p::kVersion;
         frame.type = p::kChannelOpen;
         require(p::encode_channel_open(dial, &frame.payload), "OPEN encode");
         send(Side::Worker, frame);
@@ -93,7 +93,7 @@ struct Peers {
         accept.channel_id = channel_id;
         accept.accepted_max_message_bytes = 1024 * 1024;
         p::Frame frame;
-        frame.version = p::kVersionV4;
+        frame.version = p::kVersion;
         frame.type = p::kChannelAccept;
         require(p::encode_channel_accept(accept, &frame.payload), "ACCEPT encode");
         send(Side::Host, frame);
@@ -107,7 +107,7 @@ struct Peers {
             payload.channel_id = 1;
             payload.dial_id = 1;
             p::Frame ack;
-            ack.version = p::kVersionV4;
+            ack.version = p::kVersion;
             ack.type = p::kChannelAck;
             require(p::encode_channel_ack(payload, &ack.payload), "result ACK encode");
             send(Side::Worker, ack);
@@ -131,7 +131,7 @@ struct Peers {
 
 p::Frame data(bool start, bool end) {
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = p::kChannelData;
     f.flags = (start ? p::kFlagStart : 0) | (end ? p::kFlagEnd : 0);
     p::append_u32(&f.payload, 1);
@@ -145,7 +145,7 @@ p::Frame close() {
     payload.flags = p::kCloseFlagCodePresent;
     payload.code = 1000;
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = p::kChannelClose;
     require(p::encode_channel_close(payload, &f.payload), "Close encode");
     return f;
@@ -156,7 +156,7 @@ p::Frame cancel(uint64_t dial_id = 0) {
     payload.channel_id = dial_id ? 0 : 1;
     payload.dial_id = dial_id;
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = p::kChannelCancel;
     require(p::encode_channel_cancel(payload, &f.payload), "CANCEL encode");
     return f;
@@ -167,7 +167,7 @@ p::Frame ack(uint32_t kind, uint64_t dial_id = 0, uint32_t channel_id = 1) {
     payload.dial_id = dial_id;
     payload.kind = kind;
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = p::kChannelAck;
     require(p::encode_channel_ack(payload, &f.payload), "ACK encode");
     return f;
@@ -177,7 +177,7 @@ p::Frame reject(uint64_t dial_id) {
     payload.dial_id = dial_id;
     payload.reason_code = 8;
     p::Frame f;
-    f.version = p::kVersionV4;
+    f.version = p::kVersion;
     f.type = p::kChannelReject;
     require(p::encode_channel_reject(payload, &f.payload), "REJECT encode");
     return f;
@@ -370,7 +370,7 @@ void half_close_keeps_control_stream() {
     Peers peers(31);
     peers.open();
     p::Frame half;
-    half.version = p::kVersionV4;
+    half.version = p::kVersion;
     half.type = p::kChannelHalfClose;
     p::append_u32(&half.payload, 1);
     peers.send(Side::Worker, data(true, true));
@@ -378,7 +378,7 @@ void half_close_keeps_control_stream() {
     peers.send(Side::Host, half);
     peers.receive(Side::Host);
     p::Frame credit;
-    credit.version = p::kVersionV4;
+    credit.version = p::kVersion;
     credit.type = p::kChannelCredit;
     p::ChannelCreditPayload grant;
     grant.channel_id = 1;

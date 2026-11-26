@@ -4,6 +4,7 @@
 #include "capability_policy.h"
 #include "protocol.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <string>
@@ -11,13 +12,11 @@
 
 namespace capsid {
 
+constexpr size_t kMaxBindingRules = 1024;
+
 struct WorkerStartupConfig {
     WorkerStartupConfig();
 
-    // FetchRPC negotiation (v4): the wire version of the HELLO frame and
-    // the host's capability bitset (tail). v3 Hellos keep version 3 and
-    // zero capabilities.
-    uint16_t protocol_version = 3;
     uint32_t host_capabilities = 0;
     // A2 amendment (v4.1): parsed limits extension, present only when
     // the Hello announced CAP_CHANNEL_LAYOUT_A2.
@@ -65,7 +64,7 @@ struct WorkerBindingDescriptor {
     std::vector<std::string> stdio;
 };
 
-// Decodes and validates a HELLO frame (v3 or v4, A2 extension
+// Decodes and validates a HELLO frame (FetchRPC v4, A2 extension
 // included) into a startup config. Exported for the conformance
 // harness; the worker runtime reaches it through
 // WorkerStartupState::consume.
@@ -106,6 +105,36 @@ class WorkerStartupState {
     bool binding_inflight_ = false;
 };
 
+// Lightweight non-owning slice for C++11 headers shared between Worker and Host.
+struct WorkerSlice {
+    const char* ptr;
+    size_t len;
+
+    WorkerSlice() : ptr(""), len(0) {}
+    WorkerSlice(const char* data_ptr, size_t size_len)
+        : ptr(data_ptr ? data_ptr : ""), len(size_len) {}
+
+    const char* data() const { return ptr; }
+    size_t size() const { return len; }
+    bool empty() const { return len == 0; }
+    char operator[](size_t index) const { return ptr[index]; }
+    const char* begin() const { return ptr; }
+    const char* end() const { return ptr + len; }
+};
+
+struct WorkerRequestHeaderView {
+    WorkerSlice name;
+    WorkerSlice value;
+};
+
+struct WorkerRequestHeadView {
+    WorkerSlice method;
+    WorkerSlice url;
+    bool bodyless = false;
+    uint32_t upgrade_channel_id = 0;
+    uint64_t upgrade_max_message_bytes = 0;
+};
+
 struct WorkerRequestHeader {
     std::string name;
     std::string value;
@@ -123,14 +152,19 @@ struct WorkerRequestHead {
     uint64_t upgrade_max_message_bytes = 0;
 };
 
+// Decodes zero-copy views pointing directly into `frame.payload`. Caller must
+// consume before modifying or destroying `frame`.
+bool decode_worker_request_head_views(const protocol::Frame& frame, uint32_t max_header_bytes,
+                                      WorkerRequestHeadView* output,
+                                      std::vector<WorkerRequestHeaderView>* headers_out,
+                                      std::string* error);
 bool decode_worker_request_head(const protocol::Frame& frame, uint32_t max_header_bytes,
                                 WorkerRequestHead* output, std::string* error);
 
 // --- Binding v1 READY proof (docs/design/bindings-v1.md §4.3) ------
 
-// The READY v3 proof carried after the 71-byte compatibility id. Workers
-// with at least one binding extend the payload; zero-binding workers keep
-// the exact 71-byte baseline.
+// The READY identity starts with the 71-byte compatibility id. Workers
+// with Bindings append the sandbox proof before the capability tail.
 struct WorkerReadyProof {
     bool extended = false;
     uint32_t applied_feature_bits = 0;

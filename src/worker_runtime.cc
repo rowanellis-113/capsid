@@ -454,11 +454,11 @@ enum class EnqueueResult {
 };
 
 struct PendingWrite {
-    // Call-time snapshot of the unsent remainder (design §3.2): the
-    // bytes are copied into native memory at the write call, so the
-    // application mutating the source array afterwards cannot change
-    // the response, and the pump reads the copy directly without
-    // repeated JS API calls. The copy is bounded by one frame.
+    // Call-time snapshot of the unsent remainder of a blocked write
+    // chunk or single-shot response body (design §3.2): copied into
+    // native memory at the write call so mutating the source view
+    // afterwards cannot alter the response, and segmented into wire
+    // frames by pump_one without repeated JS API calls.
     std::vector<uint8_t> data;
     size_t offset; // bytes already written to the wire queue
     size_t size;
@@ -560,6 +560,38 @@ struct RequestToken {
           registered(false), refs(1), job_refs(0), async_refs(0), last_reclaim_refs_(0),
           reclaim_deadline_ns(0), reclaim_grace(false), inflight_binding_calls(0) {}
 
+    void reset(uint64_t gen, uint64_t id, uint64_t deadline) {
+        if (promise_creation_scope) {
+            promise_creation_scope->token = nullptr;
+            if (--promise_creation_scope->refs == 0)
+                delete promise_creation_scope;
+            promise_creation_scope = nullptr;
+        }
+        connection_id = 0;
+        connection_dial_id = 0;
+        upgrade_source_channel = 0;
+        connection_open_event = false;
+        connection_event_settled = false;
+        connection_jobs_revoked = false;
+        connection_cleanup_task = false;
+        connection_retired = false;
+        retired_previous = nullptr;
+        retired_next = nullptr;
+        origin_generation = 0;
+        generation = gen;
+        request_id = id;
+        deadline_ns = deadline;
+        terminal = false;
+        registered = false;
+        refs = 1;
+        job_refs = 0;
+        async_refs = 0;
+        last_reclaim_refs_ = 0;
+        reclaim_deadline_ns = 0;
+        reclaim_grace = false;
+        inflight_binding_calls = 0;
+    }
+
     ~RequestToken() {
         if (promise_creation_scope) {
             promise_creation_scope->token = nullptr;
@@ -580,7 +612,8 @@ struct ResponseState {
     // terminal cannot pass it, including when initial body credit is zero.
     capsid::protocol::Frame pending_head;
     bool head_pending;
-    std::deque<PendingWrite> pending;
+    std::vector<PendingWrite> pending;
+    size_t pending_cursor;
     // C++11 target: no std::optional; the flag marks a deferred terminal.
     TerminalPending terminal;
     bool terminal_pending;
@@ -596,9 +629,21 @@ struct ResponseState {
 
     ResponseState()
         : credit(0), request_credit(0), response_body_bytes_accepted(0), deadline_ns(0),
-          request_ended(false), head_pending(false), terminal_pending(false),
+          request_ended(false), head_pending(false), pending_cursor(0), terminal_pending(false),
           phase(ResponsePhase::kOpen), token(NULL), t_begin_ns(0), t_head_ns(0),
           t_write_done_ns(0) {}
+
+    bool has_pending() const { return pending_cursor < pending.size(); }
+
+    PendingWrite& front_pending() { return pending[pending_cursor]; }
+
+    void pop_pending() {
+        ++pending_cursor;
+        if (pending_cursor >= pending.size()) {
+            pending.clear();
+            pending_cursor = 0;
+        }
+    }
 };
 
 struct StorageNamespace {
@@ -760,6 +805,9 @@ class WorkerRuntime {
         std::memset(&deadline_timer_, 0, sizeof(deadline_timer_));
         responses_.reserve(128);
         head_frame_scratch_.payload.reserve(512);
+        request_header_views_scratch_.reserve(32);
+        token_free_list_.reserve(64);
+        token_registry_.reserve(128);
         http_tokens_by_request_id_.reserve(128);
     }
 
@@ -826,15 +874,20 @@ class WorkerRuntime {
             for (auto it = token_registry_.begin(); it != token_registry_.end();) {
                 RequestToken* token = it->second;
                 token->registered = false;
-                token_registry_.erase(it++);
+                it = token_registry_.erase(it);
                 delete token;
             }
+            active_connection_tokens_ = 0;
             while (retired_connection_tokens_) {
                 RequestToken* token = retired_connection_tokens_;
                 retired_connection_tokens_ = token->retired_next;
                 delete token;
             }
         }
+        for (size_t i = 0; i < token_free_list_.size(); ++i) {
+            delete token_free_list_[i];
+        }
+        token_free_list_.clear();
         if (fd_ >= 0) {
             close(fd_);
         }
@@ -844,9 +897,6 @@ class WorkerRuntime {
     }
 
     int run() {
-        // FetchRPC bootstrap (amended §1.2): the first frame on the wire
-        // - the host HELLO - locks this connection's protocol version.
-        parser_ = capsid::protocol::Parser(capsid::protocol::kVersionNegotiate);
         if (!read_startup(false)) {
             return 1;
         }
@@ -1101,25 +1151,21 @@ class WorkerRuntime {
         capsid::append_ready_proof(&ready_payload, sandbox_features, sandbox_seccomp_mode,
                                    sandbox_landlock_abi, sandbox_namespace_identity,
                                    binding_profile_digest);
-        if (config_.protocol_version == capsid::protocol::kVersionV4) {
-            // Channel adapters require the confirmation barrier. Optional
-            // fetch metadata is usable only when the Host announces it too;
-            // older embedders keep their exact previous effective bitset.
-            const uint32_t caps =
-                (config_.host_capabilities & capsid::protocol::kCapChannelConfirm)
-                    ? capsid::protocol::kCapDuplexChannel | capsid::protocol::kCapUpgrade |
-                          capsid::protocol::kCapChannelLayoutA2 |
-                          capsid::protocol::kCapChannelConfirm |
-                          (config_.host_capabilities & (capsid::protocol::kCapChannelCloseFinal |
-                                                        capsid::protocol::kCapFetchUpgrade |
-                                                        capsid::protocol::kCapConnectionLifetime))
-                    : 0;
-            capsid::protocol::append_u32(&ready_payload, caps);
-            capsid::protocol::append_u32(&ready_payload, 0);
-        }
+        // Channel adapters require the confirmation barrier. Optional
+        // fetch metadata is usable only when the Host announces it too;
+        // other connections retain ordinary HTTP transport.
+        const uint32_t caps =
+            (config_.host_capabilities & capsid::protocol::kCapChannelConfirm)
+                ? capsid::protocol::kCapDuplexChannel | capsid::protocol::kCapUpgrade |
+                      capsid::protocol::kCapChannelLayoutA2 | capsid::protocol::kCapChannelConfirm |
+                      (config_.host_capabilities & (capsid::protocol::kCapChannelCloseFinal |
+                                                    capsid::protocol::kCapFetchUpgrade |
+                                                    capsid::protocol::kCapConnectionLifetime))
+                : 0;
+        capsid::protocol::append_u32(&ready_payload, caps);
+        capsid::protocol::append_u32(&ready_payload, 0);
         if (channels_) {
             capsid::protocol::Frame ready;
-            ready.version = config_.protocol_version;
             ready.type = capsid::protocol::kReady;
             ready.flags = sandbox_features;
             ready.payload = ready_payload;
@@ -1149,8 +1195,7 @@ class WorkerRuntime {
             // still fail the unchanged leak check below. Do not run jobs or
             // advance the event loop after the shutdown boundary.
             JS_RunGC(JS_GetRuntime(ctx_));
-            for (std::map<uint64_t, RequestToken*>::const_iterator it = token_registry_.begin();
-                 it != token_registry_.end(); ++it) {
+            for (auto it = token_registry_.begin(); it != token_registry_.end(); ++it) {
                 const RequestToken* token = it->second;
                 const bool response_gone = responses_.find(token->request_id) == responses_.end();
                 const bool reclaimable = (token->terminal || response_gone) && token->refs == 1;
@@ -1556,7 +1601,7 @@ class WorkerRuntime {
             p::ChannelCancelPayload cancel;
             cancel.dial_id = item.first;
             p::Frame frame;
-            frame.version = p::kVersionV4;
+            frame.version = p::kVersion;
             frame.type = p::kChannelCancel;
             p::encode_channel_cancel(cancel, &frame.payload);
             if (!enqueue_channel_control(frame))
@@ -1636,6 +1681,9 @@ class WorkerRuntime {
         // Captured JS reactions can remain reachable after close (for example
         // a resolver retained by the application). They are inert, and own
         // only this context reference, not a live connection/registry lease.
+        if (token->registered && (token->connection_id != 0 || token->connection_dial_id != 0)) {
+            --active_connection_tokens_;
+        }
         token->registered = false;
         token_registry_.erase(token->generation);
         token->connection_retired = true;
@@ -1648,7 +1696,8 @@ class WorkerRuntime {
     }
 
     void finish_connection_turns() {
-        if (current_token_ || JS_IsJobPending(JS_GetRuntime(ctx_)))
+        if ((connections_.empty() && active_connection_tokens_ == 0) || current_token_ ||
+            JS_IsJobPending(JS_GetRuntime(ctx_)))
             return;
         bool released_lifetime = false;
         for (auto& item : connections_) {
@@ -1667,8 +1716,20 @@ class WorkerRuntime {
         }
         if (released_lifetime)
             pump_channels();
-        for (auto it = token_registry_.begin(); it != token_registry_.end();) {
-            RequestToken* token = (it++)->second;
+        if (active_connection_tokens_ == 0)
+            return;
+        std::vector<uint64_t> candidates;
+        candidates.reserve(active_connection_tokens_);
+        for (const auto& item : token_registry_) {
+            const RequestToken* token = item.second;
+            if (token->connection_id || token->connection_dial_id)
+                candidates.push_back(item.first);
+        }
+        for (uint64_t generation : candidates) {
+            auto found = token_registry_.find(generation);
+            if (found == token_registry_.end())
+                continue;
+            RequestToken* token = found->second;
             if (!token->connection_id && !token->connection_dial_id)
                 continue;
             if (connection_resources_closed(token) &&
@@ -1814,6 +1875,33 @@ class WorkerRuntime {
         }
     }
 
+    RequestToken* acquire_token(uint64_t generation, uint64_t request_id, uint64_t deadline_ns) {
+        if (!token_free_list_.empty()) {
+            RequestToken* token = token_free_list_.back();
+            token_free_list_.pop_back();
+            token->reset(generation, request_id, deadline_ns);
+            return token;
+        }
+        return new RequestToken(generation, request_id, deadline_ns);
+    }
+
+    void recycle_token(RequestToken* token) {
+        if (!token) {
+            return;
+        }
+        if (token_free_list_.size() < 64) {
+            if (token->promise_creation_scope) {
+                token->promise_creation_scope->token = nullptr;
+                if (--token->promise_creation_scope->refs == 0)
+                    delete token->promise_creation_scope;
+                token->promise_creation_scope = nullptr;
+            }
+            token_free_list_.push_back(token);
+        } else {
+            delete token;
+        }
+    }
+
     void retain_token(RequestToken* token) {
         if (token) {
             ++token->refs;
@@ -1827,6 +1915,10 @@ class WorkerRuntime {
         }
         retained_refs_ -= 1;
         if (--token->refs == 0) {
+            if (token->registered &&
+                (token->connection_id != 0 || token->connection_dial_id != 0)) {
+                --active_connection_tokens_;
+            }
             token->registered = false;
             token_registry_.erase(token->generation);
             if (!token->connection_id && !token->connection_dial_id) {
@@ -1843,7 +1935,7 @@ class WorkerRuntime {
                 if (token->retired_next)
                     token->retired_next->retired_previous = token->retired_previous;
             }
-            delete token;
+            recycle_token(token);
         }
     }
 
@@ -1941,7 +2033,11 @@ class WorkerRuntime {
             // origin after the HTTP terminal. A native proxy alone has no
             // application owner and still expires at the next checkpoint.
             // Ordinary HTTP stays terminal.
+            const bool was_conn = (token->connection_id != 0 || token->connection_dial_id != 0);
             token->connection_id = token->upgrade_source_channel;
+            if (!was_conn && token->registered && token->connection_id != 0) {
+                ++active_connection_tokens_;
+            }
             token->origin_generation = token->generation;
             token->connection_event_settled = true;
             token->deadline_ns = 0;
@@ -2068,8 +2164,7 @@ class WorkerRuntime {
 
     void reclaim_settled_tokens() {
         std::vector<uint64_t> reclaimable;
-        for (std::map<uint64_t, RequestToken*>::iterator it = token_registry_.begin();
-             it != token_registry_.end(); ++it) {
+        for (auto it = token_registry_.begin(); it != token_registry_.end(); ++it) {
             RequestToken* token = it->second;
             if ((token->connection_id || token->connection_dial_id) && !token->terminal &&
                 token->connection_event_settled && token->refs == 1) {
@@ -2379,8 +2474,6 @@ class WorkerRuntime {
             if (!self->define_native(ctx, core, "capsidRequestCredit", js_bridge_forbidden, 2) ||
                 !self->define_native(ctx, core, "capsidResponseHead", js_bridge_forbidden, 4) ||
                 !self->define_native(ctx, core, "capsidResponseWrite", js_bridge_forbidden, 2) ||
-                !self->define_native(ctx, core, "capsidResponseWriteBuffer", js_bridge_forbidden,
-                                     4) ||
                 !self->define_native(ctx, core, "capsidResponseEnd", js_bridge_forbidden, 1) ||
                 !self->define_native(ctx, core, "capsidResponseError", js_bridge_forbidden, 2) ||
                 !self->define_native(ctx, core, "capsidResponseFinal", js_bridge_forbidden, 5) ||
@@ -2435,8 +2528,6 @@ class WorkerRuntime {
             !self->define_native(ctx, core, "capsidRequestCredit", js_request_credit, 2) ||
             !self->define_native(ctx, core, "capsidResponseHead", js_response_head, 4) ||
             !self->define_native(ctx, core, "capsidResponseWrite", js_response_write, 2) ||
-            !self->define_native(ctx, core, "capsidResponseWriteBuffer", js_response_write_buffer,
-                                 4) ||
             !self->define_native(ctx, core, "capsidResponseEnd", js_response_end, 1) ||
             !self->define_native(ctx, core, "capsidResponseError", js_response_error, 2) ||
             !self->define_native(ctx, core, "capsidResponseFinal", js_response_final, 5) ||
@@ -2939,7 +3030,7 @@ class WorkerRuntime {
         capsid::protocol::Frame head;
         if (!encode_response_head(ctx, request_id, 101, argv[1], argv[2], false, false, &head))
             return JS_ThrowTypeError(ctx, "invalid WebSocket response headers");
-        head.version = capsid::protocol::kVersionV4;
+        head.version = capsid::protocol::kVersion;
         head.flags = capsid::protocol::kFlagResponseUpgrade;
         capsid::protocol::UpgradeTail tail;
         tail.channel_id = id;
@@ -3174,7 +3265,7 @@ class WorkerRuntime {
                 JS_FreeCString(ctx, protocol);
             }
             p::Frame frame;
-            frame.version = p::kVersionV4;
+            frame.version = p::kVersion;
             frame.type = p::kChannelOpen;
             if (!p::encode_channel_open(open, &frame.payload,
                                         g_worker->channels_->registry().effective_capabilities()))
@@ -3226,7 +3317,7 @@ class WorkerRuntime {
         credit.channel_id = id;
         credit.credit = bytes;
         p::Frame frame;
-        frame.version = p::kVersionV4;
+        frame.version = p::kVersion;
         frame.type = p::kChannelCredit;
         return p::encode_channel_credit(credit, &frame.payload) &&
                g_worker->enqueue_channel_control(frame);
@@ -3436,7 +3527,7 @@ class WorkerRuntime {
         capsid::protocol::ChannelCancelPayload cancel;
         cancel.dial_id = dial;
         capsid::protocol::Frame frame;
-        frame.version = capsid::protocol::kVersionV4;
+        frame.version = capsid::protocol::kVersion;
         frame.type = capsid::protocol::kChannelCancel;
         capsid::protocol::encode_channel_cancel(cancel, &frame.payload);
         try {
@@ -3586,7 +3677,7 @@ class WorkerRuntime {
             return JS_ThrowTypeError(ctx, "invalid WebSocket close");
         capsid::protocol::Frame frame;
         frame.type = capsid::protocol::kChannelClose;
-        frame.version = capsid::protocol::kVersionV4;
+        frame.version = capsid::protocol::kVersion;
         if (!capsid::protocol::encode_channel_close(close, &frame.payload))
             return JS_ThrowTypeError(ctx, "invalid WebSocket close");
         try {
@@ -3717,6 +3808,7 @@ class WorkerRuntime {
             return callback;
         token->registered = true;
         g_worker->token_registry_.emplace(token->generation, token);
+        ++g_worker->active_connection_tokens_;
         allocation.release();
         g_worker->retained_refs_ += 1;
         RequestToken* previous = g_worker->current_token_;
@@ -3808,7 +3900,7 @@ class WorkerRuntime {
         lifetime.channel_id = id;
         lifetime.retained = retained ? 1 : 0;
         p::Frame frame;
-        frame.version = p::kVersionV4;
+        frame.version = p::kVersion;
         frame.type = p::kConnectionLifetime;
         return p::encode_connection_lifetime(lifetime, &frame.payload) &&
                enqueue_channel_control(frame);
@@ -3880,7 +3972,7 @@ class WorkerRuntime {
         cancel.channel_id = id;
         cancel.terminal_reason = reason;
         capsid::protocol::Frame frame;
-        frame.version = capsid::protocol::kVersionV4;
+        frame.version = capsid::protocol::kVersion;
         frame.type = capsid::protocol::kChannelCancel;
         capsid::protocol::encode_channel_cancel(cancel, &frame.payload);
         if (!enqueue_channel_control(frame))
@@ -3904,7 +3996,7 @@ class WorkerRuntime {
             p::ChannelCancelPayload cancel;
             cancel.dial_id = item.first;
             p::Frame frame;
-            frame.version = p::kVersionV4;
+            frame.version = p::kVersion;
             frame.type = p::kChannelCancel;
             p::encode_channel_cancel(cancel, &frame.payload);
             if (!enqueue_channel_control(frame))
@@ -3957,7 +4049,7 @@ class WorkerRuntime {
             ack.dial_id = dial;
             ack.channel_id = success ? accepted.channel_id : 0;
             p::Frame confirmation;
-            confirmation.version = p::kVersionV4;
+            confirmation.version = p::kVersion;
             confirmation.type = p::kChannelAck;
             p::encode_channel_ack(ack, &confirmation.payload);
             if (success) {
@@ -4055,7 +4147,7 @@ class WorkerRuntime {
                 credit.channel_id = id;
                 credit.credit = bytes;
                 p::Frame update;
-                update.version = p::kVersionV4;
+                update.version = p::kVersion;
                 update.type = p::kChannelCredit;
                 p::encode_channel_credit(credit, &update.payload);
                 if (!enqueue_channel_control(update))
@@ -4103,7 +4195,7 @@ class WorkerRuntime {
                 ack.channel_id = id;
                 ack.kind = frame.type == p::kChannelCancel ? p::kAckCancel : p::kAckTransportClose;
                 p::Frame response;
-                response.version = p::kVersionV4;
+                response.version = p::kVersion;
                 response.type = p::kChannelAck;
                 p::encode_channel_ack(ack, &response.payload);
                 // Stop the producer before acknowledging the peer marker.
@@ -4253,6 +4345,9 @@ class WorkerRuntime {
         token->origin_generation = owner.origin_generation;
         token->registered = true;
         token_registry_.emplace(token->generation, token);
+        if (token->connection_id != 0 || token->connection_dial_id != 0) {
+            ++active_connection_tokens_;
+        }
         allocation.release();
         retained_refs_ += 1;
         owner.active_event = token->generation;
@@ -4387,7 +4482,7 @@ class WorkerRuntime {
                         close.flags = close.code ? p::kCloseFlagCodePresent : 0;
                         close.reason = event.reason;
                         p::Frame frame;
-                        frame.version = p::kVersionV4;
+                        frame.version = p::kVersion;
                         frame.type = p::kChannelClose;
                         if (!p::encode_channel_close(close, &frame.payload) ||
                             !enqueue_channel_control(frame))
@@ -4587,6 +4682,8 @@ class WorkerRuntime {
     }
 
     void expire_connection_events() {
+        if (connections_.empty() && active_connection_tokens_ == 0)
+            return;
         const uint64_t now = uv_hrtime();
         for (auto& item : connections_) {
             auto& owner = item.second;
@@ -4620,6 +4717,8 @@ class WorkerRuntime {
             owner.events.push_back(std::move(event));
             owner.close_event_queued = true;
         }
+        if (active_connection_tokens_ == 0)
+            return;
         for (auto& item : token_registry_) {
             RequestToken* token = item.second;
             if ((!token->connection_id && !token->connection_dial_id) || token->terminal ||
@@ -4654,10 +4753,19 @@ class WorkerRuntime {
             JS_FreeValue(ctx_, item.second.callback);
         }
         pending_connections_.clear();
-        for (auto it = token_registry_.begin(); it != token_registry_.end();) {
-            RequestToken* token = (it++)->second;
+        if (active_connection_tokens_ == 0)
+            return;
+        std::vector<uint64_t> candidates;
+        candidates.reserve(active_connection_tokens_);
+        for (const auto& item : token_registry_) {
+            const RequestToken* token = item.second;
             if (token->connection_id || token->connection_dial_id)
-                retire_connection_token(token);
+                candidates.push_back(item.first);
+        }
+        for (uint64_t generation : candidates) {
+            auto found = token_registry_.find(generation);
+            if (found != token_registry_.end())
+                retire_connection_token(found->second);
         }
     }
 
@@ -4731,7 +4839,6 @@ class WorkerRuntime {
         frame->type = capsid::protocol::kResponseHead;
         frame->flags = 0;
         frame->request_id = id;
-        frame->version = g_worker->config_.protocol_version;
         frame->payload.clear();
         const size_t base_max = g_worker->config_.max_header_bytes;
         const size_t max_bytes =
@@ -5090,36 +5197,6 @@ class WorkerRuntime {
         return finish_response_write(ctx, id, &state->second, bytes, size);
     }
 
-    static JSValue js_response_write_buffer(JSContext* ctx, JSValueConst, int argc,
-                                            JSValueConst* argv) {
-        uint64_t id = 0;
-        if (!g_worker || argc < 4 || JS_ToBigUint64(ctx, &id, argv[0]) || id == 0) {
-            return JS_EXCEPTION;
-        }
-        if (!g_worker->require_active_request(ctx, id, true, false, "js_response_write")) {
-            return JS_EXCEPTION;
-        }
-        ResponseMap::iterator state = g_worker->responses_.find(id);
-        if (state == g_worker->responses_.end()) {
-            return JS_UNDEFINED;
-        }
-        size_t buf_size = 0;
-        uint8_t* buf = JS_GetArrayBuffer(ctx, &buf_size, argv[1]);
-        uint64_t offset = 0;
-        uint64_t byte_length = 0;
-        if (!buf || JS_ToIndex(ctx, &offset, argv[2]) || JS_ToIndex(ctx, &byte_length, argv[3])) {
-            return JS_EXCEPTION;
-        }
-        if (offset > buf_size || byte_length > buf_size - offset) {
-            return JS_ThrowRangeError(ctx, "slice out of range");
-        }
-        if (byte_length == 0) {
-            return JS_UNDEFINED;
-        }
-        return finish_response_write(ctx, id, &state->second, buf + static_cast<size_t>(offset),
-                                     static_cast<size_t>(byte_length));
-    }
-
     static JSValue js_response_end(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
         uint64_t id = 0;
         if (!g_worker || argc < 1 || JS_ToBigUint64(ctx, &id, argv[0]) || id == 0) {
@@ -5359,8 +5436,7 @@ class WorkerRuntime {
         fail_request_end_bridge_ = config_.capability_policy.env_value(
                                        "CAPSID_TEST_FAIL_REQUEST_END_BRIDGE", &injected_fail_end) &&
                                    injected_fail_end == "1";
-        if (frame.type == capsid::protocol::kHello &&
-            config_.protocol_version == capsid::protocol::kVersionV4) {
+        if (frame.type == capsid::protocol::kHello) {
             capsid::ChannelRegistry::Options options;
             options.local_side = capsid::ChannelSide::Worker;
             options.max_channels = config_.channel_limits.max_channels;
@@ -8266,8 +8342,8 @@ class WorkerRuntime {
         }
     }
 
-    static bool
-    headers_are_canonical_ascii(const std::vector<capsid::WorkerRequestHeader>& headers) {
+    template <typename HeaderList>
+    static bool headers_are_canonical_ascii(const HeaderList& headers) {
         for (const auto& header : headers) {
             if (header.name.empty()) {
                 return false;
@@ -8298,18 +8374,19 @@ class WorkerRuntime {
             responses_.size() >= config_.max_inflight) {
             return false;
         }
-        capsid::WorkerRequestHead decoded;
+        capsid::WorkerRequestHeadView decoded;
         std::string decode_error;
-        if (!capsid::decode_worker_request_head(frame, config_.max_header_bytes, &decoded,
-                                                &decode_error)) {
+        if (!capsid::decode_worker_request_head_views(frame, config_.max_header_bytes, &decoded,
+                                                      &request_header_views_scratch_,
+                                                      &decode_error)) {
             return false;
         }
 
-        const bool canonical_ascii = headers_are_canonical_ascii(decoded.headers);
+        const bool canonical_ascii = headers_are_canonical_ascii(request_header_views_scratch_);
         JSValue headers = JS_NewArray(ctx_);
-        for (size_t i = 0; i < decoded.headers.size(); ++i) {
-            const std::string& raw_name = decoded.headers[i].name;
-            const std::string& raw_value = decoded.headers[i].value;
+        for (size_t i = 0; i < request_header_views_scratch_.size(); ++i) {
+            const capsid::WorkerSlice raw_name = request_header_views_scratch_[i].name;
+            const capsid::WorkerSlice raw_value = request_header_views_scratch_[i].value;
             JSValue name_val;
             JSValue val_val;
             if (canonical_ascii) {
@@ -8331,7 +8408,7 @@ class WorkerRuntime {
                     }
                     name_val = JS_NewStringLen(ctx_, lower_buf, raw_name.size());
                 } else {
-                    std::string lower(raw_name);
+                    std::string lower(raw_name.data(), raw_name.size());
                     for (char& ch : lower) {
                         if (ch >= 'A' && ch <= 'Z') {
                             ch = static_cast<char>(ch - 'A' + 'a');
@@ -8378,7 +8455,7 @@ class WorkerRuntime {
         // first Promise reaction is enqueued by the bridge call itself and
         // must capture the token. Never defer this to a JS-side enter.
         RequestToken* token =
-            new RequestToken(next_token_generation_++, frame.request_id, response.deadline_ns);
+            acquire_token(next_token_generation_++, frame.request_id, response.deadline_ns);
         token->registered = true;
         token_registry_[token->generation] = token;
         http_tokens_by_request_id_[token->request_id] = token;
@@ -8683,7 +8760,7 @@ class WorkerRuntime {
     // (post-settle) resumes worker-scope, which is the fail-closed case.
     void resolve_pending(ResponseState& state) {
         state.t_write_done_ns = uv_hrtime();
-        PendingWrite& pending = state.pending.front();
+        PendingWrite& pending = state.front_pending();
         // Snapshot writes have no JS promise callbacks. Only streaming
         // writes resume a continuation in the owning request context.
         if (!JS_IsUndefined(pending.resolve)) {
@@ -8698,12 +8775,12 @@ class WorkerRuntime {
         }
         JS_FreeValue(ctx_, pending.resolve);
         JS_FreeValue(ctx_, pending.reject);
-        state.pending.pop_front();
+        state.pop_pending();
     }
 
     void reject_pending(ResponseState& state, const char* message) {
-        while (!state.pending.empty()) {
-            PendingWrite& pending = state.pending.front();
+        while (state.has_pending()) {
+            PendingWrite& pending = state.front_pending();
             if (!JS_IsUndefined(pending.reject)) {
                 JSValue argument = JS_NewString(ctx_, message);
                 // Native callbacks preserve the request context for the
@@ -8717,7 +8794,7 @@ class WorkerRuntime {
             }
             JS_FreeValue(ctx_, pending.resolve);
             JS_FreeValue(ctx_, pending.reject);
-            state.pending.pop_front();
+            state.pop_pending();
         }
     }
 
@@ -8741,8 +8818,8 @@ class WorkerRuntime {
             state.pending_head = capsid::protocol::Frame();
             progressed = true;
         }
-        while (!state.pending.empty() && state.credit > 0 && quantum > 0) {
-            PendingWrite& pending = state.pending.front();
+        while (state.has_pending() && state.credit > 0 && quantum > 0) {
+            PendingWrite& pending = state.front_pending();
             if (pending.offset == pending.size) {
                 resolve_pending(state);
                 progressed = true;
@@ -8765,7 +8842,7 @@ class WorkerRuntime {
             }
             if (!outbound_.append(capsid::protocol::kResponseBody, 0, id,
                                   &pending.data[pending.offset], chunk_size,
-                                  config_.protocol_version)) {
+                                  capsid::protocol::kVersion)) {
                 return false;
             }
             pending.offset += chunk_size;
@@ -8786,7 +8863,7 @@ class WorkerRuntime {
     bool try_send_terminal(uint64_t id, ResponseState& state, const TerminalPending& terminal) {
         if (terminal.kind == TerminalPending::Kind::kResponseEnd) {
             // The end waits until every body byte is on the wire.
-            if (state.head_pending || !state.pending.empty()) {
+            if (state.head_pending || state.has_pending()) {
                 state.terminal = terminal;
                 state.terminal_pending = true;
                 state.phase = ResponsePhase::kEndPending;
@@ -8888,7 +8965,7 @@ class WorkerRuntime {
         }
         ResponseState& state = it->second;
         const bool progressed = advance_pending(state, id, capsid::protocol::kMaxPayloadSize);
-        if (state.pending.empty() && state.terminal_pending) {
+        if (!state.has_pending() && state.terminal_pending) {
             TerminalPending terminal = state.terminal;
             state.terminal_pending = false;
             if (try_send_terminal(id, state, terminal)) {
@@ -8941,7 +9018,7 @@ class WorkerRuntime {
                 continue;
             }
             const bool progressed = advance_pending(state, id, capsid::protocol::kMaxPayloadSize);
-            if (state.pending.empty() && state.terminal_pending) {
+            if (!state.has_pending() && state.terminal_pending) {
                 TerminalPending terminal = state.terminal;
                 state.terminal_pending = false;
                 if (try_send_terminal(id, state, terminal)) {
@@ -9037,14 +9114,11 @@ class WorkerRuntime {
             return queue_output(frame);
         if (channels_) {
             std::string error;
-            capsid::protocol::Frame explicit_frame = frame;
-            if (!explicit_frame.version)
-                explicit_frame.version = config_.protocol_version;
             // ChannelIO commits only after its writer succeeds. Validate a
             // deferred head without changing channel ownership or emitting it.
             channels_->transmit(
-                explicit_frame, [](const capsid::protocol::Frame&, void*) { return false; },
-                nullptr, &error);
+                frame, [](const capsid::protocol::Frame&, void*) { return false; }, nullptr,
+                &error);
             if (!error.empty())
                 return false;
         }
@@ -9058,25 +9132,18 @@ class WorkerRuntime {
         if (channels_ && frame.type == capsid::protocol::kResponseHead &&
             !(frame.flags & capsid::protocol::kFlagResponseUpgrade)) {
             std::string error;
-            if (frame.version != 0) {
-                return channels_->transmit(frame, raw_output_writer, this, &error);
-            }
-            capsid::protocol::Frame explicit_frame = frame;
-            explicit_frame.version = config_.protocol_version;
-            return channels_->transmit(explicit_frame, raw_output_writer, this, &error);
+            return channels_->transmit(frame, raw_output_writer, this, &error);
         }
         return queue_output_bytes(frame.type, frame.flags, frame.request_id,
                                   frame.payload.empty() ? NULL : &frame.payload[0],
-                                  frame.payload.size(),
-                                  frame.version != 0 ? frame.version : config_.protocol_version);
+                                  frame.payload.size(), frame.version);
     }
 
     static bool raw_output_writer(const capsid::protocol::Frame& frame, void* opaque) {
         WorkerRuntime* self = static_cast<WorkerRuntime*>(opaque);
-        return self->queue_output_bytes(
-            frame.type, frame.flags, frame.request_id,
-            frame.payload.empty() ? NULL : frame.payload.data(), frame.payload.size(),
-            frame.version ? frame.version : self->config_.protocol_version);
+        return self->queue_output_bytes(frame.type, frame.flags, frame.request_id,
+                                        frame.payload.empty() ? NULL : frame.payload.data(),
+                                        frame.payload.size(), frame.version);
     }
 
     // Fast path: writes as many bytes as credit and wire capacity allow,
@@ -9111,7 +9178,7 @@ class WorkerRuntime {
                 break;
             }
             if (!outbound_.append(capsid::protocol::kResponseBody, 0, request_id, payload + sent,
-                                  chunk_size, config_.protocol_version)) {
+                                  chunk_size, capsid::protocol::kVersion)) {
                 return EnqueueResult::kFatal;
             }
             sent += chunk_size;
@@ -9157,9 +9224,10 @@ class WorkerRuntime {
     }
 
     bool has_output_capacity(size_t additional) const {
-        // Contract #8: the native wire queue never exceeds
-        // max_queued_bytes. Pending entries hold JS views only, so they
-        // do not consume this budget.
+        // Contract #8: the encoded outbound wire queue never exceeds
+        // max_queued_bytes. Unsent PendingWrite native snapshots live
+        // outside outbound_ and enter this budget frame-by-frame as wire
+        // space and response credit become available.
         const size_t limit = config_.max_queued_bytes;
         const size_t queued = outbound_.logical_size();
         return queued <= limit && additional <= limit - queued;
@@ -9402,6 +9470,8 @@ class WorkerRuntime {
     bool fail_request_end_bridge_ = false;
     ResponseMap responses_;
     capsid::protocol::Frame head_frame_scratch_;
+    std::vector<capsid::WorkerRequestHeaderView> request_header_views_scratch_;
+    std::vector<RequestToken*> token_free_list_;
     // Round-robin rotation order for pump_response_output (design §3.4):
     // a request is enqueued on begin and rotated to the back after each
     // pass, so the pump cursor persists across passes.
@@ -9421,8 +9491,9 @@ class WorkerRuntime {
     JSValue cancel_request_;
     JSValue microtask_error_reporter_;
     uint64_t next_token_generation_;
-    std::map<uint64_t, RequestToken*> token_registry_;
+    std::unordered_map<uint64_t, RequestToken*> token_registry_;
     std::unordered_map<uint64_t, RequestToken*> http_tokens_by_request_id_;
+    size_t active_connection_tokens_ = 0;
     RequestToken* retired_connection_tokens_ = nullptr;
     RequestToken* current_token_;
     // §7.4 poison state machine. Idempotent: the first reason wins

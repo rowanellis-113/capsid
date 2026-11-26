@@ -79,16 +79,19 @@ void emit_worker_log(StructuredLog* log, const WorkerEvent& event) {
     if (log == nullptr) {
         return;
     }
+    const WorkerLogExtra* log_extra = event.log_extra.get();
     LogFields fields;
-    fields.level = event.binding_log ? event.log_level : "info";
+    fields.level = (log_extra && log_extra->binding_log) ? log_extra->log_level : "info";
     fields.event = log_events::kAppLog;
-    fields.app = event.application_id;
-    fields.generation = event.generation_digest;
-    fields.binding = event.binding_id;
+    if (log_extra != nullptr) {
+        fields.app = log_extra->application_id;
+        fields.generation = log_extra->generation_digest;
+        fields.binding = log_extra->binding_id;
+        fields.fields = log_extra->log_fields_json;
+    }
     if (event.request_id != 0) {
         fields.request_id = std::to_string(event.request_id);
     }
-    fields.fields = event.log_fields_json;
     fields.message = event.text;
     log->log(LogLane::kApp, std::move(fields));
 }
@@ -267,21 +270,6 @@ bool prepare_managed_worker_config(const ManagedHostOptions& options,
     }
     if (effective.js_heap_bytes > 0) {
         config.js_heap_limit = effective.js_heap_bytes;
-    }
-#if defined(CAPSID_ASAN_BUILD) || defined(CAPSID_TSAN_BUILD) || defined(__SANITIZE_ADDRESS__) ||   \
-    defined(__SANITIZE_THREAD__)
-    const bool forward_address_space_limit = false;
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-    const bool forward_address_space_limit = false;
-#else
-    const bool forward_address_space_limit = true;
-#endif
-#else
-    const bool forward_address_space_limit = true;
-#endif
-    if (forward_address_space_limit && effective.process_address_bytes > 0) {
-        config.process_memory_limit = effective.process_address_bytes;
     }
     capsid_resource_limits_init(&limits);
     if (effective.file_descriptors > 0) {
@@ -467,8 +455,9 @@ WarmResult warm_worker(const ManagedHostOptions& options, const std::string& ten
                     out.error = "invalid worker log before READY";
                     return out;
                 }
-                decoded.application_id = options.application;
-                decoded.generation_digest = generation;
+                auto& log_extra = decoded.ensure_log_extra();
+                log_extra.application_id = options.application;
+                log_extra.generation_digest = generation;
                 emit_worker_log(options.log, decoded);
                 continue;
             }
@@ -578,24 +567,6 @@ WarmPoolResult warm_worker_pool(const ManagedHostOptions& options, const std::st
     }
     out.ok = true;
     return out;
-}
-
-// Publish the warmed pool on the outcome. The legacy single-worker field
-// aliases workers[0] only for an exactly-one-worker pool; any other pool
-// size leaves it null so an old consumer cannot claim just one worker.
-void publish_pool(DeployOutcome* outcome, std::vector<capsid_worker*> workers) {
-    outcome->workers = std::move(workers);
-    if (outcome->workers.size() == 1) {
-        outcome->worker = outcome->workers[0];
-    }
-}
-
-// Destroy and recycle every worker of a pool (a failed deploy's own new
-// pool; the old active pool is never touched).
-void destroy_pool(const std::vector<capsid_worker*>& workers) {
-    for (capsid_worker* worker : workers) {
-        destroy_unadopted_worker(worker);
-    }
 }
 
 // POSIX adapter for the active-state persist contract. All I/O is anchored
@@ -835,15 +806,14 @@ bool reserve_deploy_capacity(ManagedHostOptions* options, const std::string& eff
     *replacement = options->ledger->holds(options->application);
     bool reserved = *replacement ? options->ledger->reserve_replace(options->application, min_ready)
                                  : options->ledger->reserve_fresh(options->application, min_ready);
-    while (!reserved && options->reclaim_elastic_slot && options->reclaim_elastic_slot()) {
+    while (!reserved && options->ledger->reaping_available() && options->reclaim_elastic_slot &&
+           options->reclaim_elastic_slot()) {
         reserved = *replacement ? options->ledger->reserve_replace(options->application, min_ready)
                                 : options->ledger->reserve_fresh(options->application, min_ready);
     }
     if (!reserved) {
-        if (options->metrics != nullptr) {
-            options->metrics->count_pool_rejection(options->application, effective_tenant,
-                                                   "host_capacity_exhausted");
-        }
+        record_pool_rejection(options->metrics, options->log, options->application,
+                              effective_tenant, {}, "host_capacity_exhausted");
         if (error_out != nullptr) {
             *error_out = "worker capacity exceeded";
         }
@@ -851,15 +821,14 @@ bool reserve_deploy_capacity(ManagedHostOptions* options, const std::string& eff
     }
     if (min_ready == 0) {
         bool elastic_ok = options->ledger->try_acquire_elastic(options->application);
-        while (!elastic_ok && options->reclaim_elastic_slot && options->reclaim_elastic_slot()) {
+        while (!elastic_ok && options->ledger->reaping_available() &&
+               options->reclaim_elastic_slot && options->reclaim_elastic_slot()) {
             elastic_ok = options->ledger->try_acquire_elastic(options->application);
         }
         if (!elastic_ok) {
             options->ledger->abort_reserve(options->application, min_ready, *replacement);
-            if (options->metrics != nullptr) {
-                options->metrics->count_pool_rejection(options->application, effective_tenant,
-                                                       "host_capacity_exhausted");
-            }
+            record_pool_rejection(options->metrics, options->log, options->application,
+                                  effective_tenant, {}, "host_capacity_exhausted");
             if (error_out != nullptr) {
                 *error_out = "worker capacity exceeded";
             }
@@ -878,8 +847,7 @@ bool reserve_deploy_capacity(ManagedHostOptions* options, const std::string& eff
 //   - a failed prepare has already destroyed the warmed workers it was
 //     handed (create_adopted's failure contract); the coordinator never
 //     destroys them again,
-//   - on the transactional path the plan owns the pool after prepare, so
-//     the outcome's worker fields are cleared on every exit here,
+//   - prepare adopts the fleet, so the coordinator clears the borrowed view,
 //   - the §9.4 ledger reserve is settled here: commit on success, abort
 //     on a failed persist (a failed warm never reaches this point and
 //     must roll its own reserve back).
@@ -889,47 +857,23 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
                        const std::string& generation_digest, int app_state_fd, bool replacement,
                        OperationStatus* status) {
     status->state = OperationState::kActivating;
-    std::unique_ptr<ActivationPlan> plan;
-    if (options->prepare_activation != nullptr) {
-        // The warmed workers travel on the outcome (const view) so the
-        // prepare callback can adopt the fleet into its own pool; the plan
-        // owns the workers from prepare onward, so the outcome's fields are
-        // cleared on every exit below.
-        outcome->workers = warm;
-        // The transaction callbacks are an all-or-nothing group; a broken
-        // configuration fails the deploy instead of half-publishing.
-        if (options->commit_activation == nullptr || options->abort_activation == nullptr) {
-            destroy_pool(warm);
-            release_pre_acquired_elastic(options, outcome);
-            if (options->ledger)
-                options->ledger->abort_reserve(options->application, outcome->effective.min_ready,
-                                               replacement);
-            release_tenant_quota_for_deploy(options);
-            status->state = OperationState::kFailed;
-            status->error = "activation transaction misconfigured";
-            outcome->error = status->error;
-            outcome->workers.clear();
-            outcome->worker = nullptr;
-            return false;
-        }
-        std::string plan_error;
-        plan = options->prepare_activation(options->application, *outcome, &plan_error);
-        if (plan == nullptr) {
-            // The failed prepare destroyed the warmed workers.
-            release_pre_acquired_elastic(options, outcome);
-            if (options->ledger)
-                options->ledger->abort_reserve(options->application, outcome->effective.min_ready,
-                                               replacement);
-            release_tenant_quota_for_deploy(options);
-            status->state = OperationState::kFailed;
-            status->error = plan_error.empty() ? "cannot activate the new generation" : plan_error;
-            outcome->error = status->error;
-            outcome->workers.clear();
-            outcome->worker = nullptr;
-            return false;
-        }
+    outcome->workers = warm;
+    std::string plan_error;
+    auto plan = options->prepare_activation(options->application, *outcome, &plan_error);
+    outcome->workers.clear();
+    if (plan == nullptr) {
+        // The failed prepare destroyed the warmed workers.
+        release_pre_acquired_elastic(options, outcome);
+        if (options->ledger)
+            options->ledger->abort_reserve(options->application, outcome->effective.min_ready,
+                                           replacement);
+        release_tenant_quota_for_deploy(options);
+        status->state = OperationState::kFailed;
+        status->error = plan_error.empty() ? "cannot activate the new generation" : plan_error;
+        outcome->error = status->error;
+        return false;
     }
-    const auto capacity = plan && plan->new_pool ? plan->new_pool->capacity_lease() : nullptr;
+    const auto capacity = plan->new_pool ? plan->new_pool->capacity_lease() : nullptr;
     if (capacity && replacement && (!plan->old_pool || !plan->old_pool->capacity_lease())) {
         options->abort_activation(plan.get());
         plan->new_pool->stop_and_join();
@@ -938,8 +882,6 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
         status->state = OperationState::kFailed;
         status->error = "replacement capacity ownership missing";
         outcome->error = status->error;
-        outcome->workers.clear();
-        outcome->worker = nullptr;
         return false;
     }
     // ---- persist (may fail) ----
@@ -956,17 +898,9 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
     const ActiveStatePersistResult persisted =
         persist_active_state(document, outcome->operation_id, filesystem);
     if (!persisted.ok) {
-        // Atomic: the failed deploy recycles its own new pool (the plan's
-        // abort, or destroy_pool on the legacy path); the old active.json
-        // and the old active pool stay untouched.
-        if (plan != nullptr) {
-            options->abort_activation(plan.get());
-            if (plan->new_pool)
-                plan->new_pool->stop_and_join();
-        } else {
-            destroy_pool(warm);
-            release_pre_acquired_elastic(options, outcome);
-        }
+        options->abort_activation(plan.get());
+        if (plan->new_pool)
+            plan->new_pool->stop_and_join();
         if (options->ledger != nullptr) {
             if (capacity)
                 capacity->abort(replacement);
@@ -978,8 +912,6 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
         status->state = OperationState::kFailed;
         status->error = "cannot persist active state";
         outcome->error = status->error;
-        outcome->workers.clear();
-        outcome->worker = nullptr;
         return false;
     }
     // ---- commit (noexcept; see activation_transaction.h) ----
@@ -998,20 +930,8 @@ bool finish_activation(ManagedHostOptions* options, DeployOutcome* outcome,
         } else
             options->ledger->commit_fresh(options->application);
     }
-    if (plan != nullptr) {
-        options->commit_activation(plan.get());
-        release_tenant_quota_for_deploy(options);
-        // Ownership moved to the plan: the warmed pointers are stale.
-        outcome->workers.clear();
-        outcome->worker = nullptr;
-    } else {
-        // Legacy caller path: the coordinator hands the owning pool back
-        // without a GenerationPool elastic release hook, so return any
-        // minReady=0 pre-warm slot now that warming/persistence completed.
-        release_pre_acquired_elastic(options, outcome);
-        release_tenant_quota_for_deploy(options);
-        publish_pool(outcome, warm);
-    }
+    options->commit_activation(plan.get());
+    release_tenant_quota_for_deploy(options);
     status->state = OperationState::kActive;
     outcome->ok = true;
     // M2 item 7: §12.1 deploy family — the generation is active; the
@@ -1661,12 +1581,9 @@ std::string host_policy_identity(const HostPolicy& host) {
         out << "ss:" << stream << ';';
     }
     out << "storage:" << (host.storage_allowed ? 1 : 0) << ";stdio:" << (host.stdio_allowed ? 1 : 0)
-        << ";workers:" << host.max_workers << ";ready:" << host.min_ready
-        << ";rps:" << host.max_requests_per_worker << ";mem:" << host.max_worker_memory_bytes
-        << ";qreq:" << host.max_queue_requests << ";qbytes:" << host.max_queue_header_bytes
+        << ";workers:" << host.max_workers << ";rps:" << host.max_requests_per_worker
+        << ";mem:" << host.max_worker_memory_bytes << ";qreq:" << host.max_queue_requests
         << ";qtimeout:" << host.max_queue_timeout_ms
-        << ";streaming:" << host.max_streaming_inflight_per_worker
-        << ";idle:" << host.max_stream_idle_timeout_ms << ";wtimeout:" << host.max_write_timeout_ms
         << ";sandbox:" << (host.strict_sandbox ? 1 : 0);
     if (host.default_request_timeout_ms != 0) {
         out << ";requestTimeoutDefault:" << host.default_request_timeout_ms;
@@ -1695,20 +1612,8 @@ std::string host_policy_identity(const HostPolicy& host) {
     if (host.default_queue_requests != 0) {
         out << ";defQreq:" << host.default_queue_requests;
     }
-    if (host.default_queue_header_bytes != 0) {
-        out << ";defQbytes:" << host.default_queue_header_bytes;
-    }
     if (host.default_queue_timeout_ms != 0) {
         out << ";defQtimeout:" << host.default_queue_timeout_ms;
-    }
-    if (host.default_max_streaming_inflight_per_worker != 0) {
-        out << ";defStreaming:" << host.default_max_streaming_inflight_per_worker;
-    }
-    if (host.default_stream_idle_timeout_ms != 0) {
-        out << ";defIdle:" << host.default_stream_idle_timeout_ms;
-    }
-    if (host.default_write_timeout_ms != 0) {
-        out << ";defWtimeout:" << host.default_write_timeout_ms;
     }
     if (host.default_workers != 0) {
         out << ";defWorkers:" << host.default_workers;
@@ -2049,7 +1954,7 @@ struct PreparedDeployment {
     std::string attestation_json_text;
     std::vector<std::uint8_t> signature_bytes;
     std::string attestation_digest;
-    // The authoritative capsid/app-v1 document, committed verbatim so
+    // The authoritative capsid/app-v2 document, committed verbatim so
     // recovery can re-run schema validation and policy/secret compilation
     // against the current Host authority without the upload boundary.
     std::string capsid_json;
@@ -2146,7 +2051,7 @@ PreparedDeployment prepare_deployment(ManagedHostOptions* options, const std::st
                                 : artifacts.artifacts.bundle.bytes;
 
     // ---- 5. authoritative schema, then policy + secret compilation ----
-    // The capsid/app-v1 document is validated against the frozen schema
+    // The capsid/app-v2 document is validated against the schema
     // first (unknown fields, duplicates, shapes and limits), so the managed
     // boundary cannot bypass the authority with a legacy document shape.
     const std::string capsid_json(artifacts.artifacts.capsid_json.bytes.begin(),
@@ -2776,6 +2681,12 @@ DeployOutcome run_deploy_operation(ManagedHostOptions* options, const std::strin
     status->operation_id = outcome.operation_id;
     status->version = version;
     status->state = OperationState::kValidating;
+    if (!options->prepare_activation || !options->commit_activation || !options->abort_activation) {
+        outcome.error = "activation transaction misconfigured";
+        status->state = OperationState::kFailed;
+        status->error = outcome.error;
+        return outcome;
+    }
     if (!tenant.empty() && !valid_tenant_id(tenant)) {
         outcome.error = "invalid tenant id";
         status->state = OperationState::kFailed;
@@ -3217,6 +3128,12 @@ DeployOutcome run_retire_operation(ManagedHostOptions* options, OperationStatus*
     DeployOutcome outcome;
     outcome.operation_id = unique_operation_id();
     status->operation_id = outcome.operation_id;
+    if (!options->prepare_retire || !options->commit_retire || !options->abort_retire) {
+        outcome.error = "retire transaction misconfigured";
+        status->state = OperationState::kFailed;
+        status->error = outcome.error;
+        return outcome;
+    }
     // Read the current active document, then persist the retired tombstone
     // through the active-state API (previous fields carry the last active
     // generation). The state chain is entered through the verified
@@ -3263,27 +3180,18 @@ DeployOutcome run_retire_operation(ManagedHostOptions* options, OperationStatus*
     // §9.3 retire transaction: prepare_retire before the tombstone
     // persist (may fail), commit_retire after it (noexcept — drain
     // signal + ledger category switch), abort_retire when it failed.
-    std::unique_ptr<RetirePlan> plan;
-    if (options->prepare_retire != nullptr) {
-        if (options->commit_retire == nullptr || options->abort_retire == nullptr) {
-            outcome.error = "retire transaction misconfigured";
-            status->state = OperationState::kFailed;
-            return outcome;
-        }
-        std::string plan_error;
-        plan = options->prepare_retire(options->application, &plan_error);
-        if (plan == nullptr) {
-            outcome.error = plan_error.empty() ? "cannot prepare the retire" : plan_error;
-            status->state = OperationState::kFailed;
-            return outcome;
-        }
+    std::string plan_error;
+    auto plan = options->prepare_retire(options->application, &plan_error);
+    if (!plan) {
+        outcome.error = plan_error.empty() ? "cannot prepare the retire" : plan_error;
+        status->state = OperationState::kFailed;
+        status->error = outcome.error;
+        return outcome;
     }
     const ActiveStatePersistResult persisted =
         persist_active_state(document, outcome.operation_id, filesystem);
     if (!persisted.ok) {
-        if (plan != nullptr) {
-            options->abort_retire(plan.get());
-        }
+        options->abort_retire(plan.get());
         outcome.error = "cannot persist retire tombstone";
         status->state = OperationState::kFailed;
         return outcome;
@@ -3292,15 +3200,14 @@ DeployOutcome run_retire_operation(ManagedHostOptions* options, OperationStatus*
     // count is released when the reaper finished (the pool's
     // on_drain_complete hook).
     if (options->ledger != nullptr) {
-        const auto capacity = plan && plan->pool ? plan->pool->capacity_lease() : nullptr;
+        const auto capacity = plan->pool ? plan->pool->capacity_lease() : nullptr;
         if (capacity)
             capacity->begin_drain();
         else
             options->ledger->begin_retire(options->application,
                                           options->ledger->steady_of(options->application));
     }
-    if (plan != nullptr)
-        options->commit_retire(plan.get());
+    options->commit_retire(plan.get());
     status->state = OperationState::kActive;
     outcome.ok = true;
     // M2 item 7: §12.1 recovery family — a retire is a terminal recovery
@@ -3673,16 +3580,14 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
     if (options->ledger != nullptr &&
         !options->ledger->reserve_fresh(options->application, validated.effective.min_ready)) {
         release_tenant_quota_for_deploy(options);
-        if (options->metrics != nullptr) {
-            options->metrics->count_pool_rejection(options->application, effective_tenant,
-                                                   "host_capacity_exhausted");
-        }
+        record_pool_rejection(options->metrics, options->log, options->application,
+                              effective_tenant, active_generation, "host_capacity_exhausted");
         status->state = OperationState::kFailed;
         status->error = "worker capacity exceeded";
         outcome.error = status->error;
         return outcome;
     }
-    const WarmPoolResult warm = warm_worker_pool(
+    WarmPoolResult warm = warm_worker_pool(
         *options, effective_tenant, validated.effective.min_ready, bundle,
         validated.selected == SelectedArtifactKind::kTrustedBytecode, validated.source_name,
         active_generation, validated.effective, validated.env_values, validated.bindings);
@@ -3710,7 +3615,7 @@ DeployOutcome run_recover_operation(ManagedHostOptions* options, OperationStatus
         *options, effective_tenant, bundle, active_generation,
         validated.selected == SelectedArtifactKind::kTrustedBytecode, validated.source_name,
         validated.effective, validated.env_values, validated.bindings);
-    publish_pool(&outcome, warm.workers);
+    outcome.workers = std::move(warm.workers);
     return outcome;
 }
 
@@ -3740,33 +3645,75 @@ std::string managed_app_status(const ManagedHostOptions& options) {
     // Every result for a configured App carries the canonical "app" field,
     // including the inactive shapes, so the Admin boundary can verify the
     // document belongs to the routed App.
-    const std::string inactive =
-        "{\"active\":false,\"app\":\"" + json_escape(options.application) + "\"}";
+    const AppPoolDiagnostics diagnostics =
+        options.metrics != nullptr ? options.metrics->app_pool_diagnostics(options.application)
+                                   : AppPoolDiagnostics{};
+    const auto append_diagnostics = [&](std::ostringstream& out) {
+        if (!diagnostics.evictions.empty()) {
+            out << ",\"evictions\":{";
+            bool first = true;
+            for (const auto& [reason, count] : diagnostics.evictions) {
+                if (!first) {
+                    out << ',';
+                }
+                first = false;
+                out << '"' << json_escape(reason) << "\":" << count;
+            }
+            out << '}';
+        }
+        if (!diagnostics.last_eviction_reason.empty()) {
+            out << ",\"lastEvictionReason\":\"" << json_escape(diagnostics.last_eviction_reason)
+                << '"';
+        }
+        if (!diagnostics.rejections.empty()) {
+            out << ",\"rejections\":{";
+            bool first = true;
+            for (const auto& [reason, count] : diagnostics.rejections) {
+                if (!first) {
+                    out << ',';
+                }
+                first = false;
+                out << '"' << json_escape(reason) << "\":" << count;
+            }
+            out << '}';
+        }
+        if (!diagnostics.last_rejection_reason.empty()) {
+            out << ",\"lastRejectionReason\":\"" << json_escape(diagnostics.last_rejection_reason)
+                << '"';
+        }
+    };
+    const auto build_inactive = [&]() {
+        std::ostringstream out;
+        out << "{\"active\":false,\"app\":\"" << json_escape(options.application) << '"';
+        append_diagnostics(out);
+        out << '}';
+        return out.str();
+    };
     const int state_fd = open_verified_state_root(options.state_root);
     if (state_fd < 0) {
-        return inactive;
+        return build_inactive();
     }
     const int app_state_fd =
         open_verified_app_state_dir(state_fd, options.application, /*create=*/false);
     close_managed_state_fd(state_fd);
     if (app_state_fd < 0) {
-        return inactive;
+        return build_inactive();
     }
     PosixActiveStateFilesystem filesystem(app_state_fd);
     const ActiveStateReadResult current = filesystem.read_active_file();
     if (current.status != ActiveStateIoStatus::kOk) {
-        return inactive;
+        return build_inactive();
     }
     const ActiveStateDocumentResult parsed =
         parse_active_state_json(options.application, current.bytes);
     if (!parsed.ok) {
-        return inactive;
+        return build_inactive();
     }
     // A retired tombstone carries previousVersion/previousGeneration, not
     // the active document's version/generation. Emit the canonical inactive
     // shape rather than empty identity fields rejected by the Admin boundary.
     if (parsed.document.state == ActiveServiceState::kRetired) {
-        return inactive;
+        return build_inactive();
     }
     std::ostringstream out;
     out << "{\"active\":"
@@ -3776,7 +3723,9 @@ std::string managed_app_status(const ManagedHostOptions& options) {
         out << ",\"tenant\":\"" << json_escape(parsed.document.tenant) << '"';
     }
     out << ",\"version\":\"" << json_escape(parsed.document.version) << "\",\"generation\":\""
-        << json_escape(parsed.document.generation) << "\"}";
+        << json_escape(parsed.document.generation) << '"';
+    append_diagnostics(out);
+    out << '}';
     return out.str();
 }
 

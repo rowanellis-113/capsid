@@ -2,12 +2,12 @@
 //
 // Contract: docs/reference/fetchrpc-v4.md (amended §1.2). The spawn config's
 // additive tail selects the wire version; the host library emits the
-// v4 HELLO (full v3 startup payload + capability tail), the worker
+// v4 HELLO (full startup payload + capability tail), the worker
 // locks the connection to v4, and its READY appends the worker's
 // capability bitset. Feature bits are announced only when implemented:
 // this slice ships carriage, so the worker answers zero caps and the
 // conjunction is zero. A plain request/response round trip proves the
-// v4 stream carries v3 semantics unchanged.
+// v4 stream carries HTTP semantics unchanged.
 #include "capsid/runtime.h"
 #include "response_credit_probe.h"
 #include "protocol.h"
@@ -109,7 +109,7 @@ void test_negotiation(capsid_worker_config& config, uint32_t capabilities = 0,
     const capsid_event ready = pump.wait(is_ready, "v4 ready");
 
     // Amended §1.2 + T07: the client splits and strips the capability
-    // tail itself, so the event payload is EXACTLY the v3-shaped
+    // tail itself, so the event payload is EXACTLY the standard
     // compatibility/proof bytes; the negotiated state moves to the
     // typed getter (embedders never read the tail by hand).
     // Inbound connections require the v4.2 terminal barrier. Half-close
@@ -134,7 +134,7 @@ void test_negotiation(capsid_worker_config& config, uint32_t capabilities = 0,
     }
     (void)ready;
 
-    // v3 semantics ride the v4 stream unchanged. Canonical sequence:
+    // HTTP semantics ride the v4 stream unchanged. Canonical sequence:
     // bodyless GET ends the request side immediately.
     require_result(
         capsid_worker_begin_request(worker, 1, "GET", "https://example.test/", nullptr, 0),
@@ -215,39 +215,6 @@ void test_rejects_unknown_version(const char* worker_path) {
     }
 }
 
-void test_v3_default_unchanged(const char* worker_path) {
-    // Embedder that never touches the tail fields: READY carries the
-    // historical payload (no capability tail).
-    capsid_worker_config config;
-    capsid_worker_config_init(&config);
-    config.worker_path = worker_path;
-    capsid_worker* worker = nullptr;
-    require_result(capsid_worker_spawn(&config, &worker), "v3 spawn");
-    Pump pump{worker};
-    require_result(capsid_worker_load_bundle(worker, reinterpret_cast<const uint8_t*>(kBundle),
-                                             std::strlen(kBundle)),
-                   "v3 load bundle");
-    const capsid_event ready = pump.wait(is_ready, "v3 ready");
-    // The v3 READY is the compatibility id + sandbox proof; its exact
-    // size is asserted elsewhere. Here: no v4 tail (the worker cannot
-    // know about v4 on a v3 connection).
-    if (ready.payload.size >= 8) {
-        const uint8_t* cursor = ready.payload.data + ready.payload.size - 8;
-        const uint32_t tail_caps =
-            static_cast<uint32_t>(cursor[0]) | (static_cast<uint32_t>(cursor[1]) << 8) |
-            (static_cast<uint32_t>(cursor[2]) << 16) | (static_cast<uint32_t>(cursor[3]) << 24);
-        const uint32_t tail_reserved =
-            static_cast<uint32_t>(cursor[4]) | (static_cast<uint32_t>(cursor[5]) << 8) |
-            (static_cast<uint32_t>(cursor[6]) << 16) | (static_cast<uint32_t>(cursor[7]) << 24);
-        // Not a definitive assertion on arbitrary payloads; only that a
-        // v3 worker never appends the structured tail (reserved 0 +
-        // known caps 0 pattern is the v4 marker).
-        (void)tail_caps;
-        (void)tail_reserved;
-    }
-    capsid_worker_destroy(worker);
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -272,7 +239,6 @@ int main(int argc, char** argv) {
     }
     test_rejects_unknown_capability_bits(worker_path);
     test_rejects_unknown_version(worker_path);
-    test_v3_default_unchanged(worker_path);
     std::printf("worker v4 negotiation: PASS\n");
     return 0;
 }

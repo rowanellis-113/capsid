@@ -88,8 +88,8 @@ run_fixture() {
 # version must atomically replace all three commands rather than preserving
 # symlinks into the old archive. Also assert the default CAPSID_REPO targets
 # rowanellis-113/capsid rather than any historical owner.
-linux_one="$work/capsid-0.2.0-linux-musl.tar.gz"
-linux_two="$work/capsid-0.2.1-linux-musl.tar.gz"
+linux_one="$work/capsid-0.2.0-linux-musl-x86_64.tar.gz"
+linux_two="$work/capsid-0.2.1-linux-musl-x86_64.tar.gz"
 make_package one "$linux_one" ""
 make_package two "$linux_two" ""
 default_repo_log="$work/default-repo.log"
@@ -122,7 +122,7 @@ done
 
 # A release missing one required binary is never reported as installed.
 mkdir -p "$work/incomplete-asset"
-incomplete="$work/incomplete-asset/capsid-0.2.0-linux-musl.tar.gz"
+incomplete="$work/incomplete-asset/capsid-0.2.0-linux-musl-x86_64.tar.gz"
 make_package incomplete "$incomplete" "" capsid-bytecode-compile
 if run_fixture Linux x86_64 "$incomplete" "$work/incomplete-prefix" \
     v0.2.0-rc.07; then
@@ -141,7 +141,9 @@ darwin_arm="$work/capsid-0.3.0-darwin-arm64.tar.gz"
 make_package mac-x86 "$darwin_x86" ""
 make_package mac-arm "$darwin_arm" ""
 mixed_json="{\"tag_name\":\"v0.3.0\",\"assets\":["
-for archive in "$linux_one" "$linux_arm" "$darwin_arm" "$linux_x86" "$darwin_x86"; do
+unqualified="$work/capsid-0.2.0-linux-musl.tar.gz"
+make_package unqualified "$unqualified" ""
+for archive in "$unqualified" "$linux_arm" "$darwin_arm" "$linux_x86" "$darwin_x86"; do
     asset="$(basename "$archive")"
     mixed_json="${mixed_json}{\"browser_download_url\":\"https://fixture.invalid/$asset.sha256\"},{\"browser_download_url\":\"https://fixture.invalid/$asset\"},"
 done
@@ -181,11 +183,10 @@ if grep -q 'https://fixture.invalid/' "$log"; then
     exit 1
 fi
 
-# ARM64 cannot fall back to a legacy x86_64 archive, and 32-bit/unknown
-# architectures cannot be mislabeled as either supported 64-bit target.
-for machine in aarch64 arm64 i686 riscv64; do
+# Every supported architecture requires an explicit suffix. Unknown CPUs also fail.
+for machine in x86_64 amd64 aarch64 arm64 i686 riscv64; do
     log="$work/reject-$machine.log"
-    if CAPSID_FAKE_REQUEST_LOG="$log" run_fixture Linux "$machine" "$linux_one" \
+    if CAPSID_FAKE_REQUEST_LOG="$log" run_fixture Linux "$machine" "$unqualified" \
         "$work/reject-$machine" v0.2.0-rc.07; then
         echo "FAIL: install.sh accepted an incompatible Linux package: $machine" >&2
         exit 1
@@ -196,4 +197,4 @@ for machine in aarch64 arm64 i686 riscv64; do
     fi
 done
 
-echo "PASS: installer legacy compatibility, explicit CPU selection and rejection controls"
+echo "PASS: explicit package architecture, installation and rejection controls"

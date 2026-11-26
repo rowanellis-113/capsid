@@ -8,12 +8,7 @@
 //      queue, returns an operation ID immediately, and owns observable
 //      validating -> terminal operation status without leaking inner errors.
 
-#if __has_include("host/managed_admin_backend.h")
 #include "host/managed_admin_backend.h"
-#define CAPSID_HAS_MANAGED_ADMIN_BACKEND 1
-#else
-#define CAPSID_HAS_MANAGED_ADMIN_BACKEND 0
-#endif
 
 #include "host/admin_api.h"
 #include "host/managed_host.h"
@@ -40,6 +35,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -57,8 +53,6 @@ void require(bool condition, const std::string& message) {
         fail(message);
     }
 }
-
-#if CAPSID_HAS_MANAGED_ADMIN_BACKEND
 
 bool valid_operation_id(const std::string& value) {
     if (value.empty() || value.size() > 64) {
@@ -217,17 +211,12 @@ struct StateFixture {
     }
 };
 
-#endif
-
 } // namespace
 
 int main(int argc, char** argv) {
     require(argc == 2, "expected one managed Admin backend test mode");
     const std::string mode = argv[1];
 
-#if !CAPSID_HAS_MANAGED_ADMIN_BACKEND
-    fail("managed Admin backend is not implemented: " + mode);
-#else
     if (mode == "host_admin_async_deploy_progress") {
         BlockingAdminBackend inner;
         capsid::host::AsyncAdminBackendOptions options;
@@ -291,6 +280,16 @@ int main(int argc, char** argv) {
         capsid::host::ManagedHostOptions payments;
         payments.application = "payments";
         payments.state_root = state.root;
+        std::string committed_application;
+        orders.prepare_retire = [](const std::string& application, std::string*) {
+            auto plan = std::make_unique<capsid::host::RetirePlan>();
+            plan->application = application;
+            return plan;
+        };
+        orders.commit_retire = [&](capsid::host::RetirePlan* plan) {
+            committed_application = plan->application;
+        };
+        orders.abort_retire = [](capsid::host::RetirePlan*) { fail("unexpected retire abort"); };
         std::vector<capsid::host::ManagedHostOptions*> applications = {
             &orders,
             &payments,
@@ -306,7 +305,8 @@ int main(int argc, char** argv) {
 
         capsid::host::OperationStatus retire_status;
         const capsid::host::DeployOutcome retired = backend.retire("orders", &retire_status);
-        require(retired.ok && retire_status.operation_id == retired.operation_id,
+        require(retired.ok && retire_status.operation_id == retired.operation_id &&
+                    committed_application == "orders",
                 "managed Admin backend did not invoke real retire");
         const std::string retired_state = state.read_active("orders");
         require(retired_state.find("\"state\":\"retired\"") != std::string::npos &&
@@ -371,5 +371,4 @@ int main(int argc, char** argv) {
     }
 
     fail("unknown managed Admin backend test mode: " + mode);
-#endif
 }

@@ -170,29 +170,24 @@ struct Fixture {
                 "cannot create managed executable directory tree");
         create_application("orders");
 
-        // Every path and authority is explicit. No TCP listener is present:
-        // managed mode must not turn a missing listeners array into an
-        // accidental public endpoint.
-        const std::string document = "{\"apiVersion\":\"capsid/host-v1\","
-                                     "\"applicationsRoot\":\"" +
-                                     applications_root +
-                                     "\","
-                                     "\"stateRoot\":\"" +
-                                     state_root +
-                                     "\","
-                                     "\"secretRootTemplate\":\"" +
-                                     secret_root +
-                                     "/{application}\","
+        // Every path and authority is explicit.
+        const std::string document = "{\"apiVersion\":\"capsid/host-v2\","
+                                     "\"paths\":{\"applications\":\"" +
+                                     applications_root + "\",\"state\":\"" + state_root +
+                                     "\",\"secrets\":\"" + secret_root +
+                                     "/{application}\"},"
                                      "\"admin\":{\"unix\":\"" +
                                      socket_path +
-                                     "\",\"mode\":\"0600\"},"
+                                     "\"},"
+                                     "\"listeners\":[{\"name\":\"default\",\"tcp\":\"127.0.0.1:0\","
+                                     "\"routing\":{\"mode\":\"path\"}}],"
                                      "\"permissions\":{\"modules\":[\"capsid:env\"],"
                                      "\"environmentNames\":[\"APP_*\"],\"fsReadRoots\":[],"
                                      "\"fetchTargets\":[],\"storageNamespaces\":[],"
                                      "\"stdioStreams\":[]},"
                                      "\"isolation\":{\"mode\":\"strict\",\"required\":[]},"
-                                     "\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000}},"
-                                     "\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}}";
+                                     "\"maximums\":{\"request\":{\"maxInflight\":10000}},"
+                                     "\"capacity\":{\"workersTotal\":1}}";
         write_file(host_config, document);
         write_file(blocking_worker_path, "#!/bin/sh\nexec /bin/sleep 30\n");
         require(chmod(blocking_worker_path.c_str(), 0700) == 0,
@@ -215,7 +210,7 @@ struct Fixture {
                 "cannot create managed executable Version fixture");
         write_file(
             version + "/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1}})json");
         write_file(version + "/bundle.mjs",
                    "export default { fetch: () => new Response('" + fetch_body + "') };");
     }
@@ -530,9 +525,9 @@ int pick_port() {
     return port;
 }
 
-// Inserts `count` path-mode public listener entries before the capacity
-// block. count > 1 models the §9.2 fail-closed gate (the v1 data plane is
-// exactly one listener), which must reject startup before any bind.
+// Replaces the fixture's default listener with `count` path-mode public
+// listener entries bound to `port`. count > 1 models the single-listener
+// fail-closed gate, which must reject startup before any bind.
 void add_public_listener(Fixture& fixture, int port, unsigned count = 1) {
     std::string fragment = "\"listeners\":[";
     for (unsigned index = 0; index < count; ++index) {
@@ -541,11 +536,13 @@ void add_public_listener(Fixture& fixture, int port, unsigned count = 1) {
         }
         fragment += "{\"name\":\"public-" + std::to_string(index) +
                     "\",\"tcp\":\"127.0.0.1:" + std::to_string(port) +
-                    "\",\"publicScheme\":\"http\",\"publicAuthority\":\"localhost\","
+                    "\",\"publicOrigin\":\"http://localhost\","
                     "\"trusted\":false,\"routing\":{\"mode\":\"path\"}}";
     }
-    fragment += "],";
-    fixture.replace_host_text("\"capacity\":", fragment + "\"capacity\":");
+    fragment += "]";
+    fixture.replace_host_text("\"listeners\":[{\"name\":\"default\",\"tcp\":\"127.0.0.1:0\","
+                              "\"routing\":{\"mode\":\"path\"}}]",
+                              fragment);
 }
 
 // One raw HTTP/1.1 exchange against the TCP data-plane listener; reads
@@ -700,7 +697,7 @@ std::string active_generation(const Fixture& fixture) {
 
 // --- item 5a: worker crash observation helpers ---
 //
-// The managed worker is the Host's direct child (capsid_worker_spawn uses
+// The managed worker is the Host's direct child (capsid_worker_spawn_ex uses
 // posix_spawn). Linux /proc exposes the Host's live children; a SIGKILLed
 // worker stays in the children list as a zombie (the Host reaps it only
 // when it destroys the capsid_worker), so the state char in
@@ -860,8 +857,8 @@ std::string crash_to_quarantine(const Fixture& fixture) {
 // must not depend on the default policy to reach quarantine within a test
 // deadline.
 void configure_small_crash_budget(Fixture& fixture) {
-    fixture.replace_host_text("\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}}",
-                              "\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1},"
+    fixture.replace_host_text("\"capacity\":{\"workersTotal\":1}}",
+                              "\"capacity\":{\"workersTotal\":1},"
                               "\"recovery\":{\"crashBudget\":{\"maxEvents\":2,"
                               "\"window\":\"60s\"}}}");
 }
@@ -1088,20 +1085,18 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (mode == "host_managed_executable_enforces_queue_maximums") {
-        // E-1 §10.3: host.json maximums.pool.queueRequests caps the App
-        // queue; an App whose pool.queueRequests exceeds it must fail the
-        // deploy (the zero-consumption field now has a consumer).
-        fixture.replace_host_text("\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000}}",
-                                  "\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000},"
-                                  "\"pool\":{\"queueRequests\":8,\"queueHeaderBytes\":\"1MiB\","
-                                  "\"queueTimeout\":\"1s\"}}");
+        // host.json maximums.pool.queueRequests caps the App queue; an App
+        // whose pool.queueRequests exceeds it must fail the deploy.
+        fixture.replace_host_text("\"maximums\":{\"request\":{\"maxInflight\":10000}}",
+                                  "\"maximums\":{\"request\":{\"maxInflight\":10000},"
+                                  "\"pool\":{\"queueRequests\":8,\"queueTimeout\":\"1s\"}}");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);
 
         // A compliant queue deploys active.
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1,"queueRequests":4,"queueHeaderBytes":"512KiB","queueTimeout":"250ms"}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1,"queueRequests":4,"queueTimeout":"250ms"}})json");
         const std::string compliant = deploy(fixture);
         require(wait_terminal_state(fixture, compliant) == "active",
                 "queue within the Host maximums did not deploy active");
@@ -1109,7 +1104,7 @@ int main(int argc, char** argv) {
         // An over-ceiling queue fails the deploy.
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1,"queueRequests":16,"queueHeaderBytes":"512KiB","queueTimeout":"250ms"}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1,"queueRequests":16,"queueTimeout":"250ms"}})json");
         const std::string overreach = deploy(fixture);
         require(wait_terminal_state(fixture, overreach) == "failed",
                 "queue above the Host maximums deployed");
@@ -1120,32 +1115,29 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_executable_enforces_streaming_maximums") {
-        // E-2 §9.3: host.json maximums.request.maxStreamingInflightPerWorker
-        // caps the App streaming permit; an App whose request exceeds it
-        // must fail the deploy (the zero-consumption field now has a
-        // consumer).
-        fixture.replace_host_text("\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000}}",
-                                  "\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000,"
-                                  "\"maxStreamingInflightPerWorker\":2,"
-                                  "\"streamIdleTimeoutMs\":120000}}");
+        // Config v2 owns stream idle timeouts on the listener, and rejects
+        // legacy per-App streaming override fields fail-closed.
+        fixture.replace_host_text(
+            "\"routing\":{\"mode\":\"path\"}",
+            "\"routing\":{\"mode\":\"path\"},\"limits\":{\"streamIdleTimeout\":\"120s\"}");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);
 
-        // A compliant streaming config deploys active.
+        // A compliant v2 App deploys active.
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"request":{"maxStreamingInflightPerWorker":1,"streamIdleTimeoutMs":90000}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1}})json");
         const std::string compliant = deploy(fixture);
         require(wait_terminal_state(fixture, compliant) == "active",
-                "SSE permit within the Host maximums did not deploy active");
+                "compliant v2 App under listener streamIdleTimeout did not deploy active");
 
-        // An over-ceiling streaming config fails the deploy.
+        // Legacy per-App streaming fields are rejected fail-closed.
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"request":{"maxStreamingInflightPerWorker":4,"streamIdleTimeoutMs":90000}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"request":{"maxStreamingInflightPerWorker":4,"streamIdleTimeoutMs":90000}})json");
         const std::string overreach = deploy(fixture);
         require(wait_terminal_state(fixture, overreach) == "failed",
-                "SSE permit above the Host maximums deployed");
+                "legacy per-App streaming fields deployed");
         require_active_app(fixture);
         stop_host(fixture);
         std::cout << "PASS" << std::endl;
@@ -1153,30 +1145,29 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_executable_enforces_write_timeout_maximum") {
-        // E-3 §9.2: host.json maximums.request.writeTimeoutMs caps the App
-        // slow-client write deadline; an App that exceeds it must fail the
-        // deploy (same cap-only consumption as the E-2 streaming maximums).
-        fixture.replace_host_text("\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000}}",
-                                  "\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000,"
-                                  "\"writeTimeoutMs\":60000}}");
+        // Config v2 owns writeTimeout on the listener, and rejects legacy
+        // per-App request.writeTimeoutMs fail-closed.
+        fixture.replace_host_text(
+            "\"routing\":{\"mode\":\"path\"}",
+            "\"routing\":{\"mode\":\"path\"},\"limits\":{\"writeTimeout\":\"60s\"}");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);
 
-        // A compliant write deadline deploys active.
+        // A compliant v2 App deploys active.
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"request":{"writeTimeoutMs":5000}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1}})json");
         const std::string compliant = deploy(fixture);
         require(wait_terminal_state(fixture, compliant) == "active",
-                "write deadline within the Host maximum did not deploy active");
+                "compliant v2 App under listener writeTimeout did not deploy active");
 
-        // An over-ceiling write deadline fails the deploy.
+        // Legacy per-App writeTimeoutMs is rejected fail-closed.
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"request":{"writeTimeoutMs":300000}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"request":{"writeTimeoutMs":300000}})json");
         const std::string overreach = deploy(fixture);
         require(wait_terminal_state(fixture, overreach) == "failed",
-                "write deadline above the Host maximum deployed");
+                "legacy per-App writeTimeoutMs deployed");
         require_active_app(fixture);
         stop_host(fixture);
         std::cout << "PASS" << std::endl;
@@ -1290,7 +1281,7 @@ int main(int argc, char** argv) {
         write_file(secret_dir + "/api-token", canary);
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_TOKEN":{"valueFrom":"api-token"}}},"pool":{"minReady":1,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"],"env":{"APP_TOKEN":{"valueFrom":"api-token"}}},"pool":{"workers":1}})json");
         replace_file(fixture.applications_root + "/orders/v1/bundle.mjs",
                      "import { env } from 'capsid:env';\n"
                      "export default { fetch: () => "
@@ -1759,12 +1750,6 @@ int main(int argc, char** argv) {
         // owns the App operation lock while the old generation exhausts
         // its budget. No protocol messages or Worker replies are faked.
         configure_small_crash_budget(fixture);
-        fixture.replace_host_text(
-            "\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}",
-            "\"capacity\":{\"workersTotal\":1,\"activationSurgeWorkers\":1,\"startupsConcurrent\":2}");
-        fixture.replace_host_text(
-            "\"recovery\":{\"crashBudget\":",
-            "\"recovery\":{\"restartBackoff\":{\"initial\":\"20ms\",\"maximum\":\"100ms\",\"jitter\":\"0%\"},\"crashBudget\":");
         const int port = pick_port();
         add_public_listener(fixture, port);
         fixture.create_version("orders", "v2", "quarantine-new-generation");
@@ -2014,11 +1999,10 @@ int main(int argc, char** argv) {
     if (mode == "host_managed_executable_crash_loop_does_not_starve_other_app") {
         Fixture fixture;
         fixture.create_application("invoices");
-        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}",
-                                  "\"capacity\":{\"workersTotal\":2,\"startupsConcurrent\":2},"
+        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1}}",
+                                  "\"capacity\":{\"workersTotal\":2},"
                                   "\"recovery\":{\"crashBudget\":{\"maxEvents\":5,"
-                                  "\"window\":\"60s\"},\"restartBackoff\":{\"initial\":\"250ms\","
-                                  "\"maximum\":\"30s\",\"jitter\":\"0%\"}}");
+                                  "\"window\":\"60s\"}}}");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);
         const std::string orders_operation = deploy(fixture, "orders", "v1");
@@ -2081,7 +2065,7 @@ int main(int argc, char** argv) {
         Fixture fixture;
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"healthCheck":{"path":"/health","timeout":"500ms"}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"healthCheck":{"path":"/health","timeout":"500ms"}})json");
         replace_file(fixture.applications_root + "/orders/v1/bundle.mjs",
                      "export default { fetch: (request) => {"
                      // The probe delivers the data-plane URL shape (absolute URL,
@@ -2092,13 +2076,11 @@ int main(int argc, char** argv) {
                      "  }"
                      "  return new Response('managed-executable-ok');"
                      "} };");
-        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}",
-                                  "\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1},"
-                                  "\"recovery\":{\"activeHealthInterval\":\"250ms\","
-                                  "\"activeHealthFailures\":2,"
-                                  "\"crashBudget\":{\"maxEvents\":2,\"window\":\"60s\"},"
-                                  "\"restartBackoff\":{\"initial\":\"250ms\",\"maximum\":\"30s\","
-                                  "\"jitter\":\"0%\"}}");
+        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1}}",
+                                  "\"capacity\":{\"workersTotal\":1},"
+                                  "\"recovery\":{\"healthCheck\":{\"interval\":\"250ms\","
+                                  "\"failures\":2},"
+                                  "\"crashBudget\":{\"maxEvents\":2,\"window\":\"60s\"}}}");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);
         const std::string operation = deploy(fixture);
@@ -2137,14 +2119,12 @@ int main(int argc, char** argv) {
         Fixture fixture;
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":1},"healthCheck":{"path":"/health","timeout":"500ms"}})json");
-        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}",
-                                  "\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1},"
-                                  "\"recovery\":{\"activeHealthInterval\":\"250ms\","
-                                  "\"activeHealthFailures\":2,"
-                                  "\"crashBudget\":{\"maxEvents\":2,\"window\":\"60s\"},"
-                                  "\"restartBackoff\":{\"initial\":\"250ms\",\"maximum\":\"30s\","
-                                  "\"jitter\":\"0%\"}}");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":1},"healthCheck":{"path":"/health","timeout":"500ms"}})json");
+        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1}}",
+                                  "\"capacity\":{\"workersTotal\":1},"
+                                  "\"recovery\":{\"healthCheck\":{\"interval\":\"250ms\","
+                                  "\"failures\":2},"
+                                  "\"crashBudget\":{\"maxEvents\":2,\"window\":\"60s\"}}}");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);
         const std::string operation = deploy(fixture);
@@ -2205,10 +2185,9 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_executable_rejects_unsafe_admin_mode") {
-        // host-v1 currently has no management-group field. Consequently a
-        // group/world-accessible pathname cannot be authorized coherently;
-        // managed mode must keep the production Admin socket at exact 0600.
-        fixture.replace_host_text("\"mode\":\"0600\"", "\"mode\":\"0666\"");
+        // host-v2 fixes the production Admin socket at 0600 and rejects any
+        // explicit admin.mode field fail-closed.
+        fixture.replace_host_text("\"admin\":{\"unix\":", "\"admin\":{\"mode\":\"0666\",\"unix\":");
         start_host(fixture, argv[2], argv[3]);
         require_startup_rejected(fixture, std::chrono::seconds(1 * kTestWaitScale));
         std::cout << "PASS" << std::endl;
@@ -2238,10 +2217,10 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_executable_rejects_negative_max_inflight") {
-        // Release hardening: a negative maximums.request.maxInflightPerWorker
+        // Release hardening: a negative maximums.request.maxInflight
         // must fail startup (the unsigned cast would otherwise accept it).
-        fixture.replace_host_text("\"maximums\":{\"request\":{\"maxInflightPerWorker\":10000}}",
-                                  "\"maximums\":{\"request\":{\"maxInflightPerWorker\":-5}}");
+        fixture.replace_host_text("\"maximums\":{\"request\":{\"maxInflight\":10000}}",
+                                  "\"maximums\":{\"request\":{\"maxInflight\":-5}}");
         start_host(fixture, argv[2], argv[3]);
         require_startup_rejected(fixture, std::chrono::seconds(1 * kTestWaitScale));
         std::cout << "PASS" << std::endl;
@@ -2249,7 +2228,7 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_executable_rejects_zero_or_negative_pool_bounds") {
-        // Release hardening: capsid.json pool bounds below 1 must fail the
+        // Release hardening: capsid.json invalid pool bounds must fail the
         // deploy, never spin up a zero/negative worker pool or overflow into
         // the uint32 cast.
         fixture.create_version("orders", "v2");
@@ -2258,28 +2237,28 @@ int main(int argc, char** argv) {
 
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":0,"maxWorkers":1}})json");
-        const std::string zero_min = deploy(fixture, "orders", "v1");
-        require(wait_terminal_state(fixture, zero_min) == "failed",
-                "pool.minReady=0 deployed active");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"workers":0}})json");
+        const std::string zero_workers = deploy(fixture, "orders", "v1");
+        require(wait_terminal_state(fixture, zero_workers) == "failed",
+                "pool.workers=0 deployed active");
 
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":-2,"maxWorkers":1}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":-2,"maxWorkers":1}})json");
         const std::string negative_min = deploy(fixture, "orders", "v1");
         require(wait_terminal_state(fixture, negative_min) == "failed",
                 "pool.minReady=-2 deployed active");
 
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":0}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":0}})json");
         const std::string zero_max = deploy(fixture, "orders", "v1");
         require(wait_terminal_state(fixture, zero_max) == "failed",
                 "pool.maxWorkers=0 deployed active");
 
         replace_file(
             fixture.applications_root + "/orders/v1/capsid.json",
-            R"json({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":-3}})json");
+            R"json({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":["capsid:env"]},"pool":{"minReady":1,"maxWorkers":-3}})json");
         const std::string negative_max = deploy(fixture, "orders", "v1");
         require(wait_terminal_state(fixture, negative_max) == "failed",
                 "pool.maxWorkers=-3 deployed active");
@@ -2306,12 +2285,9 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "host_managed_executable_redeploys_with_capacity_one") {
-        // §9.4: workersTotal=1 is the steady budget; a zero-downtime
-        // replacement overlaps the old and new pools, so the fixture
-        // grants one surge slot.
-        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}",
-                                  "\"capacity\":{\"workersTotal\":1,\"activationSurgeWorkers\":1,"
-                                  "\"startupsConcurrent\":1}");
+        // host-v2 automatically derives activationSurgeWorkers >= 2 so a
+        // zero-downtime replacement of a 1-worker App succeeds when
+        // capacity.workersTotal == 1.
         fixture.create_version("orders", "v2");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);
@@ -2381,6 +2357,26 @@ int main(int argc, char** argv) {
                 "capsid_pool_rejections_total{app=\"peer\",tenant=\"shared\",reason=\"tenant_hard_memory\"} 1") !=
                 std::string::npos,
             "peer deploy failed without the expected tenant memory rejection");
+        // C1 3-surface parity: Admin GET /v1/apps/peer and structured logs
+        // report the exact same canonical rejection reason as /metrics.
+        json_t* peer_status = parse_response(
+            http_request(fixture.socket_path, "GET /v1/apps/peer HTTP/1.1\r\nHost: local\r\n\r\n"),
+            200);
+        json_t* rejections = json_object_get(peer_status, "rejections");
+        json_t* last_rejection = json_object_get(peer_status, "lastRejectionReason");
+        require(json_is_object(rejections) &&
+                    json_integer_value(json_object_get(rejections, "tenant_hard_memory")) == 1 &&
+                    json_is_string(last_rejection) &&
+                    std::string(json_string_value(last_rejection)) == "tenant_hard_memory",
+                "Admin /v1/apps/peer omitted canonical tenant_hard_memory rejection diagnostics");
+        json_decref(peer_status);
+        const std::string diag = fixture.diagnostics();
+        require(diag.find("\"event\":\"pool_rejection\"") != std::string::npos &&
+                    diag.find("\"app\":\"peer\"") != std::string::npos &&
+                    diag.find("\"tenant\":\"shared\"") != std::string::npos &&
+                    diag.find("\"reason\":\"tenant_hard_memory\"") != std::string::npos,
+                "Structured logs omitted canonical pool_rejection entry for tenant_hard_memory: " +
+                    diag);
         close(fd);
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(10 * kTestWaitScale);
@@ -2406,9 +2402,8 @@ int main(int argc, char** argv) {
         // workersTotal of 1 must grow to fit both (§9.6-7). §9.4: the
         // in-place replacement below overlaps the old and new generations,
         // so one surge slot is granted.
-        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1,\"startupsConcurrent\":1}",
-                                  "\"capacity\":{\"workersTotal\":4,\"activationSurgeWorkers\":1,"
-                                  "\"startupsConcurrent\":1}");
+        fixture.replace_host_text("\"capacity\":{\"workersTotal\":1}",
+                                  "\"capacity\":{\"workersTotal\":4}");
         fixture.create_application("payments", "payments-executable-ok");
         start_host(fixture, argv[2], argv[3]);
         wait_for_socket(fixture);

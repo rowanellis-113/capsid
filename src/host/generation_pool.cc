@@ -57,6 +57,11 @@ void count_event(MetricsRegistry* metrics, const std::string& event, const std::
 GenerationPool::GenerationPool(GenerationPoolOptions options)
     : options_(std::move(options)), policy_(options_.recovery),
       min_ready_(options_.has_min_ready ? options_.min_ready : options_.workers) {
+    std::random_device rd;
+    const std::uint64_t seed = (static_cast<std::uint64_t>(rd()) << 32U) ^
+                               static_cast<std::uint64_t>(rd()) ^ steady_ms() ^
+                               static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this));
+    jitter_rng_.seed(seed);
     recovery_state_.application = options_.application_id;
     recovery_state_.generation = options_.generation_digest;
     lifecycle_.phase = ServiceLifecyclePhase::kActive;
@@ -523,24 +528,33 @@ bool GenerationPool::recycle_worker(WorkerExecutor* target) {
     observation.target_ready_workers = min_ready_;
     observation.replacements_in_flight_for_app =
         static_cast<std::uint32_t>(replacements_scheduled_);
-    observation.chosen_jitter_basis_points = 0; // deterministic v1
+    observation.chosen_jitter_basis_points = sample_recovery_jitter_locked();
     count_event(options_.metrics, "unhealthy", options_.application_id, options_.generation_digest);
     record_instability(slot, observation, "unhealthy");
-    bool release_elastic = false;
+    std::vector<WorkerExecutor*> handoff_targets;
+    std::function<bool()> handoff_cb;
     std::function<void()> release_cb;
     if (!quarantine_waiting_) {
         s.executor->request_shutdown();
         if (!s.replacement_in_flight && !s.needs_replacement && ready_after >= min_ready_) {
-            retired_.push_back(std::move(s.executor));
-            if (settle_evicted_slot_elastic_locked(s)) {
-                release_elastic = true;
+            const bool release_elastic = settle_evicted_slot_elastic_locked(s);
+            WorkerExecutor* retired_ptr = s.executor.get();
+            RetiredExecutor entry;
+            entry.executor = std::move(s.executor);
+            if (release_elastic &&
+                (options_.handoff_elastic_to_reaping || options_.release_elastic_slot)) {
+                entry.charge = RetiredExecutor::Charge::kHandoffPending;
+                ++reaping_handoffs_in_flight_;
+                handoff_targets.push_back(retired_ptr);
+                handoff_cb = options_.handoff_elastic_to_reaping;
                 release_cb = options_.release_elastic_slot;
             }
+            retired_.push_back(std::move(entry));
         }
     }
-    if (release_elastic && release_cb) {
+    if (!handoff_targets.empty()) {
         lock.unlock();
-        release_cb();
+        complete_retired_handoffs(handoff_targets, handoff_cb, release_cb);
     }
     return true;
 }
@@ -592,10 +606,9 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* re
             if (rejection_reason != nullptr) {
                 *rejection_reason = "app_max_workers";
             }
-            if (options_.metrics != nullptr) {
-                options_.metrics->count_pool_rejection(options_.application_id,
-                                                       std::string(tenant_id()), "app_max_workers");
-            }
+            record_pool_rejection(options_.metrics, options_.log, options_.application_id,
+                                  std::string(tenant_id()), options_.generation_digest,
+                                  "app_max_workers");
             return ScaleOutResult::kAtAppMax;
         }
         needs_elastic = non_elastic_active >= min_ready_;
@@ -657,10 +670,8 @@ GenerationPool::ScaleOutResult GenerationPool::request_scale_out(std::string* re
         if (rejection_reason != nullptr) {
             *rejection_reason = reason;
         }
-        if (options_.metrics != nullptr) {
-            options_.metrics->count_pool_rejection(options_.application_id,
-                                                   std::string(tenant_id()), reason);
-        }
+        record_pool_rejection(options_.metrics, options_.log, options_.application_id,
+                              std::string(tenant_id()), options_.generation_digest, reason);
         return ScaleOutResult::kCapacityRejected;
     }
 
@@ -746,16 +757,16 @@ std::vector<GenerationPool::WorkerSlotSnapshot> GenerationPool::snapshot_workers
         snap.elastic_held = slot.elastic_held;
         out.push_back(std::move(snap));
     }
-    for (const auto& retired : retired_) {
-        if (retired == nullptr || retired->exited()) {
+    for (const auto& entry : retired_) {
+        if (entry.executor == nullptr || entry.executor->exited()) {
             continue;
         }
         WorkerSlotSnapshot snap;
         snap.slot_index = slots_.size();
-        snap.pid = retired->process_id();
-        snap.cgroup_path = retired->cgroup_path();
-        snap.started_at_ms = retired->started_at_ms();
-        snap.last_active_at_ms = retired->last_active_at_ms();
+        snap.pid = entry.executor->process_id();
+        snap.cgroup_path = entry.executor->cgroup_path();
+        snap.started_at_ms = entry.executor->started_at_ms();
+        snap.last_active_at_ms = entry.executor->last_active_at_ms();
         snap.evictable = false;
         snap.idle = false;
         snap.elastic_held = false;
@@ -777,7 +788,8 @@ bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std
     if (evicted_pid_out != nullptr) {
         *evicted_pid_out = 0;
     }
-    bool release_elastic = false;
+    std::vector<WorkerExecutor*> handoff_targets;
+    std::function<bool()> handoff_cb;
     std::function<void()> release_cb;
     std::function<void(const std::string&)> eviction_cb;
     {
@@ -822,22 +834,30 @@ bool GenerationPool::evict_idle_worker(std::uint64_t min_residency_ms, const std
         victim.ready = false;
         victim.shutdown_issued = true;
         victim.executor->request_shutdown();
-        retired_.push_back(std::move(victim.executor));
-        release_elastic = settle_evicted_slot_elastic_locked(victim);
+        const bool release_elastic = settle_evicted_slot_elastic_locked(victim);
+        WorkerExecutor* retired_ptr = victim.executor.get();
+        RetiredExecutor entry;
+        entry.executor = std::move(victim.executor);
+        if (release_elastic &&
+            (options_.handoff_elastic_to_reaping || options_.release_elastic_slot)) {
+            entry.charge = RetiredExecutor::Charge::kHandoffPending;
+            ++reaping_handoffs_in_flight_;
+            handoff_targets.push_back(retired_ptr);
+            handoff_cb = options_.handoff_elastic_to_reaping;
+            release_cb = options_.release_elastic_slot;
+        }
+        retired_.push_back(std::move(entry));
         if (ready_workers_locked() < min_ready_) {
             stable_since_ms_ = 0;
         }
-        release_cb = options_.release_elastic_slot;
         eviction_cb = options_.on_eviction;
         cv_.notify_all();
     }
-    if (release_elastic && release_cb) {
-        release_cb();
+    if (!handoff_targets.empty()) {
+        complete_retired_handoffs(handoff_targets, handoff_cb, release_cb);
     }
-    if (options_.metrics != nullptr) {
-        options_.metrics->count_pool_eviction(options_.application_id, std::string(tenant_id()),
-                                              reason);
-    }
+    record_pool_eviction(options_.metrics, options_.log, options_.application_id,
+                         std::string(tenant_id()), options_.generation_digest, reason);
     if (eviction_cb) {
         eviction_cb(reason);
     }
@@ -960,6 +980,12 @@ void GenerationPool::set_shared_event_sink(
     options_.shared_event_sink = std::move(sink);
 }
 
+void GenerationPool::set_shared_event_batch_sink(
+    std::function<void(const std::shared_ptr<WorkerExecutor>&, std::vector<WorkerEvent>&)> sink) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    options_.shared_event_batch_sink = std::move(sink);
+}
+
 std::uint64_t GenerationPool::inflight() const {
     std::unique_lock<std::mutex> lock(mutex_);
     std::uint64_t total = 0;
@@ -968,8 +994,10 @@ std::uint64_t GenerationPool::inflight() const {
             total += slot.executor->inflight();
         }
     }
-    for (const auto& retired : retired_) {
-        total += retired->inflight();
+    for (const auto& entry : retired_) {
+        if (entry.executor != nullptr) {
+            total += entry.executor->inflight();
+        }
     }
     return total;
 }
@@ -1064,7 +1092,7 @@ void GenerationPool::pump_loop() {
             }
             drain_check_cycles_.fetch_add(1, std::memory_order_release);
             if (fleet_exited() && replacements_in_flight_ == 0 &&
-                scale_admissions_in_flight_ == 0) {
+                scale_admissions_in_flight_ == 0 && reaping_handoffs_in_flight_ == 0) {
                 // finalize_drain takes the mutex itself; release first.
                 lock.unlock();
                 finalize_drain();
@@ -1073,25 +1101,32 @@ void GenerationPool::pump_loop() {
         }
         // Continuous stability resets the replacement backoff (v1: the
         // pool-wide base — the fleet's last full-READY epoch).
+        std::uint64_t next_stability_due = std::numeric_limits<std::uint64_t>::max();
         if (stable_since_ms_ != 0 && policy_.stable_reset_ms != 0) {
             const std::uint64_t now = steady_ms();
-            if (now - stable_since_ms_ >= policy_.stable_reset_ms) {
+            if (now >= stable_since_ms_ && now - stable_since_ms_ >= policy_.stable_reset_ms) {
                 const WorkerStabilityResult stability =
                     observe_worker_stability(recovery_state_, policy_, stable_since_ms_, now);
                 if (stability.ok) {
                     recovery_state_ = stability.state;
+                    if (stability.backoff_reset && options_.metrics != nullptr) {
+                        options_.metrics->set_recovery_backoff_ms(options_.application_id, 0);
+                    }
                 }
                 stable_since_ms_ = 0;
+            } else if (recovery_state_.replacement_attempts_since_stable > 0) {
+                next_stability_due = stable_since_ms_ + policy_.stable_reset_ms;
             }
         }
         // Idle reaper & replacement launch (§8.3): evict idle slots above
-        // min_ready_ into retired_ (async reaping), freeing elastic slots
-        // immediately without blocking on waitpid, then spawn due replacements.
+        // min_ready_ into retired_ (async reaping), transferring elastic
+        // slots to the bounded reaping set when headroom allows.
         std::uint64_t next_idle_due = std::numeric_limits<std::uint64_t>::max();
         if (state_ == State::kActive && options_.idle_timeout_ms > 0) {
             const std::uint64_t now = steady_ms();
             std::size_t idle_evictions = 0;
-            std::size_t idle_elastic_releases = 0;
+            std::vector<WorkerExecutor*> idle_handoff_targets;
+            std::function<bool()> handoff_cb;
             std::function<void()> release_cb;
             std::function<void(const std::string&)> eviction_cb;
             for (std::size_t rev = slots_.size(); rev > 0; --rev) {
@@ -1114,10 +1149,17 @@ void GenerationPool::pump_loop() {
                     s.ready = false;
                     s.shutdown_issued = true;
                     s.executor->request_shutdown();
-                    retired_.push_back(std::move(s.executor));
-                    if (settle_evicted_slot_elastic_locked(s)) {
-                        ++idle_elastic_releases;
+                    const bool release_elastic = settle_evicted_slot_elastic_locked(s);
+                    WorkerExecutor* retired_ptr = s.executor.get();
+                    RetiredExecutor entry;
+                    entry.executor = std::move(s.executor);
+                    if (release_elastic &&
+                        (options_.handoff_elastic_to_reaping || options_.release_elastic_slot)) {
+                        entry.charge = RetiredExecutor::Charge::kHandoffPending;
+                        ++reaping_handoffs_in_flight_;
+                        idle_handoff_targets.push_back(retired_ptr);
                     }
+                    retired_.push_back(std::move(entry));
                     ++idle_evictions;
                     if (ready_workers_locked() < min_ready_) {
                         stable_since_ms_ = 0;
@@ -1127,17 +1169,17 @@ void GenerationPool::pump_loop() {
                 }
             }
             if (idle_evictions > 0) {
+                handoff_cb = options_.handoff_elastic_to_reaping;
                 release_cb = options_.release_elastic_slot;
                 eviction_cb = options_.on_eviction;
                 lock.unlock();
-                for (std::size_t k = 0; k < idle_elastic_releases && release_cb; ++k) {
-                    release_cb();
+                if (!idle_handoff_targets.empty()) {
+                    complete_retired_handoffs(idle_handoff_targets, handoff_cb, release_cb);
                 }
                 for (std::size_t k = 0; k < idle_evictions; ++k) {
-                    if (options_.metrics != nullptr) {
-                        options_.metrics->count_pool_eviction(
-                            options_.application_id, std::string(tenant_id()), "idle_timeout");
-                    }
+                    record_pool_eviction(options_.metrics, options_.log, options_.application_id,
+                                         std::string(tenant_id()), options_.generation_digest,
+                                         "idle_timeout");
                     if (eviction_cb) {
                         eviction_cb("idle_timeout");
                     }
@@ -1188,18 +1230,24 @@ void GenerationPool::pump_loop() {
                     ++i;
                 }
             }
-            std::vector<std::shared_ptr<WorkerExecutor>> join_retired;
+            std::vector<RetiredExecutor> join_retired;
+            std::function<void()> release_elastic_cb = options_.release_elastic_slot;
+            std::function<void()> release_reaping_cb = options_.release_reaping_slot;
             for (auto it = retired_.begin(); it != retired_.end();) {
-                if (!*it) {
+                if (!it->executor) {
                     it = retired_.erase(it);
                     continue;
                 }
-                if ((*it)->exited()) {
-                    forward_executor_events_locked(*it);
-                    join_retired.push_back(std::move(*it));
+                if (it->charge == RetiredExecutor::Charge::kHandoffPending) {
+                    ++it;
+                    continue;
+                }
+                if (it->executor->exited()) {
+                    forward_executor_events_locked(it->executor);
                     if (options_.on_worker_started) {
-                        observed_retired_.push_back(join_retired.back());
+                        observed_retired_.push_back(it->executor);
                     }
+                    join_retired.push_back(std::move(*it));
                     it = retired_.erase(it);
                 } else {
                     ++it;
@@ -1212,8 +1260,14 @@ void GenerationPool::pump_loop() {
                         thread.join();
                     }
                 }
-                for (const auto& executor : join_retired) {
-                    executor->stop_and_join();
+                for (const auto& entry : join_retired) {
+                    entry.executor->stop_and_join();
+                    if (entry.charge == RetiredExecutor::Charge::kReaping && release_reaping_cb) {
+                        release_reaping_cb();
+                    } else if (entry.charge == RetiredExecutor::Charge::kElastic &&
+                               release_elastic_cb) {
+                        release_elastic_cb();
+                    }
                 }
                 // Release our shared_ptrs outside mutex_ so WorkerExecutor and
                 // its POSIX event wake descriptors close immediately.
@@ -1224,7 +1278,7 @@ void GenerationPool::pump_loop() {
         // Wait for work: an event notification, a replacement/idle deadline,
         // or the drain completing.
         constexpr std::uint64_t kMaxDue = std::numeric_limits<std::uint64_t>::max();
-        std::uint64_t next_due = next_idle_due;
+        std::uint64_t next_due = std::min(next_idle_due, next_stability_due);
         for (const std::uint64_t due : replacement_due_ms_) {
             if (due != kNoDue && due < next_due) {
                 next_due = due;
@@ -1236,7 +1290,8 @@ void GenerationPool::pump_loop() {
         }
         if (!events_pending_ &&
             !(state_ == State::kDraining && !quarantine_waiting_ && fleet_exited() &&
-              replacements_in_flight_ == 0 && scale_admissions_in_flight_ == 0)) {
+              replacements_in_flight_ == 0 && scale_admissions_in_flight_ == 0 &&
+              reaping_handoffs_in_flight_ == 0)) {
             // request_drain changes state without adding an event. Wake
             // an ACTIVE wait on that transition even when live channels
             // still pin the fleet, so the next iteration can enforce the
@@ -1297,8 +1352,11 @@ void GenerationPool::pump_loop() {
             if (slots_[index].executor && forward_executor_events_locked(slots_[index].executor))
                 exited.push_back(index);
         }
-        for (const auto& executor : retired_)
-            forward_executor_events_locked(executor);
+        for (const auto& entry : retired_) {
+            if (entry.executor != nullptr) {
+                forward_executor_events_locked(entry.executor);
+            }
+        }
         std::size_t exit_elastic_releases = 0;
         for (const std::size_t index : exited) {
             if (handle_executor_exit(index)) {
@@ -1322,11 +1380,58 @@ bool GenerationPool::fleet_exited() const {
             return false;
         }
     }
-    for (const auto& retired : retired_) {
-        if (retired != nullptr && !retired->exited())
+    for (const auto& entry : retired_) {
+        if (entry.executor != nullptr && !entry.executor->exited())
             return false;
     }
     return true;
+}
+
+std::int32_t GenerationPool::sample_recovery_jitter_locked() {
+    const std::uint32_t limit_u32 = policy_.jitter_basis_points;
+    if (limit_u32 == 0) {
+        return 0;
+    }
+    const std::int32_t limit = static_cast<std::int32_t>(limit_u32);
+    if (options_.jitter_sampler) {
+        return std::clamp(options_.jitter_sampler(limit_u32), -limit, limit);
+    }
+    std::uniform_int_distribution<std::int32_t> dist(-limit, limit);
+    return dist(jitter_rng_);
+}
+
+void GenerationPool::complete_retired_handoffs(const std::vector<WorkerExecutor*>& targets,
+                                               const std::function<bool()>& handoff_cb,
+                                               const std::function<void()>& release_cb) {
+    std::vector<RetiredExecutor::Charge> outcomes;
+    outcomes.reserve(targets.size());
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        if (handoff_cb) {
+            outcomes.push_back(handoff_cb() ? RetiredExecutor::Charge::kReaping
+                                            : RetiredExecutor::Charge::kElastic);
+        } else {
+            if (release_cb) {
+                release_cb();
+            }
+            outcomes.push_back(RetiredExecutor::Charge::kNone);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            for (RetiredExecutor& entry : retired_) {
+                if (entry.executor.get() == targets[i] &&
+                    entry.charge == RetiredExecutor::Charge::kHandoffPending) {
+                    entry.charge = outcomes[i];
+                    break;
+                }
+            }
+            if (reaping_handoffs_in_flight_ > 0) {
+                --reaping_handoffs_in_flight_;
+            }
+        }
+        cv_.notify_all();
+    }
 }
 
 // Any replacement scheduled (a due present), regardless of whether its
@@ -1364,10 +1469,29 @@ bool GenerationPool::settle_evicted_slot_elastic_locked(Slot& victim) {
     return false;
 }
 
+bool GenerationPool::retire_surplus_locked(Slot& slot) {
+    const bool release = settle_evicted_slot_elastic_locked(slot);
+    if (!slot.executor) {
+        return release;
+    }
+    // An EXIT event can precede the executor's blocking child reap.
+    const bool hold_until_exit = release && !slot.executor->exited();
+    retired_.push_back(RetiredExecutor{std::move(slot.executor),
+                                       hold_until_exit ? RetiredExecutor::Charge::kElastic
+                                                       : RetiredExecutor::Charge::kNone});
+    return release && !hold_until_exit;
+}
+
 bool GenerationPool::forward_executor_events_locked(
     const std::shared_ptr<WorkerExecutor>& executor) {
     bool exited = false;
-    for (WorkerEvent& event : executor->drain_events()) {
+    executor->drain_events_into(&drain_scratch_);
+    if (drain_scratch_.empty()) {
+        return false;
+    }
+    const bool has_shared_single = static_cast<bool>(options_.shared_event_sink);
+    const bool has_shared_batch = static_cast<bool>(options_.shared_event_batch_sink);
+    for (WorkerEvent& event : drain_scratch_) {
         if (event.type == WorkerEvent::Type::kExit) {
             // Each executor queues one exit. Deliver it even if a health recycle
             // already removed this executor from the READY set.
@@ -1377,10 +1501,14 @@ bool GenerationPool::forward_executor_events_locked(
         }
         if (options_.event_sink)
             options_.event_sink(executor.get(),
-                                options_.shared_event_sink ? event : std::move(event));
-        if (options_.shared_event_sink)
-            options_.shared_event_sink(executor, std::move(event));
+                                (has_shared_single || has_shared_batch) ? event : std::move(event));
+        if (has_shared_single)
+            options_.shared_event_sink(executor, has_shared_batch ? event : std::move(event));
     }
+    if (has_shared_batch) {
+        options_.shared_event_batch_sink(executor, drain_scratch_);
+    }
+    drain_scratch_.clear();
     return exited;
 }
 
@@ -1411,7 +1539,7 @@ bool GenerationPool::handle_executor_exit(std::size_t slot) {
         observation.target_ready_workers = min_ready_;
         observation.replacements_in_flight_for_app =
             static_cast<std::uint32_t>(replacements_scheduled_);
-        observation.chosen_jitter_basis_points = 0; // deterministic v1
+        observation.chosen_jitter_basis_points = sample_recovery_jitter_locked();
         count_event(options_.metrics, "crash", options_.application_id, options_.generation_digest);
         record_instability(slot, observation, "crashed");
         recorded_instability = true;
@@ -1423,8 +1551,7 @@ bool GenerationPool::handle_executor_exit(std::size_t slot) {
     if (state_ == State::kActive && !s.replacement_in_flight && !s.needs_replacement &&
         (!recorded_instability || !quarantine_waiting_)) {
         if (s.executor != nullptr && ready_workers_locked() >= min_ready_) {
-            retired_.push_back(std::move(s.executor));
-            return settle_evicted_slot_elastic_locked(s);
+            return retire_surplus_locked(s);
         }
     }
     return false;
@@ -1477,9 +1604,21 @@ void GenerationPool::run_replacement(std::size_t slot) {
                     target.scale_out_spawn = false;
                     target.elastic_held = false;
                     ++replacements_scheduled_;
-                    const std::uint64_t delay_ms =
+                    const std::uint64_t now = steady_ms();
+                    const std::int32_t jitter = sample_recovery_jitter_locked();
+                    std::uint64_t delay_ms =
                         std::max<std::uint64_t>(policy_.backoff_initial_ms, 10ULL);
-                    replacement_due_ms_[recovery_slot] = steady_ms() + delay_ms;
+                    const StartupPermitRefusalDecision refusal =
+                        record_startup_permit_refusal(recovery_state_, policy_, now, jitter);
+                    if (refusal.ok) {
+                        recovery_state_ = refusal.state;
+                        delay_ms = std::max<std::uint64_t>(refusal.retry_delay_ms, 1ULL);
+                        if (options_.metrics != nullptr) {
+                            options_.metrics->set_recovery_backoff_ms(options_.application_id,
+                                                                      refusal.retry_delay_ms);
+                        }
+                    }
+                    replacement_due_ms_[recovery_slot] = now + delay_ms;
                 }
             }
             failed_cb = is_scale_out ? on_scale_out_failed_ : nullptr;
@@ -1492,6 +1631,29 @@ void GenerationPool::run_replacement(std::size_t slot) {
             failed_cb(reason);
         }
     };
+
+    // The floor reservation can cover the successor only after its predecessor
+    // exits or takes a reaping slot. Wait before acquiring a startup permit.
+    if (!is_scale_out && options_.try_acquire_reaping_slot) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto& predecessor = slots_[slot].executor;
+        if (state_ == State::kActive && predecessor && !predecessor->exited()) {
+            // This replacement owns its slot until install or abandon. Drain
+            // waits for this thread, so the executor stays pinned across admission.
+            lock.unlock();
+            const bool reserved = options_.try_acquire_reaping_slot();
+            lock.lock();
+            if (reserved && state_ != State::kActive) {
+                lock.unlock();
+                options_.release_reaping_slot();
+            } else if (reserved) {
+                retired_.push_back(
+                    RetiredExecutor{std::move(predecessor), RetiredExecutor::Charge::kReaping});
+            } else {
+                cv_.wait(lock, [&] { return state_ != State::kActive || predecessor->exited(); });
+            }
+        }
+    }
 
     // §8.3: a generation that is no longer active never starts a
     // replacement.
@@ -1585,7 +1747,7 @@ void GenerationPool::run_replacement(std::size_t slot) {
             observation.target_ready_workers = min_ready_;
             observation.replacements_in_flight_for_app =
                 static_cast<std::uint32_t>(replacements_scheduled_);
-            observation.chosen_jitter_basis_points = 0;
+            observation.chosen_jitter_basis_points = sample_recovery_jitter_locked();
             count_event(options_.metrics, "crash", options_.application_id,
                         options_.generation_digest);
             record_instability(recovery_slot, observation, "crashed");
@@ -1615,7 +1777,8 @@ void GenerationPool::install_replacement(std::size_t slot,
         std::unique_lock<std::mutex> lock(mutex_);
         Slot& s = slots_[slot];
         if (s.executor != nullptr) {
-            retired_.push_back(std::move(s.executor));
+            retired_.push_back(
+                RetiredExecutor{std::move(s.executor), RetiredExecutor::Charge::kNone});
         }
         s.executor = std::move(replacement);
         s.ready = true; // slot READY
@@ -1642,10 +1805,7 @@ void GenerationPool::install_replacement(std::size_t slot,
                 for (Slot& other : slots_) {
                     if (!other.ready && !other.replacement_in_flight && other.needs_replacement) {
                         other.needs_replacement = false;
-                        if (other.executor != nullptr) {
-                            retired_.push_back(std::move(other.executor));
-                        }
-                        if (settle_evicted_slot_elastic_locked(other)) {
+                        if (retire_surplus_locked(other)) {
                             ++elastic_releases;
                         }
                     }
@@ -1709,6 +1869,7 @@ void GenerationPool::finalize_drain() {
     std::vector<std::shared_ptr<WorkerExecutor>> reaped;
     std::size_t live_slot_count = 0;
     std::size_t elastic_to_release = 0;
+    std::size_t reaping_to_release = 0;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         for (Slot& slot : slots_) {
@@ -1723,10 +1884,15 @@ void GenerationPool::finalize_drain() {
             }
         }
         slots_.clear();
-        for (auto& retired : retired_) {
-            if (retired != nullptr) {
-                forward_executor_events_locked(retired);
-                reaped.push_back(std::move(retired));
+        for (auto& entry : retired_) {
+            if (entry.charge == RetiredExecutor::Charge::kElastic) {
+                ++elastic_to_release;
+            } else if (entry.charge == RetiredExecutor::Charge::kReaping) {
+                ++reaping_to_release;
+            }
+            if (entry.executor != nullptr) {
+                forward_executor_events_locked(entry.executor);
+                reaped.push_back(std::move(entry.executor));
             }
         }
         retired_.clear();
@@ -1737,11 +1903,14 @@ void GenerationPool::finalize_drain() {
         }
         observed_retired_.clear();
     }
+    for (const auto& executor : reaped) {
+        executor->stop_and_join();
+    }
     for (std::size_t k = 0; k < elastic_to_release && options_.release_elastic_slot; ++k) {
         options_.release_elastic_slot();
     }
-    for (const auto& executor : reaped) {
-        executor->stop_and_join();
+    for (std::size_t k = 0; k < reaping_to_release && options_.release_reaping_slot; ++k) {
+        options_.release_reaping_slot();
     }
     {
         std::unique_lock<std::mutex> lock(mutex_);

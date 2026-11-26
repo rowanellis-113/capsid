@@ -180,6 +180,7 @@ async function metrics() {
     )
     .reduce((sum, line) => sum + Number(line.slice(line.lastIndexOf(' ') + 1)), 0);
   for (const [key, name] of [
+    ['queueLimit', 'channel_budget_limit'],
     ['queueRejected', 'channel_budget_rejections_total'],
     ['queueHighWater', 'channel_budget_high_water'],
   ]) {
@@ -192,11 +193,12 @@ async function metrics() {
     assert.equal(matches.length, 1, 'one service queue budget series');
     values[key] = Number(matches[0].slice(matches[0].lastIndexOf(' ') + 1));
   }
+  assert.equal(values.queueLimit, 64 * 1024 * 1024, 'derived host-v2 service queue budget');
   assert.ok(
     values.channels <= 4 &&
-      values.dials <= 2 &&
-      values.queue <= 4096 &&
-      values.queueHighWater <= 4096,
+      values.dials <= 16 &&
+      values.queue <= values.queueLimit &&
+      values.queueHighWater <= values.queueLimit,
     'configured service resource bounds',
   );
   return values;
@@ -257,7 +259,7 @@ if(url.pathname.endsWith('/ws') || url.pathname.endsWith('/burst')){
  const pair=new WebSocketPair(),socket=pair[1];socket.accept();
 // An accepted incoming endpoint retains its outgoing I/O lifetime until local close.
  socket.onclose=()=>socket.close(1000);
- socket.onmessage=e=>{if(e.data==='__pending__'){own(new WebSocket(held));socket.send(version+':pending');return;}socket.send(url.pathname.endsWith('/burst')?new Uint8Array(131072):version+':'+e.data);};
+ socket.onmessage=e=>{if(e.data==='__pending__'){own(new WebSocket(held));socket.send(version+':pending');return;}socket.send(url.pathname.endsWith('/burst')?new Uint8Array(4194304):version+':'+e.data);};
  return new Response(null,{status:101,webSocket:pair[0]});}
 if(url.pathname.endsWith('/out')){const ws=own(new WebSocket(target));
  const token=url.searchParams.get('token');
@@ -326,12 +328,8 @@ try {
     permissions: { modules: [], fetch: { allow: [`127.0.0.1:${port}`] } },
     fetchTargets: [`127.0.0.1:${port}`],
     requestTimeoutMs: 5000,
-    hostCapacity: { workersTotal: 1, activationSurgeWorkers: 1 },
-    channelCapacity: { channelsTotal: 4, pendingDialsTotal: 2, channelQueueBytesTotal: '4KiB' },
-    channels: { dialTimeoutMs: 30000 },
-    recovery: {
-      restartBackoff: { initial: '20ms', maximum: '100ms', jitter: '0%', stableReset: '60s' },
-    },
+    hostCapacity: { workersTotal: 1 },
+    channelCapacity: { channelsTotal: 4, maxChannelMessageSize: '4MiB' },
   });
   result.hostPid = backend.child.pid;
   save();
@@ -443,7 +441,6 @@ try {
       (value) => value === 0,
       'pending transport canceled',
     );
-    const rejectedBefore = (await metrics()).queueRejected;
     const burst = await openClient('/burst');
     burst.ws._socket.pause();
     ++result.pausedReaders;
@@ -452,8 +449,7 @@ try {
     burst.ws._socket.resume();
     await within(burst.closed, 'oversized queued message is refused');
     assert.equal(burst.queue.length, 0, 'refused payload never delivered');
-    const refused = await idle();
-    assert.ok(refused.queueRejected > rejectedBefore, 'real host queue refusal recorded');
+    await idle();
     ++result.queueRefusals;
     if (result.deliberateRetainedChannelControl && !retained) retained = await openClient();
     const empty = await idle(),

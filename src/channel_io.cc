@@ -346,7 +346,7 @@ bool ChannelIO::next_fragment(protocol::Frame* frame, size_t payload_capacity) {
             if (amount || send.size == 0) {
                 protocol::Frame next;
                 next.type = protocol::kChannelData;
-                next.version = protocol::kVersionV4;
+                next.version = protocol::kVersion;
                 next.flags = (send.offset == 0 ? protocol::kFlagStart : 0) |
                              (send.offset + amount == send.size ? protocol::kFlagEnd : 0) |
                              (send.text ? protocol::kFlagChanText : 0);

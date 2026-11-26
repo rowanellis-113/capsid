@@ -404,16 +404,12 @@ bool CapabilityPolicy::configure(const capsid_capability_policy* policy, std::st
         swap(compiled);
         return true;
     }
-    const bool version_1 = policy->version == CAPSID_CAPABILITY_POLICY_VERSION_1 &&
-                           policy->struct_size == offsetof(capsid_capability_policy, env_entries);
-    const bool version_2 = policy->version == CAPSID_CAPABILITY_POLICY_VERSION &&
-                           policy->struct_size == sizeof(capsid_capability_policy);
-    if ((!version_1 && !version_2) || policy->reserved != 0 ||
-        (version_2 && policy->env_reserved != 0) || policy->allowed_module_count > 64 ||
+    if (policy->version != CAPSID_CAPABILITY_POLICY_VERSION ||
+        policy->struct_size != sizeof(*policy) || policy->reserved != 0 ||
+        policy->env_reserved != 0 || policy->allowed_module_count > 64 ||
         (policy->allowed_module_count != 0 && !policy->allowed_modules) ||
         policy->rule_count > 256 || (policy->rule_count != 0 && !policy->rules) ||
-        (version_2 && policy->env_entry_count > 256) ||
-        (version_2 && policy->env_entry_count != 0 && !policy->env_entries)) {
+        policy->env_entry_count > 256 || (policy->env_entry_count != 0 && !policy->env_entries)) {
         set_error(error, "invalid capability policy descriptor");
         return false;
     }
@@ -477,7 +473,7 @@ bool CapabilityPolicy::configure(const capsid_capability_policy* policy, std::st
         compiled.has_net_policy_ = true;
     }
 
-    const uint32_t env_entry_count = version_2 ? policy->env_entry_count : 0;
+    const uint32_t env_entry_count = policy->env_entry_count;
     if (env_entry_count != 0 && compiled.module_decision("capsid:env") != kModuleGranted) {
         set_error(error, "environment entries require an authorized capsid:env module");
         return false;

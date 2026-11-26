@@ -485,6 +485,26 @@ int main(int argc, char** argv) {
         require_json_response(app_version, 500, "invalid backend App version");
         require(app_version.body.find(canary) == std::string::npos,
                 "Admin API reflected an invalid App status version");
+
+        // C1: unknown eviction/rejection reasons or invalid counts must be
+        // rejected fail-closed at the Admin API boundary without echoing canary.
+        const std::string bad_diagnostic_docs[] = {
+            "{\"active\":false,\"app\":\"orders\",\"evictions\":{\"bogus_" + canary + "\":1}}",
+            "{\"active\":false,\"app\":\"orders\",\"evictions\":{\"global_lru\":0}}",
+            "{\"active\":false,\"app\":\"orders\",\"lastEvictionReason\":\"" + canary + "\"}",
+            "{\"active\":false,\"app\":\"orders\",\"rejections\":{\"bogus_" + canary + "\":1}}",
+            "{\"active\":false,\"app\":\"orders\",\"rejections\":{\"tenant_hard_memory\":-1}}",
+            "{\"active\":false,\"app\":\"orders\",\"lastRejectionReason\":\"" + canary + "\"}",
+        };
+        for (const std::string& doc : bad_diagnostic_docs) {
+            FakeAdminBackend bad_diag;
+            bad_diag.app_status_document = doc;
+            const capsid::host::AdminResponse resp =
+                dispatch(options, peer, request("GET", "/v1/apps/orders"), &bad_diag);
+            require_json_response(resp, 500, "invalid backend App pool diagnostics");
+            require(resp.body.find(canary) == std::string::npos,
+                    "Admin API reflected invalid App pool diagnostics canary");
+        }
         std::cout << "PASS" << std::endl;
         return 0;
     }
@@ -512,14 +532,25 @@ int main(int argc, char** argv) {
         require_json_response(tenanted, 202, "Admin tenanted deployment submission");
         require(backend.last_tenant == "vip-acme", "explicit deploy tenant did not reach backend");
 
-        backend.app_status_document = "{\"active\":true,\"app\":\"orders\",\"tenant\":\"vip-acme\","
-                                      "\"version\":\"v2\",\"generation\":\"sha256:" +
-                                      std::string(64, 'b') + "\"}";
+        backend.app_status_document =
+            "{\"active\":true,\"app\":\"orders\",\"tenant\":\"vip-acme\","
+            "\"version\":\"v2\",\"generation\":\"sha256:" +
+            std::string(64, 'b') +
+            "\",\"evictions\":{\"tenant_overshare\":2},\"lastEvictionReason\":\"tenant_overshare\","
+            "\"rejections\":{\"tenant_hard_memory\":1},\"lastRejectionReason\":\"tenant_hard_memory\"}";
         const capsid::host::AdminResponse app_status =
             dispatch(options, peer, request("GET", "/v1/apps/orders"), &backend);
-        require_json_response(app_status, 200, "tenanted App status");
-        require(app_status.body.find("\"tenant\":\"vip-acme\"") != std::string::npos,
-                "tenanted App status dropped tenant field");
+        require_json_response(app_status, 200, "tenanted App status with pool diagnostics");
+        require(app_status.body.find("\"tenant\":\"vip-acme\"") != std::string::npos &&
+                    app_status.body.find("\"evictions\":{\"tenant_overshare\":2}") !=
+                        std::string::npos &&
+                    app_status.body.find("\"lastEvictionReason\":\"tenant_overshare\"") !=
+                        std::string::npos &&
+                    app_status.body.find("\"rejections\":{\"tenant_hard_memory\":1}") !=
+                        std::string::npos &&
+                    app_status.body.find("\"lastRejectionReason\":\"tenant_hard_memory\"") !=
+                        std::string::npos,
+                "tenanted App status dropped canonical pool diagnostic fields: " + app_status.body);
         std::cout << "PASS" << std::endl;
         return 0;
     }

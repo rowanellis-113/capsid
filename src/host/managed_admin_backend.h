@@ -31,17 +31,6 @@ struct AsyncAdminBackendOptions {
     // worker loop stops taking new work; a running managed deploy
     // observes it through the coordinator's own stop_requested field.
     const std::atomic<bool>* external_stop = nullptr;
-    // PR-10 (§9.3): worker ownership no longer hands off through this
-    // layer. The activation/retire transactions live on the coordinator
-    // (ManagedHostOptions prepare/commit/abort), which publishes the
-    // routing and drains the old generation INSIDE the deploy/retire
-    // operation. The Async backend is purely the bounded executor: a
-    // successful deploy/retire is Active, period. A successful deploy
-    // whose outcome still carries workers means the coordinator was
-    // configured WITHOUT the transaction callbacks (only the legacy
-    // direct-call path can produce it); there is no publisher here, so
-    // the Async backend recycles the unclaimed pool and fails the public
-    // operation closed rather than leak it.
 };
 
 // Bounded background executor between the Admin HTTP layer and a blocking

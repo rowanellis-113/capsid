@@ -60,7 +60,7 @@ int main(int argc, char** argv) try {
         capsid_worker_config_init(&config);
         config.worker_path = argv[2];
         config.strict_sandbox = 0;
-        require(capsid_worker_spawn(&config, &worker.value) == CAPSID_OK, "spawn");
+        require(capsid_worker_spawn_ex(&config, NULL, &worker.value) == CAPSID_OK, "spawn");
         const std::string source = "export default {fetch() { return new Response('ok'); }};";
         require(capsid_worker_load_bundle(worker.value,
                                           reinterpret_cast<const std::uint8_t*>(source.data()),

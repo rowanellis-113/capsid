@@ -135,13 +135,10 @@ export default {fetch(request) {
   fs.writeFileSync(
     config,
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'main.mjs',
       permissions: { modules: [], fetch: { allow: ['127.0.0.1'] } },
-      pool: {
-        minReady: workers,
-        maxWorkers: workers,
-      },
+      pool: { workers },
       request: { timeout: '20s' },
     }),
   );
@@ -149,11 +146,13 @@ export default {fetch(request) {
   fs.writeFileSync(
     hostConfig,
     JSON.stringify({
-      apiVersion: 'capsid/host-v1',
-      applicationsRoot: '/var/lib/capsid/apps',
-      stateRoot: '/var/lib/capsid/state',
-      secretRootTemplate: '/run/capsid/secrets/{application}',
-      admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+      apiVersion: 'capsid/host-v2',
+      paths: {
+        applications: '/var/lib/capsid/apps',
+        state: '/var/lib/capsid/state',
+        secrets: '/run/capsid/secrets/{application}',
+      },
+      admin: { unix: '/run/capsid/admin.sock' },
       permissions: {
         modules: [],
         environmentNames: [],
@@ -163,13 +162,12 @@ export default {fetch(request) {
         stdioStreams: [],
       },
       isolation: { mode: 'strict', required: [] },
-      capacity: { workersTotal: workers, startupsConcurrent: workers },
+      capacity: { workersTotal: workers },
       listeners: [
         {
           name: 'public',
           tcp: '127.0.0.1:0',
-          publicScheme: 'http',
-          publicAuthority: 'public.example',
+          publicOrigin: 'http://public.example',
           trusted: false,
           routing: { mode: 'path' },
         },

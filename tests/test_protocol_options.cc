@@ -2,7 +2,7 @@
 // gating (v0.3.0 remediation T01).
 //
 // Contract: docs/history/v0.3.0/implementation-design.md §2.2 — the published
-// capsid_worker_config layout is frozen at ABI v7; protocol selection
+// capsid_worker_config uses ABI v8; channel capability selection
 // lives in a separately versioned descriptor with explicit caller-size
 // negotiation, validated before any OS side effect.
 #include "capsid/runtime.h"
@@ -97,7 +97,7 @@ void test_init_size_negotiation() {
     std::memset(&full, 0xA5, sizeof(full));
     require_ok(capsid_protocol_options_init(&full, sizeof(full)), "init full");
     if (full.struct_size != sizeof(full) ||
-        full.descriptor_version != CAPSID_PROTOCOL_DESCRIPTOR_VERSION || full.wire_version != 3 ||
+        full.descriptor_version != CAPSID_PROTOCOL_DESCRIPTOR_VERSION || full.wire_version != 4 ||
         full.reserved16 != 0 || full.capabilities != 0 || full.max_channels != 0) {
         fail("full-size init defaults");
     }
@@ -149,9 +149,16 @@ void test_spawn_ex_rejections(const char* worker_path) {
     capsid_protocol_options options;
     require_ok(capsid_protocol_options_init(&options, sizeof(options)), "init for rejections");
 
+    config.abi_version = 7;
+    capsid_worker* old_abi_worker = nullptr;
+    require_arg(capsid_worker_spawn_ex(&config, nullptr, &old_abi_worker), "retired config ABI");
+    if (old_abi_worker)
+        fail("retired config produced a worker");
+    config.abi_version = CAPSID_ABI_VERSION;
+
     // Unknown wire version.
-    options.wire_version = 5;
-    {
+    for (uint16_t version : {3, 5}) {
+        options.wire_version = version;
         capsid_worker* worker = reinterpret_cast<capsid_worker*>(0x1);
         require_arg(capsid_worker_spawn_ex(&config, &options, &worker), "unknown wire version");
         if (worker != nullptr) {
@@ -183,6 +190,15 @@ void test_spawn_ex_rejections(const char* worker_path) {
         require_arg(capsid_worker_spawn_ex(&config, &options, &worker),
                     "unknown descriptor version");
     }
+
+    require_ok(capsid_protocol_options_init(&options, sizeof(options)), "init for HELLO capacity");
+    options.capabilities =
+        CAPSID_PROTOCOL_CAP_DUPLEX_CHANNEL | CAPSID_PROTOCOL_CAP_CHANNEL_LAYOUT_A2;
+    config.max_queued_bytes = 140; // v4 header and fixed HELLO fit, A2 limits do not
+    capsid_worker* rejected = nullptr;
+    require_arg(capsid_worker_spawn_ex(&config, &options, &rejected), "A2 HELLO exceeds queue");
+    if (rejected != nullptr)
+        fail("rejected HELLO left a worker");
 
     // NULL pointers.
     require_arg(capsid_worker_spawn_ex(nullptr, &options, nullptr), "null config");
@@ -253,7 +269,7 @@ void test_info_lifecycle(const char* worker_path) {
     capsid_worker_destroy(worker);
 }
 
-void test_null_options_is_v3(const char* worker_path) {
+void test_null_options_is_v4(const char* worker_path) {
     capsid_worker_config config;
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
@@ -264,12 +280,12 @@ void test_null_options_is_v3(const char* worker_path) {
     require_ok(capsid_worker_load_bundle(worker, reinterpret_cast<const uint8_t*>(kBundle),
                                          std::strlen(kBundle)),
                "load bundle");
-    pump.wait_ready("v3 ready");
-    // v3 connection: info reports the frozen v3 shape.
+    pump.wait_ready("v4 ready");
+    // v4 connection: info reports the frozen v4 shape.
     capsid_protocol_info info;
-    require_ok(capsid_worker_get_protocol_info(worker, &info, sizeof(info)), "info v3");
-    if (info.wire_version != 3) {
-        fail("null options must be v3");
+    require_ok(capsid_worker_get_protocol_info(worker, &info, sizeof(info)), "info v4");
+    if (info.wire_version != 4) {
+        fail("null options must be v4");
     }
     capsid_worker_destroy(worker);
 }
@@ -285,7 +301,7 @@ int main(int argc, char** argv) {
     test_init_size_negotiation();
     test_spawn_ex_rejections(worker_path);
     test_info_lifecycle(worker_path);
-    test_null_options_is_v3(worker_path);
+    test_null_options_is_v4(worker_path);
     std::printf("protocol options size negotiation: PASS\n");
     return 0;
 }

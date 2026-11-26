@@ -68,7 +68,7 @@ struct Pair {
         p::Frame hello;
         hello.version = 4;
         hello.type = p::kHello;
-        hello.payload.resize(p::kHelloFixedPayloadSize);
+        hello.payload.resize(p::kHelloFixedPayloadSize - p::kHelloV4TailSize);
         require(p::append_hello_a2_extension(&hello.payload, p::ChannelLimits()), "limits");
         p::append_u32(&hello.payload, capabilities);
         p::append_u32(&hello.payload, 0);

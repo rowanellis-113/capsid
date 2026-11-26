@@ -349,8 +349,7 @@ RawHttpResponse http_get(std::uint16_t port, const std::string& target) {
 }
 
 capsid::host::LocalDevHostOptions make_options(const char* worker_path, int ready_fd,
-                                               std::uint64_t max_inflight = 2,
-                                               std::uint64_t max_streaming = 1,
+                                               std::uint64_t max_inflight = 3,
                                                std::uint64_t stream_idle_ms = 60000) {
     capsid::host::LocalDevHostOptions options;
     options.worker_path = worker_path;
@@ -358,16 +357,15 @@ capsid::host::LocalDevHostOptions make_options(const char* worker_path, int read
     options.application = "orders";
     options.capsid_json_text =
         std::string(
-            R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":1,"maxWorkers":1},"request":{"timeout":"5s","maxInflightPerWorker":)json") +
-        std::to_string(max_inflight) + R"json(,"maxStreamingInflightPerWorker":)json" +
-        std::to_string(max_streaming) + R"json(,"streamIdleTimeoutMs":)json" +
-        std::to_string(stream_idle_ms) + R"json(}})json";
+            R"json({"apiVersion":"capsid/app-v2","pool":{"workers":1},"request":{"timeout":"5s","maxInflight":)json") +
+        std::to_string(max_inflight) + R"json(}})json";
     capsid::host::ListenerConfig listener;
     listener.name = "public";
     listener.tcp = "127.0.0.1:0";
     listener.public_scheme = "http";
     listener.public_authority = "public.example";
     listener.routing.mode = "path";
+    listener.limits.stream_idle_timeout_ms = stream_idle_ms;
     options.listener_override = std::move(listener);
     options.initial_stream_window = 64U * 1024U;
     options.strict_sandbox = false;
@@ -375,50 +373,56 @@ capsid::host::LocalDevHostOptions make_options(const char* worker_path, int read
     return options;
 }
 
-// Permit exhausted while the head has not reached the client: the second
+// Permit exhausted while the head has not reached the client: with the
+// built-in 2-slot SSE permit and two open streams holding it, the third
 // SSE request must be cancelled and answered with a synthesized 503 (never
 // a 200 that is torn down).
 void test_permit_full_rejects_503(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 3));
     std::string error;
     require(server.start(sse_open_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
-    // The first stream acquires the only permit and never ends (the open
-    // bundle emits no frame and never closes), so the slot stays held
-    // while the second request arrives — the permit-exhausted case.
+    // The first two streams acquire both SSE permits and never end (the open
+    // bundle emits no frame and never closes), so both slots stay held while
+    // the third request arrives — the permit-exhausted case.
     const int first = connect_to(port);
     send_request(first, "/@capsid/orders/stream", true);
+    const unsigned first_status = read_head(first);
     const int second = connect_to(port);
     send_request(second, "/@capsid/orders/stream", true);
-    const unsigned first_status = read_head(first);
     const unsigned second_status = read_head(second);
+    const int third = connect_to(port);
+    send_request(third, "/@capsid/orders/stream", true);
+    const unsigned third_status = read_head(third);
     require(first_status == 200, "first SSE request failed: " + std::to_string(first_status));
-    // The second stream cannot acquire the permit before its head: it must
+    require(second_status == 200, "second SSE request failed: " + std::to_string(second_status));
+    // The third stream cannot acquire the permit before its head: it must
     // be cancelled and answered with a synthesized 503 — never a 200 that
     // is then torn down.
-    require(second_status == 503,
-            "permit-exhausted SSE must be synthesized 503, got " + std::to_string(second_status));
+    require(third_status == 503,
+            "permit-exhausted SSE must be synthesized 503, got " + std::to_string(third_status));
     close(first);
     close(second);
+    close(third);
 
     server.request_stop();
     require(server.wait(&error), "SSE server wait failed: " + error);
 }
 
-// The permit is returned exactly once when the stream ends: a fresh SSE
-// request after a completed one must acquire the permit and succeed.
+// The permit is returned exactly once when the stream ends: fresh SSE
+// requests after completed ones must acquire the permit and succeed.
 void test_permit_released_on_completion(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 3));
     std::string error;
     require(server.start(sse_done_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
-    for (int round = 0; round < 2; ++round) {
+    for (int round = 0; round < 3; ++round) {
         const RawHttpResponse response = http_get(port, "/@capsid/orders/stream");
         require(response.status == 200, "completed SSE round " + std::to_string(round) +
                                             " failed: " + std::to_string(response.status));
@@ -433,7 +437,7 @@ void test_permit_released_on_completion(const char* worker_path) {
 void test_idle_timeout_cancels_and_releases(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1, 250));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 3, 250));
     std::string error;
     require(server.start(sse_open_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -462,12 +466,12 @@ void test_idle_timeout_cancels_and_releases(const char* worker_path) {
 }
 
 // Plain chunked responses (no Content-Length, no event-stream type) never
-// hold the streaming permit: two concurrent plain chunked requests both
-// succeed under a 1-slot streaming permit.
+// hold the streaming permit: three concurrent plain chunked requests all
+// succeed under the built-in 2-slot streaming permit.
 void test_plain_chunked_does_not_hold_permit(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 3));
     std::string error;
     require(server.start(plain_chunked_bundle(), &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
@@ -476,57 +480,67 @@ void test_plain_chunked_does_not_hold_permit(const char* worker_path) {
     send_request(first, "/@capsid/orders/plain", true);
     const int second = connect_to(port);
     send_request(second, "/@capsid/orders/plain", true);
+    const int third = connect_to(port);
+    send_request(third, "/@capsid/orders/plain", true);
     const RawHttpResponse first_response = read_response(first);
     const RawHttpResponse second_response = read_response(second);
-    require(first_response.status == 200 && second_response.status == 200,
+    const RawHttpResponse third_response = read_response(third);
+    require(first_response.status == 200 && second_response.status == 200 &&
+                third_response.status == 200,
             "plain chunked responses must not consume the streaming permit");
-    require(first_response.body.size() == 4096, "plain chunked body truncated");
+    require(first_response.body.size() == 4096 && third_response.body.size() == 4096,
+            "plain chunked body truncated");
     close(first);
     close(second);
+    close(third);
 
     server.request_stop();
     require(server.wait(&error), "SSE server wait failed: " + error);
 }
 
-// Case-insensitive and parameterized Content-Type matching: with a
-// 1-slot permit and an open stream holding it, a second request must 503
-// even when the first stream's type is "Text/Event-Stream" or carries
-// parameters. The type token match drives the permit; anything else would
-// let a second SSE stream start under a 1-slot permit.
+// Case-insensitive and parameterized Content-Type matching: with the
+// built-in 2-slot permit and two open streams holding it, a third request
+// must 503 even when the open streams' type is "Text/Event-Stream" or
+// carries parameters. The type token match drives the permit; anything else
+// would let a third SSE stream start under the 2-slot permit.
 void test_mime_matching_holds_permit(const char* worker_path,
                                      const std::vector<std::uint8_t>& bundle) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 2, 1));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 3));
     std::string error;
     require(server.start(bundle, &error), "cannot start SSE server: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));
 
-    // The first stream holds the only permit and never ends.
+    // The first two streams hold both permits and never end.
     const int first = connect_to(port);
     send_request(first, "/@capsid/orders/stream", true);
+    const unsigned first_status = read_head(first);
     const int second = connect_to(port);
     send_request(second, "/@capsid/orders/stream", true);
-    const unsigned first_status = read_head(first);
     const unsigned second_status = read_head(second);
+    const int third = connect_to(port);
+    send_request(third, "/@capsid/orders/stream", true);
+    const unsigned third_status = read_head(third);
     require(first_status == 200, "first SSE request failed: " + std::to_string(first_status));
-    require(second_status == 503, "non-canonical event-stream type must still hold the permit, "
-                                  "got " +
-                                      std::to_string(second_status));
+    require(second_status == 200, "second SSE request failed: " + std::to_string(second_status));
+    require(third_status == 503, "non-canonical event-stream type must still hold the permit, "
+                                 "got " +
+                                     std::to_string(third_status));
     close(first);
     close(second);
+    close(third);
 
     server.request_stop();
     require(server.wait(&error), "SSE server wait failed: " + error);
 }
 
-// The documented 1/1 boundary: maxInflightPerWorker == 1 with
-// maxStreamingInflightPerWorker == 1 starts and serves (no concurrency
-// reservation).
+// The documented 1/1 boundary: maxInflight == 1 clamps the built-in SSE
+// permit to 1 and starts and serves (no concurrency reservation).
 void test_max_inflight_one_boundary(const char* worker_path) {
     int ready[2];
     require(capsid::win32::create_socket_pair(ready), "cannot create SSE READY pipe");
-    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 1, 1));
+    capsid::host::LocalDevHost server(make_options(worker_path, ready[1], 1));
     std::string error;
     require(server.start(sse_done_bundle(), &error), "1/1 SSE boundary must start: " + error);
     const std::uint16_t port = ready_port(read_one_ready_line(ready[0]));

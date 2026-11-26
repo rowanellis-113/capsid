@@ -354,10 +354,11 @@ void invalid_request_header_fails_closed(capsid_worker* worker, const uint8_t* n
 }
 
 std::string run_request(capsid_worker* worker, const char* url, const capsid_header* headers = NULL,
-                        size_t header_count = 0) {
-    require_result(capsid_worker_begin_request(worker, 1, "GET", url, headers, header_count),
-                   "begin request");
-    require_result(capsid_worker_end_request(worker, 1), "end request");
+                        size_t header_count = 0, uint64_t request_id = 1) {
+    require_result(
+        capsid_worker_begin_request(worker, request_id, "GET", url, headers, header_count),
+        "begin request");
+    require_result(capsid_worker_end_request(worker, request_id), "end request");
 
     bool received_head = false;
     std::string body;
@@ -377,14 +378,14 @@ std::string run_request(capsid_worker* worker, const char* url, const capsid_hea
                 continue;
             }
             if (event.type == CAPSID_EVENT_RESPONSE_HEAD) {
-                if (event.request_id != 1 || event.status != 200) {
+                if (event.request_id != request_id || event.status != 200) {
                     fail("unexpected response head");
                 }
                 received_head = true;
                 continue;
             }
             if (event.type == CAPSID_EVENT_RESPONSE_BODY) {
-                if (!received_head || event.request_id != 1) {
+                if (!received_head || event.request_id != request_id) {
                     fail("response body arrived before its head");
                 }
                 body.append(reinterpret_cast<const char*>(event.payload.data), event.payload.size);
@@ -395,7 +396,7 @@ std::string run_request(capsid_worker* worker, const char* url, const capsid_hea
                 continue;
             }
             if (event.type == CAPSID_EVENT_RESPONSE_END) {
-                if (!received_head || event.request_id != 1) {
+                if (!received_head || event.request_id != request_id) {
                     fail("unexpected response end");
                 }
                 return body;
@@ -415,6 +416,190 @@ std::string run_request(capsid_worker* worker, const char* url, const capsid_hea
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             fail("timed out waiting for response");
+        }
+
+        capsid_pollfd descriptor = {};
+        descriptor.fd = capsid_worker_fd(worker);
+        descriptor.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+        capsid::win32::capsid_poll(&descriptor, 1, 50);
+    }
+}
+
+void run_request_expect_error(capsid_worker* worker, uint64_t request_id, const char* url) {
+    require_result(capsid_worker_begin_request(worker, request_id, "GET", url, NULL, 0),
+                   "begin error-expected request");
+    require_result(capsid_worker_end_request(worker, request_id), "end error-expected request");
+
+    bool received_head = false;
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    for (;;) {
+        const capsid_result flush = capsid_worker_flush(worker);
+        if (flush != CAPSID_OK && flush != CAPSID_WOULD_BLOCK) {
+            fail(std::string("error-expected request flush: ") + capsid_result_string(flush));
+        }
+
+        capsid_event event = {};
+        event.struct_size = sizeof(event);
+        const capsid_result result = capsid_worker_next_event(worker, &event);
+        if (result == CAPSID_OK) {
+            if (event.type == CAPSID_EVENT_REQUEST_CREDIT) {
+                continue;
+            }
+            if (event.type == CAPSID_EVENT_RESPONSE_HEAD) {
+                if (event.request_id != request_id || received_head) {
+                    fail("unexpected response head during error-expected request");
+                }
+                received_head = true;
+                continue;
+            }
+            if (event.type == CAPSID_EVENT_RESPONSE_BODY) {
+                if (!received_head || event.request_id != request_id) {
+                    fail("unexpected response body during error-expected request");
+                }
+                require_result(
+                    capsid_worker_grant_response_credit(worker, event.request_id,
+                                                        static_cast<uint32_t>(event.payload.size)),
+                    "replenish response credit");
+                continue;
+            }
+            if (event.type == CAPSID_EVENT_ERROR) {
+                if (event.request_id != request_id) {
+                    fail("unexpected request id on worker error event");
+                }
+                return;
+            }
+            if (event.type == CAPSID_EVENT_RESPONSE_END) {
+                fail("error-expected request completed with RESPONSE_END");
+            }
+            if (event.type == CAPSID_EVENT_EXIT) {
+                fail("worker exited instead of emitting CAPSID_EVENT_ERROR");
+            }
+            continue;
+        }
+        if (result != CAPSID_WOULD_BLOCK) {
+            fail(std::string("error-expected request event: ") + capsid_result_string(result));
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            fail("timed out waiting for expected request error");
+        }
+
+        capsid_pollfd descriptor = {};
+        descriptor.fd = capsid_worker_fd(worker);
+        descriptor.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+        capsid::win32::capsid_poll(&descriptor, 1, 50);
+    }
+}
+
+void run_request_credit_stall_probe(capsid_worker* worker, uint64_t request_id, const char* url) {
+    static const size_t kWindow = 4096;
+    static const size_t kChunk = 6000;
+    static const size_t kTotal = 24000;
+    static const size_t kExpectedStalls = 5;
+
+    require_result(capsid_worker_begin_request(worker, request_id, "GET", url, NULL, 0),
+                   "begin credit-stall probe");
+    require_result(capsid_worker_end_request(worker, request_id), "end credit-stall probe");
+
+    bool received_head = false;
+    size_t received_bytes = 0;
+    size_t allowed_bytes = kWindow;
+    size_t stalls = 0;
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(15);
+
+    for (;;) {
+        const capsid_result flush = capsid_worker_flush(worker);
+        if (flush != CAPSID_OK && flush != CAPSID_WOULD_BLOCK) {
+            fail(std::string("credit-stall probe flush: ") + capsid_result_string(flush));
+        }
+
+        capsid_event event = {};
+        event.struct_size = sizeof(event);
+        const capsid_result result = capsid_worker_next_event(worker, &event);
+        if (result == CAPSID_OK) {
+            if (event.type == CAPSID_EVENT_REQUEST_CREDIT) {
+                continue;
+            }
+            if (event.request_id != request_id) {
+                fail("unexpected request id on credit-stall probe");
+            }
+            if (event.type == CAPSID_EVENT_RESPONSE_HEAD) {
+                if (received_head || event.status != 200) {
+                    fail("unexpected response head on credit-stall probe");
+                }
+                received_head = true;
+                continue;
+            }
+            if (event.type == CAPSID_EVENT_RESPONSE_BODY) {
+                if (!received_head || event.payload.size == 0 ||
+                    received_bytes + event.payload.size > allowed_bytes) {
+                    fail("credit window overrun or body before head in credit-stall probe");
+                }
+                for (size_t i = 0; i < event.payload.size; ++i) {
+                    const size_t offset = received_bytes + i;
+                    const uint8_t expected =
+                        static_cast<uint8_t>(((offset / kChunk) * 37 + (offset % kChunk)) & 0xff);
+                    if (event.payload.data[i] != expected) {
+                        fail("payload mismatch in credit-stall probe");
+                    }
+                }
+                received_bytes += event.payload.size;
+                if (received_bytes == allowed_bytes && received_bytes < kTotal) {
+                    const std::chrono::steady_clock::time_point hold_until =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+                    while (std::chrono::steady_clock::now() < hold_until) {
+                        const capsid_result hold_flush = capsid_worker_flush(worker);
+                        if (hold_flush != CAPSID_OK && hold_flush != CAPSID_WOULD_BLOCK) {
+                            fail("credit-stall hold flush failed");
+                        }
+                        capsid_event hold_event = {};
+                        hold_event.struct_size = sizeof(hold_event);
+                        const capsid_result hold_res =
+                            capsid_worker_next_event(worker, &hold_event);
+                        if (hold_res == CAPSID_OK) {
+                            if (hold_event.type != CAPSID_EVENT_REQUEST_CREDIT) {
+                                fail("worker sent response event while stream credit held at zero");
+                            }
+                            continue;
+                        }
+                        if (hold_res != CAPSID_WOULD_BLOCK) {
+                            fail("credit-stall hold next_event failed");
+                        }
+                        capsid_pollfd hold_fd = {};
+                        hold_fd.fd = capsid_worker_fd(worker);
+                        hold_fd.events = POLLIN | (hold_flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+                        capsid::win32::capsid_poll(&hold_fd, 1, 10);
+                    }
+                    ++stalls;
+                    require_result(capsid_worker_grant_response_credit(
+                                       worker, request_id, static_cast<uint32_t>(kWindow)),
+                                   "restore credit window");
+                    allowed_bytes += kWindow;
+                }
+                continue;
+            }
+            if (event.type == CAPSID_EVENT_RESPONSE_END) {
+                if (!received_head || received_bytes != kTotal || stalls != kExpectedStalls) {
+                    fail("unexpected RESPONSE_END count or stall count in credit-stall probe");
+                }
+                return;
+            }
+            if (event.type == CAPSID_EVENT_ERROR) {
+                fail(std::string("worker error in credit-stall probe: ") +
+                     std::string(reinterpret_cast<const char*>(event.payload.data),
+                                 event.payload.size));
+            }
+            if (event.type == CAPSID_EVENT_EXIT) {
+                fail("worker exited during credit-stall probe");
+            }
+            continue;
+        }
+        if (result != CAPSID_WOULD_BLOCK) {
+            fail(std::string("credit-stall probe event: ") + capsid_result_string(result));
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            fail("timed out waiting for credit-stall probe completion");
         }
 
         capsid_pollfd descriptor = {};
@@ -457,6 +642,9 @@ int main(int argc, char** argv) {
     capsid_worker_config config;
     capsid_worker_config_init(&config);
     config.worker_path = argv[1];
+    if (mode == "stream-response-adversarial") {
+        config.initial_stream_window = 4096;
+    }
 
     // Frozen RED: the app layer cannot make the fused request-end bridge
     // fail (tjs:internal/* is capability-forbidden for apps and the
@@ -528,7 +716,7 @@ int main(int argc, char** argv) {
     }
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
     const capsid_result load_result =
         argc == 5
             ? capsid_worker_load_bundle_named(
@@ -590,6 +778,40 @@ int main(int argc, char** argv) {
         invalid_request_header_fails_closed(worker, name, sizeof(name) - 1, value,
                                             sizeof(value) - 1);
         capsid_worker_destroy(worker);
+        return 0;
+    }
+
+    if (mode == "stream-response-adversarial") {
+        const std::string body1 =
+            run_request(worker, "https://example.test/case-default-getter-detach", NULL, 0, 1);
+        if (body1 != "alpha-bravo-charlie") {
+            fail(std::string("unexpected default-getter-detach body: ") + body1);
+        }
+        const std::string body2 =
+            run_request(worker, "https://example.test/case-byte-getter-detach", NULL, 0, 2);
+        if (body2 != "delta-echo") {
+            fail(std::string("unexpected byte-getter-detach body: ") + body2);
+        }
+        run_request_expect_error(worker, 3, "https://example.test/case-status-text-detach");
+        const std::string triggers =
+            run_request(worker, "https://example.test/case-verify-triggers", NULL, 0, 4);
+        if (triggers != "{\"defaultInstalled\":true,\"defaultCalls\":1,\"defaultDetached\":true,"
+                        "\"byteInstalled\":true,\"byteCalls\":1,\"byteDetached\":true,"
+                        "\"statusTextCalls\":1,\"statusTextDetached\":true}") {
+            fail(std::string("adversarial stream triggers did not fire: ") + triggers);
+        }
+        const std::string body5 =
+            run_request(worker, "https://example.test/case-empty-closed", NULL, 0, 5);
+        if (!body5.empty()) {
+            fail(std::string("unexpected empty-closed body: ") + body5);
+        }
+        const std::string body6 =
+            run_request(worker, "https://example.test/case-empty-byte-closed", NULL, 0, 6);
+        if (!body6.empty()) {
+            fail(std::string("unexpected empty-byte-closed body: ") + body6);
+        }
+        run_request_credit_stall_probe(worker, 7, "https://example.test/case-multi-chunk-credit");
+        require_clean_exit(worker);
         return 0;
     }
 

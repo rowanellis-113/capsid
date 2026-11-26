@@ -57,6 +57,9 @@ def select_files(root, policy, requested=(), language="all"):
                 raise ValueError(f"protected or unsupported formatting input: {name}")
             continue
         path = root / name
+        # Cached Git paths include files deleted from the working tree.
+        if name not in requested and not path.is_symlink() and not path.exists():
+            continue
         if (
             path.is_symlink()
             or not path.is_file()

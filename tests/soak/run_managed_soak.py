@@ -450,7 +450,7 @@ class Soak:
 
 
 CAPSID_JSON = {
-    "apiVersion": "capsid/app-v1",
+    "apiVersion": "capsid/app-v2",
     "entry": "bundle.mjs",
     "permissions": {
         "modules": ["capsid:env"],
@@ -458,7 +458,7 @@ CAPSID_JSON = {
             "APP_SOAK_MARKER": {"valueFrom": "APP_SOAK_MARKER"},
         },
     },
-    "pool": {"minReady": 1, "maxWorkers": 1},
+    "pool": {"workers": 1},
 }
 
 
@@ -484,11 +484,13 @@ def build_fixture_tree(work_dir, fixture_path):
 
 def write_host_json(work_dir, port, admin_sock):
     document = {
-        "apiVersion": "capsid/host-v1",
-        "applicationsRoot": os.path.join(work_dir, "applications"),
-        "stateRoot": os.path.join(work_dir, "state"),
-        "secretRootTemplate": os.path.join(work_dir, "secrets", "{application}"),
-        "admin": {"unix": admin_sock, "mode": "0600"},
+        "apiVersion": "capsid/host-v2",
+        "paths": {
+            "applications": os.path.join(work_dir, "applications"),
+            "state": os.path.join(work_dir, "state"),
+            "secrets": os.path.join(work_dir, "secrets", "{application}"),
+        },
+        "admin": {"unix": admin_sock},
         "permissions": {
             "modules": ["capsid:env"],
             "environmentNames": ["APP_*"],
@@ -501,24 +503,22 @@ def write_host_json(work_dir, port, admin_sock):
         "maximums": {
             "request": {
                 "timeout": "30s",
-                "maxInflightPerWorker": 10000,
+                "maxInflight": 10000,
             },
         },
         "listeners": [
             {
                 "name": "soak",
                 "tcp": "127.0.0.1:{}".format(port),
-                "publicScheme": "http",
-                "publicAuthority": "127.0.0.1:{}".format(port),
+                "publicOrigin": "http://127.0.0.1:{}".format(port),
                 "trusted": False,
                 "routing": {"mode": "path", "suffix": "/"},
                 "limits": {},
             }
         ],
-        # §9.4: a zero-downtime replace (secret rotation, SIGKILL
-        # replacement) warms the new pool while the old one still serves —
-        # the ledger refuses the reserve without explicit surge headroom.
-        "capacity": {"workersTotal": 1, "startupsConcurrent": 1, "activationSurgeWorkers": 1},
+        # host-v2 automatically reserves max(2, workersTotal * 25%) surge slots
+        # for zero-downtime replace (secret rotation, SIGKILL replacement).
+        "capacity": {"workersTotal": 1},
     }
     path = os.path.join(work_dir, "host.json")
     with open(path, "w") as handle:

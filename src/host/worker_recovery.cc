@@ -437,6 +437,62 @@ WorkerStabilityResult observe_worker_stability(const GenerationRecoveryState& st
     return result;
 }
 
+StartupPermitRefusalDecision
+record_startup_permit_refusal(const GenerationRecoveryState& state,
+                              const WorkerRecoveryPolicy& policy, std::uint64_t now_ms,
+                              std::int32_t chosen_jitter_basis_points) {
+    StartupPermitRefusalDecision decision;
+    decision.state = state;
+    if (!valid_policy(policy)) {
+        set_error(decision.error, ErrorCode::kInvalidPolicy, "/policy",
+                  "recovery policy is invalid");
+        return decision;
+    }
+    const std::int32_t jitter_limit = static_cast<std::int32_t>(policy.jitter_basis_points);
+    if (chosen_jitter_basis_points < -jitter_limit || chosen_jitter_basis_points > jitter_limit) {
+        set_error(decision.error, ErrorCode::kInvalidJitter, "/jitter",
+                  "chosen jitter exceeds the policy jitter");
+        return decision;
+    }
+    if (!request_identifiers_valid(state.application, state.generation)) {
+        set_error(decision.error, ErrorCode::kInvalidState, "/state",
+                  "recovery state identity is invalid");
+        return decision;
+    }
+    if (!events_sorted(state.instability_events_ms)) {
+        set_error(decision.error, ErrorCode::kInvalidState, "/state",
+                  "instability events are not sorted");
+        return decision;
+    }
+    if (state.instability_events_ms.size() > kMaxTrackedInstabilityEvents) {
+        set_error(decision.error, ErrorCode::kResourceLimit, "/state",
+                  "instability event state exceeds the tracked limit");
+        return decision;
+    }
+    for (const std::uint64_t event_ms : state.instability_events_ms) {
+        if (event_ms > now_ms) {
+            set_error(decision.error, ErrorCode::kClockRegression, "/state",
+                      "instability event lies in the future");
+            return decision;
+        }
+    }
+    if (state.has_last_observed_time && now_ms < state.last_observed_ms) {
+        set_error(decision.error, ErrorCode::kClockRegression, "/state",
+                  "monotonic clock regressed");
+        return decision;
+    }
+    decision.state.last_observed_ms = now_ms;
+    decision.state.has_last_observed_time = true;
+    decision.retry_delay_ms = replacement_delay_ms(
+        policy, decision.state.replacement_attempts_since_stable, chosen_jitter_basis_points);
+    if (decision.state.replacement_attempts_since_stable !=
+        std::numeric_limits<std::uint32_t>::max()) {
+        ++decision.state.replacement_attempts_since_stable;
+    }
+    decision.ok = true;
+    return decision;
+}
+
 FailedRequestAction decide_failed_request_action(const WorkerRecoveryDecision& recovery,
                                                  const FailedRequestRetryContext& request) {
     // A response head that already left the gateway must never be rewritten.

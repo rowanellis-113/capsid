@@ -116,7 +116,7 @@ class SecretSnapshot {
     const std::string& effective_environment_json() const { return effective_environment_json_; }
 
     // Descriptors point into this snapshot and remain valid until it is moved,
-    // assigned or destroyed. capsid_worker_spawn() copies them synchronously.
+    // assigned or destroyed. capsid_worker_spawn_ex() copies them synchronously.
     std::vector<capsid_env_entry> runtime_entries() const;
 
   private:

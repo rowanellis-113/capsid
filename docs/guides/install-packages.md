@@ -56,11 +56,7 @@ preserves verified Actions artifacts and cannot publish or edit a Release.
 Stable publication remains restricted to stable tag pushes; prerelease
 publication requires operator review of every package.
 
-The current installer prefers the explicit CPU suffix. For older Releases,
-x86_64 alone can fall back to `linux-musl.tar.gz`; ARM64 never downloads that
-legacy x86_64 archive. macOS also selects the exact CPU suffix and never substitutes
-the other CPU's archive. Missing compatible assets fail without changing the
-active installation.
+The installer requires the matching OS and an explicit CPU suffix. A release with only an unqualified archive is rejected before download and the active installation is preserved.
 
 Packages include:
 
@@ -137,7 +133,7 @@ Expand-Archive -LiteralPath $archive -DestinationPath "$HOME\capsid-beta" -Force
 
 Choose a new destination instead of overwriting another installation. Use the
 extracted package's actual `bin` path; the archive has a versioned top-level
-directory. Follow the [PowerShell quick start](run-application.md#windows-powershell).
+directory. Follow the [PowerShell quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#windows-powershell).
 For source builds or CMake SDK consumption, see [Windows](build-on-windows.md).
 
 ## Keep Artifact Identities Together

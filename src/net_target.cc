@@ -346,89 +346,6 @@ bool parse_prefix_bits(const std::string& digits, std::uint8_t max_bits, std::ui
     return true;
 }
 
-struct PortSpec {
-    bool any = true;
-    std::uint16_t start = 1;
-    std::uint16_t end = 65535;
-};
-
-bool parse_port_spec(const std::string& text, PortSpec* out) {
-    if (text == "*") {
-        out->any = true;
-        out->start = 1;
-        out->end = 65535;
-        return true;
-    }
-    const std::size_t dash = text.find('-');
-    if (dash == std::string::npos) {
-        std::uint16_t port = 0;
-        if (!parse_port_digits(text.data(), text.size(), false, &port)) {
-            return false;
-        }
-        out->any = false;
-        out->start = port;
-        out->end = port;
-        return true;
-    }
-    std::uint16_t first = 0;
-    std::uint16_t last = 0;
-    if (!parse_port_digits(text.data(), dash, false, &first) ||
-        !parse_port_digits(text.data() + dash + 1, text.size() - dash - 1, false, &last) ||
-        first > last) {
-        return false;
-    }
-    out->any = false;
-    out->start = first;
-    out->end = last;
-    return true;
-}
-
-bool split_host_and_port_spec(const std::string& target, std::string* host_out,
-                              PortSpec* port_out) {
-    if (target.empty() || host_out == nullptr || port_out == nullptr) {
-        return false;
-    }
-    *port_out = PortSpec{};
-    if (target[0] == '[') {
-        const std::size_t close = target.find(']');
-        if (close == std::string::npos) {
-            return false;
-        }
-        if (close + 1 == target.size()) {
-            *host_out = target;
-            return true;
-        }
-        if (target[close + 1] == ':') {
-            *host_out = target.substr(0, close + 1);
-            return parse_port_spec(target.substr(close + 2), port_out);
-        }
-        if (target[close + 1] == '/') {
-            const std::size_t colon = target.find(':', close + 1);
-            if (colon == std::string::npos) {
-                *host_out = target;
-                return true;
-            }
-            *host_out = target.substr(0, colon);
-            return parse_port_spec(target.substr(colon + 1), port_out);
-        }
-        return false;
-    }
-
-    const std::size_t first_colon = target.find(':');
-    if (first_colon == std::string::npos) {
-        *host_out = target;
-        return true;
-    }
-    const std::size_t last_colon = target.rfind(':');
-    if (first_colon != last_colon) {
-        // Bare IPv6 address (with optional /prefix), no port suffix.
-        *host_out = target;
-        return true;
-    }
-    *host_out = target.substr(0, first_colon);
-    return parse_port_spec(target.substr(first_colon + 1), port_out);
-}
-
 } // namespace
 
 bool parse_tcp_endpoint(const std::string& text, std::string* host_out, std::uint16_t* port_out,
@@ -589,27 +506,6 @@ bool net_host_contained(const std::string& app_host_text, const std::string& man
                prefix_match(app.v6.data(), manifest.v6.data(), manifest.prefix_len);
     }
     return false;
-}
-
-bool net_target_contained(const std::string& app, const std::string& manifest) {
-    std::string app_host;
-    std::string manifest_host;
-    PortSpec app_ports;
-    PortSpec manifest_ports;
-    if (!split_host_and_port_spec(app, &app_host, &app_ports) ||
-        !split_host_and_port_spec(manifest, &manifest_host, &manifest_ports)) {
-        return false;
-    }
-    if (!net_host_contained(app_host, manifest_host)) {
-        return false;
-    }
-    if (manifest_ports.any) {
-        return true;
-    }
-    if (app_ports.any) {
-        return false;
-    }
-    return app_ports.start >= manifest_ports.start && app_ports.end <= manifest_ports.end;
 }
 
 } // namespace capsid

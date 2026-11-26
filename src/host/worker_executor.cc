@@ -92,19 +92,20 @@ bool decode_worker_log_event(const capsid_event& event, WorkerEvent* output, std
         cursor += size;
         return true;
     };
-    if (!read_string16(&output->binding_id) || !read_string16(&output->log_level) ||
-        !read_string32(&output->text) || !read_string32(&output->log_fields_json) ||
-        cursor != end || !valid_binding_id(output->binding_id) ||
-        (output->log_level != "debug" && output->log_level != "info" &&
-         output->log_level != "warn" && output->log_level != "error") ||
-        output->text.size() > 16U * 1024U || output->log_fields_json.size() > 16U * 1024U ||
-        output->log_fields_json.size() < 2 || output->log_fields_json.front() != '{' ||
-        output->log_fields_json.back() != '}') {
+    auto& log_extra = output->ensure_log_extra();
+    if (!read_string16(&log_extra.binding_id) || !read_string16(&log_extra.log_level) ||
+        !read_string32(&output->text) || !read_string32(&log_extra.log_fields_json) ||
+        cursor != end || !valid_binding_id(log_extra.binding_id) ||
+        (log_extra.log_level != "debug" && log_extra.log_level != "info" &&
+         log_extra.log_level != "warn" && log_extra.log_level != "error") ||
+        output->text.size() > 16U * 1024U || log_extra.log_fields_json.size() > 16U * 1024U ||
+        log_extra.log_fields_json.size() < 2 || log_extra.log_fields_json.front() != '{' ||
+        log_extra.log_fields_json.back() != '}') {
         *error = "invalid Binding log envelope";
         return false;
     }
     json_error_t json_error = {};
-    json_t* fields = json_loadb(output->log_fields_json.data(), output->log_fields_json.size(),
+    json_t* fields = json_loadb(log_extra.log_fields_json.data(), log_extra.log_fields_json.size(),
                                 JSON_REJECT_DUPLICATES | JSON_DECODE_ANY, &json_error);
     if (fields == nullptr || !json_is_object(fields)) {
         if (fields != nullptr) {
@@ -119,13 +120,13 @@ bool decode_worker_log_event(const capsid_event& event, WorkerEvent* output, std
         *error = "cannot canonicalize Binding log fields";
         return false;
     }
-    output->log_fields_json.assign(canonical_fields);
+    log_extra.log_fields_json.assign(canonical_fields);
     std::free(canonical_fields);
-    if (output->log_fields_json.size() > 16U * 1024U) {
+    if (log_extra.log_fields_json.size() > 16U * 1024U) {
         *error = "canonical Binding log fields exceed the size limit";
         return false;
     }
-    output->binding_log = true;
+    log_extra.binding_log = true;
     return true;
 }
 
@@ -137,6 +138,7 @@ WorkerExecutor::WorkerExecutor()
     canceled_.reserve(128);
     retire_pending_.reserve(128);
     inflight_ids_.reserve(128);
+    events_.reserve(64);
     batch_events_.reserve(64);
     batch_canceled_ids_.reserve(32);
 }
@@ -310,14 +312,18 @@ bool WorkerExecutor::try_submit_channel(Command command) {
         charge += bytes;
         return true;
     };
-    if (!add_charge(command.body.size()) || !add_charge(command.close_reason.size()) ||
-        !add_charge(command.http_response.url.size()) ||
-        !add_charge(command.http_response.status_text.size()))
+    if (!add_charge(command.body.size()))
         return false;
-    for (const auto& header : command.http_response.headers)
-        if (!add_charge(header.first.size()) || !add_charge(header.second.size()) ||
-            !add_charge(64))
+    if (command.channel_extra) {
+        if (!add_charge(command.channel_extra->close_reason.size()) ||
+            !add_charge(command.channel_extra->http_response.url.size()) ||
+            !add_charge(command.channel_extra->http_response.status_text.size()))
             return false;
+        for (const auto& header : command.channel_extra->http_response.headers)
+            if (!add_charge(header.first.size()) || !add_charge(header.second.size()) ||
+                !add_charge(64))
+                return false;
+    }
     std::unique_lock<std::mutex> lock(mutex_);
     if (exit_event_queued_ || destroying_ || exited_ || charge > limit ||
         channel_command_bytes_ > limit - charge)
@@ -412,12 +418,22 @@ void WorkerExecutor::set_log_identity(std::string application_id, std::string ge
     log_generation_digest_ = std::move(generation_digest);
 }
 
-std::deque<WorkerEvent> WorkerExecutor::drain_events() {
+void WorkerExecutor::drain_events_into(std::vector<WorkerEvent>* out) {
     std::unique_lock<std::mutex> lock(mutex_);
-    std::deque<WorkerEvent> local;
-    local.swap(events_);
-    for (const auto& event : local)
+    out->clear();
+    out->swap(events_);
+    for (const auto& event : *out) {
         channel_event_bytes_ -= event.channel_charge;
+    }
+}
+
+std::deque<WorkerEvent> WorkerExecutor::drain_events() {
+    std::vector<WorkerEvent> drained;
+    drain_events_into(&drained);
+    std::deque<WorkerEvent> local;
+    for (auto& event : drained) {
+        local.push_back(std::move(event));
+    }
     return local;
 }
 
@@ -734,24 +750,36 @@ bool WorkerExecutor::execute_command(Command command) {
             if (reserved != CAPSID_OK)
                 return report_runtime_failure(command.request_id, reserved, "upgrade reserve");
         }
-        std::vector<capsid_header> headers;
-        headers.reserve(command.headers.size());
-        for (const auto& header : command.headers) {
-            headers.push_back(capsid_header{
-                {reinterpret_cast<const std::uint8_t*>(header.name.data()), header.name.size()},
-                {reinterpret_cast<const std::uint8_t*>(header.value.data()), header.value.size()},
-            });
+        constexpr std::size_t kInlineHeadersCap = 32;
+        capsid_header inline_headers[kInlineHeadersCap];
+        std::vector<capsid_header> heap_headers;
+        const std::size_t header_count = command.headers.size();
+        capsid_header* header_ptr = nullptr;
+        if (header_count > 0) {
+            if (header_count <= kInlineHeadersCap) {
+                header_ptr = inline_headers;
+            } else {
+                heap_headers.resize(header_count);
+                header_ptr = heap_headers.data();
+            }
+            for (std::size_t i = 0; i < header_count; ++i) {
+                const auto& header = command.headers[i];
+                header_ptr[i] = capsid_header{
+                    {reinterpret_cast<const std::uint8_t*>(header.name.data()), header.name.size()},
+                    {reinterpret_cast<const std::uint8_t*>(header.value.data()),
+                     header.value.size()},
+                };
+            }
         }
-        const capsid_header* header_ptr = headers.empty() ? nullptr : headers.data();
         capsid_result result;
         if (command.end_request) {
             result = capsid_worker_begin_bodyless_request(
                 worker_, command.request_id, command.method.c_str(), command.url.c_str(),
-                header_ptr, headers.size());
+                header_ptr, header_count);
         } else {
             result =
                 capsid_worker_begin_request(worker_, command.request_id, command.method.c_str(),
-                                            command.url.c_str(), header_ptr, headers.size());
+                                            command.url.c_str(), header_ptr, header_count);
         }
         if (result == CAPSID_WOULD_BLOCK) {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -871,12 +899,13 @@ bool WorkerExecutor::execute_command(Command command) {
             result =
                 capsid_worker_channel_grant(worker_, command.channel_id, command.channel_credit);
             break;
-        case CommandType::kChannelClose:
+        case CommandType::kChannelClose: {
+            const std::string_view reason = command.close_reason_view();
             result = capsid_worker_channel_close_bytes(
                 worker_, command.channel_id, command.close_kind, command.close_code,
-                reinterpret_cast<const uint8_t*>(command.close_reason.data()),
-                command.close_reason.size());
+                reinterpret_cast<const uint8_t*>(reason.data()), reason.size());
             break;
+        }
         case CommandType::kChannelCancel:
             result =
                 capsid_worker_channel_cancel(worker_, command.channel_id, command.channel_flags);
@@ -916,15 +945,17 @@ bool WorkerExecutor::execute_command(Command command) {
         if (command.type == CommandType::kDialAccept && (capacity || !next_channel_id_)) {
             command.type = CommandType::kDialReject;
             command.channel_flags = rejection;
-            command.close_reason = "WebSocket worker channel capacity exhausted";
+            command.ensure_channel_extra().close_reason =
+                "WebSocket worker channel capacity exhausted";
         }
         const bool accepting = command.type == CommandType::kDialAccept;
         const uint32_t assigned = accepting ? next_channel_id_ : 0;
         capsid_result result;
-        if (accepting && command.fetch_upgrade) {
+        if (accepting && command.fetch_upgrade && command.channel_extra) {
+            const auto& http_response = command.channel_extra->http_response;
             std::vector<capsid_header> headers;
-            headers.reserve(command.http_response.headers.size());
-            for (const auto& header : command.http_response.headers)
+            headers.reserve(http_response.headers.size());
+            for (const auto& header : http_response.headers)
                 headers.push_back(
                     {{reinterpret_cast<const uint8_t*>(header.first.data()), header.first.size()},
                      {reinterpret_cast<const uint8_t*>(header.second.data()),
@@ -932,24 +963,24 @@ bool WorkerExecutor::execute_command(Command command) {
             capsid_fetch_upgrade_response response{};
             response.struct_size = sizeof(response);
             response.version = CAPSID_FETCH_UPGRADE_RESPONSE_VERSION;
-            response.status = command.http_response.status;
-            response.redirected = command.http_response.redirected;
+            response.status = http_response.status;
+            response.redirected = http_response.redirected;
             response.status_text = {
-                reinterpret_cast<const uint8_t*>(command.http_response.status_text.data()),
-                command.http_response.status_text.size()};
-            response.url = {reinterpret_cast<const uint8_t*>(command.http_response.url.data()),
-                            command.http_response.url.size()};
+                reinterpret_cast<const uint8_t*>(http_response.status_text.data()),
+                http_response.status_text.size()};
+            response.url = {reinterpret_cast<const uint8_t*>(http_response.url.data()),
+                            http_response.url.size()};
             response.headers = headers.data();
             response.header_count = headers.size();
             result = capsid_worker_dial_accept_http(worker_, command.dial_id, assigned,
                                                     command.channel_max_message, &response);
         } else if (accepting)
-            result = capsid_worker_dial_accept(worker_, command.dial_id, assigned,
-                                               command.channel_max_message,
-                                               command.close_reason.c_str());
+            result =
+                capsid_worker_dial_accept(worker_, command.dial_id, assigned,
+                                          command.channel_max_message, command.close_reason_cstr());
         else
             result = capsid_worker_dial_reject(worker_, command.dial_id, command.channel_flags,
-                                               command.close_reason.c_str());
+                                               command.close_reason_cstr());
         if (result == CAPSID_WOULD_BLOCK) {
             std::unique_lock<std::mutex> lock(mutex_);
             commands_.push_front(std::move(command));
@@ -1247,14 +1278,15 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         output.dial_id = open.dial_id;
         output.channel_max_message = open.max_message_bytes;
         output.channel_kind = open.channel_kind;
-        output.http_request = std::move(open.http_request);
         output.text = std::move(open.url);
-        output.protocols = std::move(open.protocols);
+        auto& dial_extra = output.ensure_dial_extra();
+        dial_extra.http_request = std::move(open.http_request);
+        dial_extra.protocols = std::move(open.protocols);
         output.dial_refused =
             capsid::client_dial_must_reject(worker_, open.dial_id, &output.channel_flags);
         if (output.channel_kind == capsid::protocol::kChannelKindFetchUpgrade) {
             size_t charge = output.text.size() + 1024;
-            for (const auto& header : output.http_request.headers)
+            for (const auto& header : dial_extra.http_request.headers)
                 charge += header.first.size() + header.second.size() + 64;
             bool exhausted;
             {
@@ -1271,7 +1303,7 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
                 rejected.type = CommandType::kDialReject;
                 rejected.dial_id = open.dial_id;
                 rejected.channel_flags = 8;
-                rejected.close_reason = "HTTP upgrade event queue exhausted";
+                rejected.ensure_channel_extra().close_reason = "HTTP upgrade event queue exhausted";
                 return execute_command(std::move(rejected));
             }
         }
@@ -1280,7 +1312,7 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
         rejected.type = CommandType::kDialReject;
         rejected.dial_id = open.dial_id;
         rejected.channel_flags = 8;
-        rejected.close_reason = "Host WebSocket networking is unavailable";
+        rejected.ensure_channel_extra().close_reason = "Host WebSocket networking is unavailable";
         if (!execute_command(std::move(rejected)))
             return false;
 #endif
@@ -1337,9 +1369,12 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
                 output.channel_charge = view.message.size + 1024;
                 output.body.assign(view.message.data, view.message.data + view.message.size);
             }
-        } else if (event.type == CAPSID_EVENT_CHANNEL_CREDIT)
+        } else if (event.type == CAPSID_EVENT_CHANNEL_CREDIT) {
             output.type = WorkerEvent::Type::kChannelCredit;
-        else if (event.type == CAPSID_EVENT_CHANNEL_CLOSE)
+            if (batching_events_) {
+                batch_has_channel_credit_ = true;
+            }
+        } else if (event.type == CAPSID_EVENT_CHANNEL_CLOSE)
             output.type = WorkerEvent::Type::kChannelClose;
         else if (event.type == CAPSID_EVENT_CHANNEL_CANCEL)
             output.type = WorkerEvent::Type::kChannelCancel;
@@ -1413,8 +1448,9 @@ bool WorkerExecutor::handle_worker_protocol_event(const capsid_event& event) {
             write_stderr(std::string("capsid-host: ") + log_error);
             return false;
         }
-        worker_event.application_id = log_application_id_;
-        worker_event.generation_digest = log_generation_digest_;
+        auto& log_extra = worker_event.ensure_log_extra();
+        log_extra.application_id = log_application_id_;
+        log_extra.generation_digest = log_generation_digest_;
         queue_worker_event(std::move(worker_event));
         return true;
     }
@@ -1526,36 +1562,45 @@ void WorkerExecutor::flush_event_batch() {
             }
         }
         batch_canceled_ids_.clear();
-        for (WorkerEvent& event : batch_events_) {
-            if (event.type == WorkerEvent::Type::kChannelCredit) {
-                bool coalesced = false;
-                for (auto& queued : events_) {
-                    if (queued.type == event.type && queued.channel_id == event.channel_id &&
-                        event.channel_credit <=
-                            std::numeric_limits<std::uint64_t>::max() - queued.channel_credit) {
-                        queued.channel_credit += event.channel_credit;
-                        coalesced = true;
-                        break;
+        if (events_.empty() && !batch_has_channel_credit_ &&
+            !metrics_enabled_.load(std::memory_order_relaxed)) {
+            need_notify = !batch_events_.empty();
+            events_.swap(batch_events_);
+            batch_has_channel_credit_ = false;
+        } else {
+            for (WorkerEvent& event : batch_events_) {
+                if (event.type == WorkerEvent::Type::kChannelCredit) {
+                    bool coalesced = false;
+                    for (auto& queued : events_) {
+                        if (queued.type == event.type && queued.channel_id == event.channel_id &&
+                            event.channel_credit <=
+                                std::numeric_limits<std::uint64_t>::max() - queued.channel_credit) {
+                            queued.channel_credit += event.channel_credit;
+                            coalesced = true;
+                            break;
+                        }
+                    }
+                    if (coalesced) {
+                        continue;
                     }
                 }
-                if (coalesced) {
-                    continue;
+                if (metrics_enabled_.load(std::memory_order_relaxed)) {
+                    metrics_.events_queued.fetch_add(1, std::memory_order_relaxed);
+                    const std::uint64_t size = static_cast<std::uint64_t>(events_.size() + 1);
+                    std::uint64_t hw =
+                        metrics_.event_queue_high_water.load(std::memory_order_relaxed);
+                    while (hw < size && !metrics_.event_queue_high_water.compare_exchange_weak(
+                                            hw, size, std::memory_order_relaxed)) {
+                    }
                 }
-            }
-            if (metrics_enabled_.load(std::memory_order_relaxed)) {
-                metrics_.events_queued.fetch_add(1, std::memory_order_relaxed);
-                const std::uint64_t size = static_cast<std::uint64_t>(events_.size() + 1);
-                std::uint64_t hw = metrics_.event_queue_high_water.load(std::memory_order_relaxed);
-                while (hw < size && !metrics_.event_queue_high_water.compare_exchange_weak(
-                                        hw, size, std::memory_order_relaxed)) {
+                if (events_.empty()) {
+                    need_notify = true;
                 }
+                events_.push_back(std::move(event));
             }
-            if (events_.empty()) {
-                need_notify = true;
-            }
-            events_.push_back(std::move(event));
+            batch_events_.clear();
+            batch_has_channel_credit_ = false;
         }
-        batch_events_.clear();
     }
     if (need_notify && notifier_) {
         notifier_();

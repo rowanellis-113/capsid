@@ -21,7 +21,9 @@
 #include "host/host_config_model.h"
 #include "host/managed_admin_backend.h"
 #include "host/managed_host.h"
+#include "managed_deploy_fixture.h"
 #include "host/managed_listener.h"
+#include "host/metrics.h"
 #include "host/protocol_launch.h"
 #include "host/routing_snapshot.h"
 #include "host/worker_capacity_ledger.h"
@@ -1071,14 +1073,13 @@ void run_disk_backed_generation_tamper_fails(const std::string& worker_path) {
     opts.application = "coldapp";
     opts.worker_path = worker_path;
     opts.runtime_compatibility_id = build_info.compatibility_id;
-    opts.host_policy.is_v2 = true;
     opts.host_policy.max_workers = 4;
     opts.host_policy.max_requests_per_worker = 64;
     opts.host_policy.max_worker_memory_bytes = 256ULL * 1024 * 1024;
     opts.ledger = &ledger;
 
     capsid::host::OperationStatus status;
-    capsid::host::DeployOutcome deployed = capsid::host::managed_deploy(&opts, "v1", &status);
+    capsid::host::DeployOutcome deployed = capsid::test::deploy_for_test(opts, "v1", &status);
     require(deployed.ok && deployed.generation_factory,
             "minReady=0 managed deploy failed: " + deployed.error);
     require(deployed.effective.min_ready == 0 && deployed.effective.workers == 2 &&
@@ -1086,11 +1087,13 @@ void run_disk_backed_generation_tamper_fails(const std::string& worker_path) {
                 deployed.effective.queue_timeout_ms == 5000,
             "deployed effective config mismatch");
     require(deployed.workers.size() == 1, "deploy must warm 1 probe worker even when minReady=0");
-    require(ledger.steady_used() == 0 && ledger.holds("coldapp"),
-            "minReady=0 app must hold active identity with 0 committed steady slots");
-    for (capsid_worker* w : deployed.workers) {
-        capsid_worker_destroy(w);
-    }
+    require(deployed.pre_acquired_elastic == 1 && ledger.elastic_of("coldapp") == 1 &&
+                ledger.steady_used() == 0 && ledger.holds("coldapp"),
+            "the live probe must hold its elastic slot");
+    for (capsid_worker* worker : deployed.workers)
+        capsid_worker_destroy(worker);
+    ledger.release_elastic("coldapp", deployed.pre_acquired_elastic);
+    require(ledger.elastic_of("coldapp") == 0, "the collected probe must return its slot");
 
     // Tamper committed bundle.bin on disk; disk-backed generation factory must
     // re-read & verify SHA-256 and fail closed instead of serving tampered bytes.
@@ -1584,6 +1587,401 @@ void run_dispatch_handoff_blocks_eviction(const std::string& worker_path) {
     std::cout << "PASS: dispatch_handoff_blocks_eviction" << std::endl;
 }
 
+void run_health_replacement_reaping_budget(const std::string& worker_path) {
+    using namespace std::chrono_literals;
+    const auto check = [&](bool headroom, bool drain) {
+        WorkerCapacityLedger ledger(2, 0, 1);
+        require(ledger.reserve_fresh("cold", 1), "reserve floor");
+        ledger.commit_fresh("cold");
+        if (!headroom) {
+            require(ledger.try_acquire_elastic("peer") && ledger.handoff_elastic_to_reaping("peer"),
+                    "occupy shared reaping budget");
+        }
+        std::atomic<bool> pause{false};
+        std::promise<void> paused, resume, admission;
+        auto gate = resume.get_future().share();
+        auto attempted = admission.get_future();
+        auto opts = cold_pool_options();
+        opts.min_ready = 1;
+        opts.try_acquire_reaping_slot = [&] {
+            const bool acquired = ledger.try_acquire_reaping("cold");
+            admission.set_value();
+            return acquired;
+        };
+        opts.release_reaping_slot = [&] { ledger.finish_reaping("cold"); };
+        opts.on_executor_notify = [&] {
+            if (pause.exchange(false)) {
+                paused.set_value();
+                (void)gate.wait_for(10s);
+            }
+        };
+        std::atomic<unsigned> spawns{0};
+        auto spawn = spawn_factory(worker_path, 5000, kBurstBundle);
+        opts.factory = [&](capsid_worker** worker, std::string* error) {
+            if (++spawns == 2 && headroom) {
+                *error = "controlled first replacement failure";
+                return false;
+            }
+            return spawn(worker, error);
+        };
+        std::string error;
+        auto pool = GenerationPool::create(std::move(opts), &error);
+        require(pool != nullptr, "create floor pool: " + error);
+        auto old = pool->current_worker_snapshot();
+        pause = true;
+        old->submit_probe("http://localhost/health");
+        require(paused.get_future().wait_for(5s) == std::future_status::ready, "pause old worker");
+        require(pool->recycle_worker(old.get()), "recycle floor worker");
+        const bool consulted = attempted.wait_for(2s) == std::future_status::ready;
+        const bool replaced =
+            wait_for([&] { return pool->ready_workers() == 1; }, headroom ? 2s : 100ms);
+        const auto live = pool->snapshot_workers().size();
+        const auto charged = ledger.reaping_of("cold");
+        const auto started = spawns.load();
+        if (drain) {
+            pool->request_stop();
+        }
+        resume.set_value();
+        const bool recovered = drain || wait_for(
+                                            [&] {
+                                                return old->exited() &&
+                                                       pool->ready_workers() == 1 &&
+                                                       ledger.reaping_of("cold") == 0;
+                                            },
+                                            5s);
+        pool->stop_and_join();
+        require(consulted && replaced == headroom && started == (headroom ? 3U : 1U) &&
+                    live == 1 + charged && charged == (headroom ? 1U : 0U),
+                "floor replacement must account for the old process before spawning");
+        const auto expected_spawns = drain ? started : (headroom ? 3U : 2U);
+        require(recovered && spawns == expected_spawns && ledger.steady_used() == 1 &&
+                    ledger.reaping_used() == (headroom ? 0U : 1U),
+                "incorrect final floor or reaping charge");
+        if (!headroom) {
+            ledger.finish_reaping("peer");
+        }
+        ledger.release_active("cold", 1);
+    };
+    check(false, false);
+    check(true, false);
+    check(false, true);
+}
+
+void run_reaping_budget_bounds_async_handoff(const std::string& worker_path) {
+    // B1: workersTotal=2, surge=0, explicit reaping budget=1.
+    // Evicting the 1st idle elastic worker transfers its slot into reaping
+    // (reaping_used=1, elastic_used=1). While that exiting process holds the
+    // only reaping slot, evicting a 2nd idle worker must keep its elastic slot
+    // charged (refusing unbounded async handoff) until process exit.
+    WorkerCapacityLedger ledger(2, 0, 1);
+    require(ledger.reserve_fresh("app-a", 0) && ledger.reserve_fresh("app-b", 0),
+            "reserve minReady=0 apps");
+    ledger.commit_fresh("app-a");
+    ledger.commit_fresh("app-b");
+
+    std::atomic<unsigned> pause_budget{0};
+    std::atomic<unsigned> paused_count{0};
+    std::promise<void> resume_io;
+    std::shared_future<void> resume_gate = resume_io.get_future().share();
+
+    GenerationPoolOptions opts_a;
+    opts_a.application_id = "app-a";
+    opts_a.version = "v1";
+    opts_a.generation_digest = "sha256:" + std::string(64, '1');
+    opts_a.workers = 2;
+    opts_a.has_min_ready = true;
+    opts_a.min_ready = 0;
+    opts_a.idle_timeout_ms = 60000;
+    opts_a.acquire_elastic_slot = [&ledger] { return ledger.try_acquire_elastic("app-a"); };
+    opts_a.release_elastic_slot = [&ledger] { ledger.release_elastic("app-a", 1); };
+    opts_a.handoff_elastic_to_reaping = [&ledger] {
+        return ledger.handoff_elastic_to_reaping("app-a");
+    };
+    opts_a.release_reaping_slot = [&ledger] { ledger.finish_reaping("app-a", 1); };
+    opts_a.on_executor_notify = [&] {
+        unsigned cur = pause_budget.load(std::memory_order_acquire);
+        while (cur > 0) {
+            if (pause_budget.compare_exchange_weak(cur, cur - 1, std::memory_order_acq_rel)) {
+                paused_count.fetch_add(1, std::memory_order_release);
+                (void)resume_gate.wait_for(std::chrono::seconds(10));
+                return;
+            }
+        }
+    };
+    opts_a.max_inflight_per_worker = 1;
+    opts_a.max_queued_requests = 16;
+    opts_a.queue_timeout_ms = 5000;
+    opts_a.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts_a.recovery = default_recovery_policy();
+
+    GenerationPoolOptions opts_b;
+    opts_b.application_id = "app-b";
+    opts_b.version = "v1";
+    opts_b.generation_digest = "sha256:" + std::string(64, '2');
+    opts_b.workers = 2;
+    opts_b.has_min_ready = true;
+    opts_b.min_ready = 0;
+    opts_b.idle_timeout_ms = 60000;
+    opts_b.acquire_elastic_slot = [&ledger] { return ledger.try_acquire_elastic("app-b"); };
+    opts_b.release_elastic_slot = [&ledger] { ledger.release_elastic("app-b", 1); };
+    opts_b.handoff_elastic_to_reaping = [&ledger] {
+        return ledger.handoff_elastic_to_reaping("app-b");
+    };
+    opts_b.release_reaping_slot = [&ledger] { ledger.finish_reaping("app-b", 1); };
+    opts_b.max_inflight_per_worker = 1;
+    opts_b.max_queued_requests = 16;
+    opts_b.queue_timeout_ms = 5000;
+    opts_b.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+    opts_b.recovery = default_recovery_policy();
+
+    std::string error;
+    auto pool_a = GenerationPool::create(opts_a, &error);
+    auto pool_b = GenerationPool::create(opts_b, &error);
+    require(pool_a && pool_b, "create elastic pools failed: " + error);
+
+    auto routing = std::make_shared<RoutingTable>();
+    routing->publish(RoutingSnapshot::build({{"app-a", pool_a}, {"app-b", pool_b}}));
+    ManagedListenerOptions listener_opts;
+    listener_opts.config = loopback_path_listener();
+    listener_opts.routing = routing;
+    ManagedListener listener(listener_opts);
+    require(listener.start(&error), "listener start failed: " + error);
+    const std::uint16_t port = listener.bound_port();
+
+    // Scale app-a to 2 ready elastic workers.
+    std::thread req1([port] {
+        require(do_http_get(port, "/@capsid/app-a/?delay=250").status == 200, "req1 failed");
+    });
+    require(wait_for([&] { return pool_a->ready_workers() == 1; }, std::chrono::seconds(5)),
+            "app-a did not warm slot 0");
+    std::thread req2([port] {
+        require(do_http_get(port, "/@capsid/app-a/?delay=250").status == 200, "req2 failed");
+    });
+    req1.join();
+    req2.join();
+    require(pool_a->ready_workers() == 2 && ledger.elastic_used() == 2 &&
+                ledger.reaping_used() == 0,
+            "app-a did not hold 2 ready elastic slots");
+
+    // Hold both workers' I/O threads on probe notifications without taking HTTP
+    // dispatch leases so both stay evictable yet cannot exit until released.
+    pause_budget.store(2, std::memory_order_release);
+    std::shared_ptr<WorkerExecutor> w0;
+    std::shared_ptr<WorkerExecutor> w1;
+    {
+        auto lease0 = pool_a->acquire_worker();
+        auto lease1 = pool_a->acquire_worker();
+        require(lease0 && lease1 && lease0.get() != lease1.get(),
+                "expected two distinct ready worker executors");
+        w0 = lease0.executor();
+        w1 = lease1.executor();
+    }
+    w0->submit_probe("http://localhost/health");
+    w1->submit_probe("http://localhost/health");
+    require(wait_for([&] { return paused_count.load(std::memory_order_acquire) == 2; },
+                     std::chrono::seconds(5)),
+            "workers did not pause on I/O notification barrier");
+
+    // 1st eviction fits the reaping budget (limit=1): elastic_used 2 -> 1, reaping_used 0 -> 1.
+    require(pool_a->evict_idle_worker(0, "global_lru"), "1st eviction failed");
+    require(pool_a->ready_workers() == 1 && ledger.elastic_used() == 1 &&
+                ledger.reaping_used() == 1,
+            "1st eviction did not transfer elastic slot into reaping budget");
+
+    // 2nd eviction sees reaping budget saturated (1 == 1): elastic slot stays held
+    // (elastic_used stays 1, reaping_used stays 1) until the retiring process exits.
+    require(pool_a->evict_idle_worker(1, "global_lru"), "2nd eviction failed");
+    require(pool_a->ready_workers() == 0 && ledger.elastic_used() == 1 &&
+                ledger.reaping_used() == 1,
+            "2nd eviction bypassed saturated reaping budget and leaked unbounded async exits");
+
+    // app-b can take the 1 transferred elastic slot, but cannot take a 2nd while
+    // app-a's un-handed-off retired worker is still alive.
+    require(do_http_get(port, "/@capsid/app-b/").status == 200, "app-b 1st request failed");
+    require(pool_b->ready_workers() == 1 && ledger.elastic_used() == 2,
+            "app-b did not occupy the single freed elastic slot");
+    std::string reject_reason;
+    require(pool_b->request_scale_out(&reject_reason) ==
+                    GenerationPool::ScaleOutResult::kCapacityRejected &&
+                reject_reason == "host_capacity_exhausted",
+            "app-b exceeded bounded elastic+reaping capacity while 2nd worker stayed alive");
+
+    // Release the paused retired workers: both exit, releasing reaping_used -> 0
+    // and app-a's held elastic slot -> elastic_used == 1 (only app-b).
+    resume_io.set_value();
+    require(wait_for([&] { return ledger.reaping_used() == 0 && ledger.elastic_used() == 1; },
+                     std::chrono::seconds(5)),
+            "reaping completion did not release both reaping and held elastic charges");
+
+    listener.request_stop();
+    listener.wait(&error);
+    pool_a->stop_and_join();
+    pool_b->stop_and_join();
+    require(ledger.reaping_used() == 0 && ledger.elastic_used() == 0,
+            "reaping or elastic slots leaked after pool teardown");
+    std::cout << "PASS: reaping_budget_bounds_async_handoff" << std::endl;
+}
+
+void run_recovery_jitter_and_permit_refusal_backoff(const std::string& worker_path) {
+    // B2: verify GenerationPool applies recovery jitter (no longer hardcoded 0)
+    // and applies exponential backoff + jitter + stability reset on consecutive
+    // StartupPermitCoordinator refusals.
+    auto extract_backoff_ms = [](const std::string& metrics_text,
+                                 const std::string& app) -> std::int64_t {
+        const std::string prefix = "capsid_recovery_backoff_ms{app=\"" + app + "\"} ";
+        const std::size_t pos = metrics_text.find(prefix);
+        if (pos == std::string::npos) {
+            return -1;
+        }
+        const std::size_t start = pos + prefix.size();
+        const std::size_t end = metrics_text.find('\n', start);
+        return std::strtoll(metrics_text.substr(start, end - start).c_str(), nullptr, 10);
+    };
+
+    // Part 1: recovery jitter applied on recycle/spawn failures.
+    {
+        capsid::host::MetricsRegistry metrics;
+        std::atomic<unsigned> spawn_calls{0};
+        std::atomic<unsigned> sampler_calls{0};
+        auto real_spawn = spawn_factory(worker_path, 5000, kBurstBundle);
+
+        GenerationPoolOptions opts;
+        opts.application_id = "jitter-app";
+        opts.version = "v1";
+        opts.generation_digest = "sha256:" + std::string(64, '3');
+        opts.workers = 1;
+        opts.has_min_ready = true;
+        opts.min_ready = 1;
+        opts.metrics = &metrics;
+        opts.recovery = default_recovery_policy();
+        opts.recovery.max_events = 10;
+        opts.recovery.backoff_initial_ms = 200;
+        opts.recovery.backoff_maximum_ms = 2000;
+        opts.recovery.jitter_basis_points = 2000; // +/-20%
+        opts.jitter_sampler = [&](std::uint32_t max_bps) -> std::int32_t {
+            require(max_bps == 2000, "jitter_sampler received wrong max_jitter_bps");
+            const unsigned idx = sampler_calls.fetch_add(1, std::memory_order_relaxed);
+            return idx == 0 ? 2000 : -2000;
+        };
+        opts.factory = [&](capsid_worker** out, std::string* err) {
+            if (spawn_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+                return real_spawn(out, err);
+            }
+            if (err != nullptr) {
+                *err = "synthetic spawn failure";
+            }
+            return false;
+        };
+
+        std::string error;
+        auto pool = GenerationPool::create(std::move(opts), &error);
+        require(pool != nullptr, "create jitter-app failed: " + error);
+        auto initial = pool->current_worker_snapshot();
+        require(initial != nullptr && pool->recycle_worker(initial.get()),
+                "failed to trigger health recycle on jitter-app");
+
+        // 1st failure: 200ms * 1.2 = 240ms; 2nd failure: 400ms * 0.8 = 320ms.
+        bool saw_240 = false;
+        bool saw_320 = false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline && !(saw_240 && saw_320)) {
+            const std::int64_t ms =
+                extract_backoff_ms(metrics.render_prometheus_text(), "jitter-app");
+            if (ms == 240) {
+                saw_240 = true;
+            } else if (ms == 320) {
+                saw_320 = true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        pool->stop_and_join();
+        require(sampler_calls.load() >= 2 && saw_240 && saw_320,
+                "jittered recovery backoff did not observe 240ms then 320ms");
+    }
+
+    // Part 2: startup permit refusal escalates backoff with jitter without
+    // exhausting crash budget, then resets to 0 after stable_reset_ms.
+    {
+        capsid::host::MetricsRegistry metrics;
+        capsid::host::StartupPermitCoordinator permits(nullptr, 1);
+        capsid::host::StartupPermitRequest holder;
+        holder.application = "other-app";
+        holder.generation = "sha256:" + std::string(64, '9');
+        holder.lane = capsid::host::StartupPermitLane::kDeploy;
+        require(permits.enqueue_and_wait(holder), "external holder failed to claim permit");
+        std::atomic<bool> queued_started{false};
+        std::atomic<bool> queued_granted{false};
+        std::thread queued_waiter([&] {
+            queued_started.store(true, std::memory_order_release);
+            capsid::host::StartupPermitRequest second;
+            second.application = "queued-app";
+            second.generation = "sha256:" + std::string(64, '8');
+            second.lane = capsid::host::StartupPermitLane::kDeploy;
+            queued_granted.store(permits.enqueue_and_wait(second), std::memory_order_release);
+        });
+        while (!queued_started.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+        GenerationPoolOptions opts;
+        opts.application_id = "permit-backoff";
+        opts.version = "v1";
+        opts.generation_digest = "sha256:" + std::string(64, '4');
+        opts.workers = 1;
+        opts.has_min_ready = true;
+        opts.min_ready = 1;
+        opts.startup_permits = &permits;
+        opts.metrics = &metrics;
+        opts.recovery = default_recovery_policy();
+        opts.recovery.max_events = 2; // Tight budget: refusals must NOT spend it.
+        opts.recovery.backoff_initial_ms = 50;
+        opts.recovery.backoff_maximum_ms = 400;
+        opts.recovery.jitter_basis_points = 1000; // +10%
+        opts.recovery.stable_reset_ms = 250;
+        opts.jitter_sampler = [](std::uint32_t max_bps) -> std::int32_t {
+            return static_cast<std::int32_t>(max_bps);
+        };
+        opts.factory = spawn_factory(worker_path, 5000, kBurstBundle);
+
+        std::string error;
+        auto pool = GenerationPool::create(std::move(opts), &error);
+        require(pool != nullptr, "create permit-backoff pool failed: " + error);
+        auto initial = pool->current_worker_snapshot();
+        require(initial != nullptr && pool->recycle_worker(initial.get()),
+                "failed to recycle permit-backoff worker");
+
+        // Recycle takes step 1 (55ms); subsequent permit refusals escalate to
+        // step 2 (110ms) and step 3 (220ms) while keeping pool active.
+        require(wait_for(
+                    [&] {
+                        return extract_backoff_ms(metrics.render_prometheus_text(),
+                                                  "permit-backoff") >= 220;
+                    },
+                    std::chrono::seconds(5)),
+                "consecutive permit refusals did not escalate backoff exponentially");
+        require(pool->state() == GenerationPool::State::kActive,
+                "permit refusals quarantined the pool");
+
+        permits.release_grant();
+        queued_waiter.join();
+        require(queued_granted.load(std::memory_order_acquire),
+                "queued external waiter did not receive permit grant");
+        permits.release_grant();
+        require(wait_for([&] { return pool->ready_workers() == 1; }, std::chrono::seconds(5)),
+                "pool did not recover after startup permit became available");
+        require(wait_for(
+                    [&] {
+                        return extract_backoff_ms(metrics.render_prometheus_text(),
+                                                  "permit-backoff") == 0;
+                    },
+                    std::chrono::seconds(5)),
+                "capsid_recovery_backoff_ms did not reset to 0 after stable_reset_ms");
+        pool->stop_and_join();
+    }
+    std::cout << "PASS: recovery_jitter_and_permit_refusal_backoff" << std::endl;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1671,6 +2069,18 @@ int main(int argc, char** argv) {
     }
     if (mode == "dispatch_handoff_blocks_eviction") {
         run_dispatch_handoff_blocks_eviction(worker_path);
+        return 0;
+    }
+    if (mode == "health_replacement_reaping_budget") {
+        run_health_replacement_reaping_budget(worker_path);
+        return 0;
+    }
+    if (mode == "reaping_budget_bounds_async_handoff") {
+        run_reaping_budget_bounds_async_handoff(worker_path);
+        return 0;
+    }
+    if (mode == "recovery_jitter_and_permit_refusal_backoff") {
+        run_recovery_jitter_and_permit_refusal_backoff(worker_path);
         return 0;
     }
     fail("unknown elastic pool test case: " + mode);

@@ -261,7 +261,7 @@ capsid_worker* spawn(const char* worker_path, const std::vector<const char*>& mo
     config.egress_policy = legacy_policy;
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
     return worker;
 }
 
@@ -423,7 +423,7 @@ void test_spawn_policy_copy_and_validation(const char* worker_path) {
     config.worker_path = worker_path;
     config.capability_policy = &capability;
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn immutable-policy worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn immutable-policy worker");
 
     identity.assign("mutated-app");
     module.assign("capsid:fs");
@@ -452,7 +452,8 @@ void test_spawn_policy_copy_and_validation(const char* worker_path) {
     config.worker_path = worker_path;
     config.capability_policy = &malformed;
     worker = NULL;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_INVALID_ARGUMENT && worker == NULL,
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_INVALID_ARGUMENT &&
+                worker == NULL,
             "malformed capability policy reached worker spawn");
 }
 
@@ -588,7 +589,7 @@ capsid_worker* spawn_environment_worker(const char* worker_path, std::string* mo
     config.worker_path = worker_path;
     config.capability_policy = &capability;
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn environment worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn environment worker");
     return worker;
 }
 
@@ -696,7 +697,7 @@ void test_system_module_contract(const char* worker_path) {
     config.worker_path = worker_path;
     config.capability_policy = &capability;
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn system worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn system worker");
 
     const std::string bundle =
         "import * as module from 'capsid:system';\n"
@@ -817,7 +818,7 @@ void test_storage_module_contract(const char* worker_path) {
         "} };\n";
 
     capsid_worker* first = NULL;
-    require_result(capsid_worker_spawn(&config, &first), "spawn first storage worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &first), "spawn first storage worker");
     std::vector<Audit> first_audits;
     load_and_expect_startup(first, bundle, true, NULL, &first_audits);
     const std::string first_body = run_request_id(first, 6011, &first_audits);
@@ -841,7 +842,7 @@ void test_storage_module_contract(const char* worker_path) {
     capsid_worker_destroy(first);
 
     capsid_worker* second = NULL;
-    require_result(capsid_worker_spawn(&config, &second), "spawn second storage worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &second), "spawn second storage worker");
     std::vector<Audit> second_audits;
     load_and_expect_startup(second, bundle, true, NULL, &second_audits);
     require(run_request_id(second, 6021, &second_audits).find("|1|") != std::string::npos,
@@ -881,7 +882,7 @@ void test_stdio_module_contract(const char* worker_path) {
     config.worker_path = worker_path;
     config.capability_policy = &capability;
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn stdio worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn stdio worker");
 
     const std::string bundle =
         "import * as module from 'capsid:stdio';\n"
@@ -990,7 +991,7 @@ void test_fs_module_contract(const char* worker_path) {
     config.strict_sandbox = 1;
     config.capability_policy = &capability;
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn fs worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn fs worker");
 
     const std::string bundle =
         "import * as module from 'capsid:fs';\n"
@@ -1045,7 +1046,7 @@ void test_fs_module_contract(const char* worker_path) {
     rules[0].resource = link.c_str();
     capability.rule_count = 1;
     capsid_worker* symlink_root_worker = NULL;
-    require_result(capsid_worker_spawn(&config, &symlink_root_worker),
+    require_result(capsid_worker_spawn_ex(&config, NULL, &symlink_root_worker),
                    "spawn fs symlink-root worker");
     std::vector<Audit> symlink_root_audits;
     load_and_expect_startup(symlink_root_worker,

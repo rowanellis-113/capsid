@@ -106,11 +106,9 @@ class Server {
         options.application = "orders";
         options.workers_override = workers;
         options.capsid_json_text =
-            std::string(R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":)json") +
-            std::to_string(workers) + R"json(,"maxWorkers":)json" + std::to_string(workers) +
-            R"json(},"request":{"timeout":")json" + std::to_string(request_ms) +
-            R"json(ms","maxInflightPerWorker":1,"maxStreamingInflightPerWorker":1,"writeTimeoutMs":)json" +
-            std::to_string(write_ms) + R"json(}})json";
+            std::string(R"json({"apiVersion":"capsid/app-v2","pool":{"workers":)json") +
+            std::to_string(workers) + R"json(},"request":{"timeout":")json" +
+            std::to_string(request_ms) + R"json(ms","maxInflight":1}})json";
         capsid::host::ListenerConfig listener;
         listener.name = "public";
         listener.tcp = "127.0.0.1:0";

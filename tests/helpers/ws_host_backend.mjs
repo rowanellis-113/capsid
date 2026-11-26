@@ -192,7 +192,25 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
   const workers = options.workers ?? 1;
   const capacity = options.channelCapacity ?? {};
   const permissions = options.permissions ?? { modules: [] };
-  const formatSize = (value) => (typeof value === 'number' ? `${value}B` : value);
+  const buildV2Capacity = () => {
+    const out = {
+      workersTotal: options.hostCapacity?.workersTotal ?? workers,
+    };
+    if (capacity.channelsTotal !== undefined) out.channelsTotal = capacity.channelsTotal;
+    if (capacity.maxChannelMessageSize !== undefined)
+      out.maxChannelMessageSize = capacity.maxChannelMessageSize;
+    if (capacity.channelIdleTimeout !== undefined)
+      out.channelIdleTimeout = capacity.channelIdleTimeout;
+    return out;
+  };
+  const buildV2Recovery = () => {
+    if (!options.recovery) return undefined;
+    const out = {};
+    if (options.recovery.crashBudget) out.crashBudget = options.recovery.crashBudget;
+    if (options.recovery.healthCheck) out.healthCheck = options.recovery.healthCheck;
+    return Object.keys(out).length ? out : undefined;
+  };
+  const v2Recovery = buildV2Recovery();
   let args;
   if (mode !== 'managed') {
     const localDir = fs.mkdtempSync(path.join(dir, 'local-'));
@@ -200,27 +218,16 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
     fs.writeFileSync(
       path.join(localDir, 'capsid.json'),
       JSON.stringify({
-        apiVersion: 'capsid/app-v1',
+        apiVersion: 'capsid/app-v2',
         entry: 'bundle.mjs',
         permissions,
-        pool: { minReady: workers, maxWorkers: workers },
+        pool: { workers },
         ...(options.worker ? { worker: options.worker } : {}),
         ...(options.requestTimeoutMs
           ? { request: { timeout: `${options.requestTimeoutMs}ms` } }
           : {}),
       }),
     );
-    const normalizedCapacity = {
-      workersTotal: workers,
-      startupsConcurrent: Math.max(1, workers),
-      ...options.hostCapacity,
-      ...capacity,
-    };
-    if (normalizedCapacity.channelQueueBytesTotal !== undefined) {
-      normalizedCapacity.channelQueueBytesTotal = formatSize(
-        normalizedCapacity.channelQueueBytesTotal,
-      );
-    }
     const fetchTargets = Array.from(
       new Set([...(options.fetchTargets ?? []), ...(permissions.fetch?.allow ?? [])]),
     );
@@ -228,11 +235,13 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
     fs.writeFileSync(
       hostConfig,
       JSON.stringify({
-        apiVersion: 'capsid/host-v1',
-        applicationsRoot: '/var/lib/capsid/apps',
-        stateRoot: '/var/lib/capsid/state',
-        secretRootTemplate: '/run/capsid/secrets/{application}',
-        admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+        apiVersion: 'capsid/host-v2',
+        paths: {
+          applications: '/var/lib/capsid/apps',
+          state: '/var/lib/capsid/state',
+          secrets: '/run/capsid/secrets/{application}',
+        },
+        admin: { unix: '/run/capsid/admin.sock' },
         permissions: {
           modules: [...(permissions.modules ?? [])],
           environmentNames: Object.keys(permissions.env ?? {}),
@@ -242,24 +251,19 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
           stdioStreams: [...(permissions.stdio ?? [])],
         },
         isolation: { mode: 'strict', required: [] },
-        capacity: normalizedCapacity,
-        ...(options.channels ? { channels: options.channels } : {}),
-        ...(options.recovery ? { recovery: options.recovery } : {}),
+        capacity: buildV2Capacity(),
+        ...(v2Recovery ? { recovery: v2Recovery } : {}),
         listeners: [
           {
             name: 'public',
             tcp: '127.0.0.1:0',
-            publicScheme: 'http',
-            publicAuthority: 'public.example',
+            publicOrigin: 'http://public.example',
             trusted: false,
             routing: { mode: 'path' },
             limits: {
               ...(options.listenerChannels === undefined
                 ? {}
                 : { channels: options.listenerChannels }),
-              ...(options.listenerChannelQueueBytes === undefined
-                ? {}
-                : { channelQueueBytes: formatSize(options.listenerChannelQueueBytes) }),
             },
           },
         ],
@@ -299,10 +303,10 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
     fs.writeFileSync(
       path.join(version, 'capsid.json'),
       JSON.stringify({
-        apiVersion: 'capsid/app-v1',
+        apiVersion: 'capsid/app-v2',
         entry: 'bundle.mjs',
         permissions,
-        pool: { minReady: workers, maxWorkers: workers },
+        pool: { workers },
         ...(options.worker ? { worker: options.worker } : {}),
         ...(options.requestTimeoutMs
           ? { request: { timeout: `${options.requestTimeoutMs}ms` } }
@@ -314,11 +318,13 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
     fs.writeFileSync(
       config,
       JSON.stringify({
-        apiVersion: 'capsid/host-v1',
-        applicationsRoot,
-        stateRoot,
-        secretRootTemplate: path.join(secrets, '{application}'),
-        admin: { unix: socketPath, mode: '0600' },
+        apiVersion: 'capsid/host-v2',
+        paths: {
+          applications: applicationsRoot,
+          state: stateRoot,
+          secrets: path.join(secrets, '{application}'),
+        },
+        admin: { unix: socketPath },
         permissions: {
           modules: [],
           environmentNames: [],
@@ -328,29 +334,19 @@ export async function startCapsid(host, worker, bundle, dir, mode = 'single-work
           stdioStreams: [],
         },
         isolation: { mode: 'strict', required: [] },
-        capacity: {
-          workersTotal: workers,
-          startupsConcurrent: 1,
-          ...options.hostCapacity,
-          ...capacity,
-        },
-        ...(options.channels ? { channels: options.channels } : {}),
-        ...(options.recovery ? { recovery: options.recovery } : {}),
+        capacity: buildV2Capacity(),
+        ...(v2Recovery ? { recovery: v2Recovery } : {}),
         listeners: [
           {
             name: 'public',
             tcp: `127.0.0.1:${port}`,
-            publicScheme: 'http',
-            publicAuthority: 'public.example',
+            publicOrigin: 'http://public.example',
             trusted: false,
             routing: { mode: 'path' },
             limits: {
               ...(options.listenerChannels === undefined
                 ? {}
                 : { channels: options.listenerChannels }),
-              ...(options.listenerChannelQueueBytes === undefined
-                ? {}
-                : { channelQueueBytes: options.listenerChannelQueueBytes }),
             },
           },
         ],

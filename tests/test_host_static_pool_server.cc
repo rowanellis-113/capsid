@@ -274,7 +274,6 @@ void test_binding_local_policy(const char* worker_path) {
     auto options = make_options(worker_path, ready[1], 2);
     options.capsid_json_text.reset();
     options.capsid_json_path = policy_path;
-    options.capsid_json_required = true;
     options.binding_registry = make_pool_binding_registry();
     capsid::host::LocalDevHost pool(std::move(options));
     std::string error;
@@ -526,7 +525,7 @@ void test_atomic_start_failure(const char* worker_path) {
     auto zero_options = make_options(worker_path, -1, 1);
     zero_options.workers_override = 0;
     zero_options.capsid_json_text =
-        R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":0,"maxWorkers":0}})json";
+        R"json({"apiVersion":"capsid/app-v2","pool":{"workers":0}})json";
     capsid::host::LocalDevHost zero(std::move(zero_options));
     require(!zero.start(fixture_bundle(), &error), "zero-worker local pool activated");
     require(zero.active_workers() == 0, "zero-worker local pool reported an active worker");

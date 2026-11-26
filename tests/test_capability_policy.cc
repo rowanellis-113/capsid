@@ -501,37 +501,15 @@ void test_explicit_environment_snapshot() {
             "failed environment configure partially mutated snapshot");
 }
 
-void test_version_1_policy_compatibility() {
-    struct CapabilityPolicyV1 {
-        uint32_t struct_size;
-        uint32_t version;
-        const char* application_identity;
-        const char* const* allowed_modules;
-        uint32_t allowed_module_count;
-        const capsid_permission_rule* rules;
-        uint32_t rule_count;
-        const capsid_egress_policy* net_policy;
-        uint32_t reserved;
-    };
-    require(sizeof(CapabilityPolicyV1) == offsetof(capsid_capability_policy, env_entries),
-            "version 1 capability policy layout drifted");
-    CapabilityPolicyV1 legacy = {};
-    legacy.struct_size = sizeof(legacy);
-    legacy.version = CAPSID_CAPABILITY_POLICY_VERSION_1;
-    legacy.application_identity = "legacy-policy";
-    const char* module = "capsid:permissions";
-    legacy.allowed_modules = &module;
-    legacy.allowed_module_count = 1;
-
+void test_rejects_retired_policy() {
+    capsid_capability_policy policy;
+    capsid_capability_policy_init(&policy);
     capsid::CapabilityPolicy compiled;
     std::string error;
-    require(compiled.configure(reinterpret_cast<const capsid_capability_policy*>(&legacy), &error),
-            error);
-    require(compiled.enabled() && compiled.version() == CAPSID_CAPABILITY_POLICY_VERSION_1 &&
-                compiled.application_identity() == "legacy-policy" &&
-                compiled.module_decision("capsid:permissions") == capsid::kModuleGranted &&
-                compiled.env_entries().empty(),
-            "version 1 capability policy changed semantics");
+    policy.version = 1;
+    require(!compiled.configure(&policy, &error), "retired policy version accepted");
+    policy.struct_size = offsetof(capsid_capability_policy, env_entries);
+    require(!compiled.configure(&policy, &error), "retired policy layout accepted");
 }
 
 void expect_invalid_rule(const capsid_permission_rule& invalid, const char* label) {
@@ -879,7 +857,7 @@ int main() {
     test_net_policy_and_rule_ids();
     test_copy_lifetime_and_atomic_failure();
     test_explicit_environment_snapshot();
-    test_version_1_policy_compatibility();
+    test_rejects_retired_policy();
     test_malformed_rules();
     test_binding_policy_origin_isolation();
     test_binding_profile_digest_and_consistency();

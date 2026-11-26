@@ -420,20 +420,18 @@ make_worker_options(const char* worker_path, int ready_fd, std::uint32_t workers
                     std::uint64_t max_inflight = 1, std::uint64_t max_streaming = 1,
                     std::uint64_t queue_requests = 0, std::uint64_t queue_timeout_ms = 3000,
                     std::uint64_t request_timeout_ms = 5000) {
+    (void)max_streaming;
     capsid::host::LocalDevHostOptions options;
     options.worker_path = worker_path;
     options.source_name = "file://admission/v1/bundle.mjs";
     options.application = "orders";
     options.workers_override = workers;
     options.capsid_json_text =
-        std::string(R"json({"apiVersion":"capsid/app-v1","pool":{"minReady":)json") +
-        std::to_string(workers) + R"json(,"maxWorkers":)json" + std::to_string(workers) +
-        R"json(,"queueRequests":)json" + std::to_string(queue_requests) +
+        std::string(R"json({"apiVersion":"capsid/app-v2","pool":{"workers":)json") +
+        std::to_string(workers) + R"json(,"queueRequests":)json" + std::to_string(queue_requests) +
         R"json(,"queueTimeout":")json" + std::to_string(queue_timeout_ms) +
         R"json(ms"},"request":{"timeout":")json" + std::to_string(request_timeout_ms) +
-        R"json(ms","maxInflightPerWorker":)json" + std::to_string(max_inflight) +
-        R"json(,"maxStreamingInflightPerWorker":)json" + std::to_string(max_streaming) +
-        R"json(}})json";
+        R"json(ms","maxInflight":)json" + std::to_string(max_inflight) + R"json(}})json";
     capsid::host::ListenerConfig listener;
     listener.name = "public";
     listener.tcp = "127.0.0.1:0";

@@ -47,7 +47,7 @@ struct GenerationIdentityInput {
     // GLM T08: digest over the negotiated wire protocol and channel
     // limits (the same framing as the record itself): the same bundle
     // under different limits or wire versions is a DIFFERENT
-    // generation. Empty for the legacy v3 carriage default.
+    // generation.
     std::string protocol_limits_digest;
     // Binding v1 §6: the binding-set digest over every committed Binding
     // (manifest, source, canonical config, effective permissions, sandbox

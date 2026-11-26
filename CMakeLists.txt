@@ -347,16 +347,13 @@ endif()
 # Override point for the locked identity manifest (docs/txiki-upgrade-
 # baseline.json). The build-identity matrix uses it to prove that a real
 # bytecode-ABI difference changes the compatibility ID.
-# ABI version 7 matches CAPSID_ABI_VERSION in include/capsid/runtime.h;
-# FetchRPC version 3 matches capsid::protocol::kVersion in src/protocol.h.
-# v3 adds kFlagRequestEnd on RequestHead (bodyless requests).
 capsid_generate_build_identity(
     OUT_HEADER "${CAPSID_GENERATED_DIR}/build_identity.h"
     LOCKED_MANIFEST "${CAPSID_LOCKED_IDENTITY_MANIFEST}"
     CAPSID_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
     RUNTIME_VERSION "${PROJECT_VERSION}"
-    ABI_VERSION "7"
-    FETCHRPC_VERSION "3"
+    ABI_VERSION "8"
+    FETCHRPC_VERSION "4"
     COMPILE_FLAGS "${CAPSID_BUILD_COMPILE_FLAGS}"
     ARCHITECTURE "${CMAKE_SYSTEM_PROCESSOR}"
     ENDIANNESS "${CAPSID_BUILD_ENDIANNESS}"

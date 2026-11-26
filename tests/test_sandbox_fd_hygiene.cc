@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
     config.resource_limits = &limits;
 
     capsid_worker* worker = NULL;
-    const capsid_result result = capsid_worker_spawn(&config, &worker);
+    const capsid_result result = capsid_worker_spawn_ex(&config, NULL, &worker);
     if (result != CAPSID_OK) {
         close(inherited);
         fail(std::string("worker spawn failed: ") + capsid_result_string(result));

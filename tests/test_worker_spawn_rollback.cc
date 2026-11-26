@@ -173,7 +173,7 @@ bool healthy(const char* worker_path) {
     config.worker_path = worker_path;
     config.process_memory_limit = 0;
     capsid_worker* worker = nullptr;
-    if (capsid_worker_spawn(&config, &worker) != CAPSID_OK || !worker)
+    if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK || !worker)
         return false;
     static const char bundle[] = "export default {fetch(){return new Response('healthy')}}";
     bool passed = capsid_worker_load_bundle(worker, reinterpret_cast<const uint8_t*>(bundle),
@@ -288,7 +288,7 @@ int main(int argc, char** argv) {
             config.worker_path = argv[2];
             config.process_memory_limit = 0;
             capsid_worker* worker = reinterpret_cast<capsid_worker*>(1);
-            const auto result = capsid_worker_spawn(&config, &worker);
+            const auto result = capsid_worker_spawn_ex(&config, NULL, &worker);
             fault.active = false;
             fault.after_spawn = false;
             fault.constructor = false;

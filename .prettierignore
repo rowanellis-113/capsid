@@ -15,7 +15,6 @@ js/encoding-data/
 tools/encoding-data/
 perf-site/
 # First-party source identities referenced by retained primary captures.
-tests/compat/runtime_v7.h
 tests/helpers/workerd_listener_control.mjs
 tests/helpers/ws_fetch_arguments_peer.mjs
 tests/helpers/ws_fetch_boundary_peer.mjs

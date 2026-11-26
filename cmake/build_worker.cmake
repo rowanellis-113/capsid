@@ -155,6 +155,11 @@ if(CAPSID_BUILD_WORKER)
         add_link_options(${CAPSID_DEPENDENCY_LINK_OPTIONS})
     endif()
     add_subdirectory("${CAPSID_TXIKI_OVERLAY}" "${CMAKE_CURRENT_BINARY_DIR}/txiki-build" EXCLUDE_FROM_ALL)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # WAMR's native-call assembly needs only a data stack. Mark its ELF
+        # objects so consumers inherit a non-executable stack.
+        target_compile_options(vmlib PRIVATE "$<$<COMPILE_LANGUAGE:ASM>:-Wa,--noexecstack>")
+    endif()
     # Keep lws_ssl_capable_write out of LTO IR on Linux GNU/Clang when tests
     # are enabled so test-tjs-http-short-write's --wrap=lws_ssl_capable_write
     # intercepts calls deterministically regardless of LTO partitioning.

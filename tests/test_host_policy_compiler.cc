@@ -43,7 +43,6 @@ capsid::host::HostPolicy default_host() {
     host.storage_allowed = true;
     host.stdio_allowed = false;
     host.max_workers = 1;
-    host.min_ready = 1;
     host.max_requests_per_worker = 10000;
     host.max_worker_memory_bytes = 256U * 1024U * 1024U;
     host.strict_sandbox = true;
@@ -64,8 +63,7 @@ capsid::host::AppRequest legal_app() {
     app.stdio = false;
     app.requests_per_worker = 1000;
     app.memory_bytes = 64U * 1024U * 1024U;
-    app.workers = 1;
-    app.min_ready = 1;
+
     return app;
 }
 
@@ -264,8 +262,8 @@ int main() {
     // The effective config carries the compiled queue into the data plane.
     {
         capsid::host::AppRequest queued = legal_app();
+        queued.has_queue_requests = true;
         queued.queue_requests = 16;
-        queued.queue_header_bytes = 2U * 1024U * 1024U;
         queued.queue_timeout_ms = 5000;
         // legal_app() requests one secret; the resolved set must match.
         EffectiveEnvEntry resolved;
@@ -277,31 +275,29 @@ int main() {
             const PolicyCompileResult result = compile_policy(default_host(), queued, {resolved});
             require(result.ok, "legal queue rejected: " + result.error);
             require(result.effective.queue_requests == 16 &&
-                        result.effective.queue_header_bytes == 2U * 1024U * 1024U &&
                         result.effective.queue_timeout_ms == 5000,
                     "effective config lost the queue fields");
             require(result.effective.effective_json.find("\"queueRequests\":16") !=
                             std::string::npos &&
-                        result.effective.effective_json.find("\"queueHeaderBytes\":2097152") !=
-                            std::string::npos &&
                         result.effective.effective_json.find("\"queueTimeoutMs\":5000") !=
                             std::string::npos,
                     "effective.json lost the queue fields");
+            for (const char* key :
+                 {"queueHeaderBytes", "maxStreamingInflightPerWorker", "streamIdleTimeoutMs",
+                  "writeTimeoutMs", "processAddressBytes"}) {
+                require(result.effective.effective_json.find(key) == std::string::npos,
+                        std::string("retired application setting in effective.json: ") + key);
+            }
         }
 
         capsid::host::HostPolicy capped = default_host();
         capped.max_queue_requests = 8;
         capsid::host::AppRequest deep = queued;
+        deep.has_queue_requests = true;
         deep.queue_requests = 16;
         const PolicyCompileResult deep_result = compile_policy(capped, deep, {resolved});
         require(!deep_result.ok && deep_result.error.find("queue") != std::string::npos,
                 "queue depth above the Host maximum accepted");
-
-        capsid::host::HostPolicy bytes_capped = default_host();
-        bytes_capped.max_queue_header_bytes = 1U * 1024U * 1024U;
-        const PolicyCompileResult bytes_result = compile_policy(bytes_capped, queued, {resolved});
-        require(!bytes_result.ok && bytes_result.error.find("queue") != std::string::npos,
-                "queue header bytes above the Host maximum accepted");
 
         capsid::host::HostPolicy timeout_capped = default_host();
         timeout_capped.max_queue_timeout_ms = 1000;
@@ -311,95 +307,15 @@ int main() {
                 "queue timeout above the Host maximum accepted");
     }
 
-    // 7c. E-2 SSE permit (request.*, §9.3): the App stream fields must not
-    // exceed the Host maximums (cap-only, 0 = no ceiling); the effective
-    // config carries the compiled values into the data plane. The 1/1
-    // boundary rule is enforced at the shard, not in the compiler.
-    {
-        capsid::host::AppRequest streaming = legal_app();
-        streaming.max_streaming_inflight_per_worker = 3;
-        streaming.stream_idle_timeout_ms = 120000;
-        EffectiveEnvEntry resolved;
-        resolved.name = "APP_TOKEN";
-        resolved.from_secret = true;
-        resolved.secret_key_id = "api-token";
-        resolved.secret_revision = "file-v1:1:2:3:4:5";
-        {
-            const PolicyCompileResult result =
-                compile_policy(default_host(), streaming, {resolved});
-            require(result.ok, "legal SSE config rejected: " + result.error);
-            require(result.effective.max_streaming_inflight_per_worker == 3 &&
-                        result.effective.stream_idle_timeout_ms == 120000,
-                    "effective config lost the SSE permit fields");
-            require(result.effective.effective_json.find("\"maxStreamingInflightPerWorker\":3") !=
-                            std::string::npos &&
-                        result.effective.effective_json.find("\"streamIdleTimeoutMs\":120000") !=
-                            std::string::npos,
-                    "effective.json lost the SSE permit fields");
-        }
-
-        capsid::host::HostPolicy slot_capped = default_host();
-        slot_capped.max_streaming_inflight_per_worker = 2;
-        capsid::host::AppRequest deep = streaming;
-        deep.max_streaming_inflight_per_worker = 4;
-        const PolicyCompileResult slot_result = compile_policy(slot_capped, deep, {resolved});
-        require(!slot_result.ok && slot_result.error.find("streaming") != std::string::npos,
-                "streaming permit above the Host maximum accepted");
-
-        capsid::host::HostPolicy idle_capped = default_host();
-        idle_capped.max_stream_idle_timeout_ms = 60000;
-        capsid::host::AppRequest long_idle = streaming;
-        long_idle.stream_idle_timeout_ms = 300000;
-        const PolicyCompileResult idle_result = compile_policy(idle_capped, long_idle, {resolved});
-        require(!idle_result.ok && idle_result.error.find("stream") != std::string::npos,
-                "stream idle timeout above the Host maximum accepted");
-    }
-
-    // 7d. E-3 slow-client write deadline (request.writeTimeoutMs, §9.2):
-    // cap-only intersection like the other request maximums; the effective
-    // config carries the compiled value into the data plane.
-    {
-        capsid::host::AppRequest writer = legal_app();
-        writer.write_timeout_ms = 5000;
-        EffectiveEnvEntry resolved;
-        resolved.name = "APP_TOKEN";
-        resolved.from_secret = true;
-        resolved.secret_key_id = "api-token";
-        resolved.secret_revision = "file-v1:1:2:3:4:5";
-        {
-            const PolicyCompileResult result = compile_policy(default_host(), writer, {resolved});
-            require(result.ok, "legal write-timeout config rejected: " + result.error);
-            require(result.effective.write_timeout_ms == 5000,
-                    "effective config lost the write deadline");
-            require(result.effective.effective_json.find("\"writeTimeoutMs\":5000") !=
-                        std::string::npos,
-                    "effective.json lost the write deadline");
-        }
-        capsid::host::HostPolicy write_capped = default_host();
-        write_capped.max_write_timeout_ms = 60000;
-        capsid::host::AppRequest long_write = writer;
-        long_write.write_timeout_ms = 300000;
-        const PolicyCompileResult write_result =
-            compile_policy(write_capped, long_write, {resolved});
-        require(!write_result.ok && write_result.error.find("write timeout") != std::string::npos,
-                "write deadline above the Host maximum accepted");
-    }
-
     // 8. M2 static pools accept fixed N/N within the Host ceiling. The
-    // compiler is a defense-in-depth entry point, so it must independently
-    // reject minReady != maxWorkers even though the JSON schema already
-    // rejects that shape. App isolation remains host-decided only.
+    // compiler enforces pool field exclusivity and Host ceilings for direct callers.
     {
         capsid::host::HostPolicy host = default_host();
         host.max_workers = 4;
-        // Host v1 has one worker-count ceiling (capacity.workersTotal), not
-        // a second minReady ceiling. Keep this legacy field at its default
-        // to prove it cannot silently cap an otherwise legal App pool.
-
         capsid::host::AppRequest fixed = legal_app();
         fixed.env.clear();
         fixed.workers = 3;
-        fixed.min_ready = 3;
+        fixed.has_workers = true;
         const PolicyCompileResult compiled = compile_policy(host, fixed, {});
         require(compiled.ok,
                 "fixed 3/3 static pool below Host ceiling rejected: " + compiled.error);
@@ -411,10 +327,11 @@ int main() {
                 "M1D canonical layout");
 
         capsid::host::AppRequest elastic = fixed;
+        elastic.has_min_ready = true;
         elastic.min_ready = 2;
         const PolicyCompileResult elastic_result = compile_policy(host, elastic, {});
         require(!elastic_result.ok && elastic_result.error.find("pool") != std::string::npos,
-                "minReady < maxWorkers escaped the static-pool gate");
+                "pool.workers combined with minReady was accepted");
 
         capsid::host::AppRequest over_ceiling = fixed;
         over_ceiling.workers = 5;
@@ -571,9 +488,10 @@ int main() {
         capsid::host::HostPolicy host;
         host.strict_sandbox = false;
         capsid::host::AppRequest app;
-        const auto legacy = compile_policy(host, app, {});
-        require(legacy.ok && legacy.effective.request_timeout_ms == 0,
-                "omitted timeout did not preserve Runtime default selection");
+        const auto defaults = compile_policy(host, app, {});
+        require(defaults.ok && defaults.effective.request_timeout_ms == 30000 &&
+                    defaults.effective.requests_per_worker == 64,
+                "omitted fields must select the Config v2 builtins");
         app.request_timeout_ms = 120;
         const auto first = compile_policy(host, app, {});
         require(first.ok && first.effective.request_timeout_ms == 120,
@@ -610,8 +528,8 @@ int main() {
     // literal or a wider port request must still fail the Host intersection.
     {
         capsid::host::FetchTarget host_target, app_target;
-        require(capsid::host::parse_fetch_target_text("[::1]:443", &host_target) &&
-                    capsid::host::parse_fetch_target_text("[0:0:0:0:0:0:0:1]:443", &app_target),
+        require(capsid::host::parse_outbound_target_text("[::1]:443", &host_target) &&
+                    capsid::host::parse_outbound_target_text("[0:0:0:0:0:0:0:1]:443", &app_target),
                 "equivalent numeric IPv6 authorities did not parse");
         capsid::host::HostPolicy host;
         host.strict_sandbox = false;
@@ -641,7 +559,6 @@ int main() {
     // clamped/rejected against host.maximums.
     {
         capsid::host::HostPolicy host;
-        host.is_v2 = true;
         host.max_workers = 16;
         host.max_pool_workers = 8;
         host.default_workers = 3;
@@ -662,7 +579,6 @@ int main() {
         host.max_queue_timeout_ms = 8000;
 
         capsid::host::AppRequest app;
-        app.is_v2 = true;
         app.workers = 0;
         app.min_ready = 0;
         const auto inherited = compile_policy(host, app, {});
@@ -686,12 +602,10 @@ int main() {
 
         // Builtin clamping when neither app nor host.defaults sets timeout/maxInflight.
         capsid::host::HostPolicy small_max;
-        small_max.is_v2 = true;
         small_max.max_workers = 4;
         small_max.max_request_timeout_ms = 2000;
         small_max.max_requests_per_worker = 16;
         capsid::host::AppRequest minimal_app;
-        minimal_app.is_v2 = true;
         minimal_app.workers = 0;
         minimal_app.min_ready = 0;
         const auto clamped = compile_policy(small_max, minimal_app, {});
@@ -716,12 +630,10 @@ int main() {
     // Config v2 elastic pools & scale-to-zero builtin queue defaults (64 / 5s).
     {
         capsid::host::HostPolicy host;
-        host.is_v2 = true;
         host.max_workers = 16;
         host.max_pool_workers = 8;
 
         capsid::host::AppRequest s2z;
-        s2z.is_v2 = true;
         s2z.workers = 0;
         s2z.min_ready = 0;
         s2z.has_min_ready = true;

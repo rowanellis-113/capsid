@@ -9,7 +9,8 @@ function patternedBytes(size) {
 // Cancel observations, exposed through /status so the integration test can
 // prove that a client disconnect cancelled the worker request before the
 // worker's own request deadline could fire.
-const cancelObservations = [];
+let cancelCount = 0;
+let abortedAt = null;
 
 async function observeBodyOwnership() {
     const wrap = [
@@ -169,16 +170,13 @@ export default {
             // surfaces immediately as a write error, which the Host maps to
             // cancel. The abort observation is recorded and exposed through
             // /status.
-            const startedAt = Date.now();
             let cancelled = false;
             request.signal.addEventListener(
                 'abort',
                 () => {
                     cancelled = true;
-                    cancelObservations.push({
-                        startedAt,
-                        delayMs: Date.now() - startedAt,
-                    });
+                    ++cancelCount;
+                    abortedAt = Date.now();
                 },
                 { once: true },
             );
@@ -240,13 +238,7 @@ export default {
             return new Response('slow done');
         }
         if (url.pathname === '/status') {
-            const last = cancelObservations.length
-                ? cancelObservations[cancelObservations.length - 1]
-                : null;
-            return Response.json({
-                cancelCount: cancelObservations.length,
-                lastCancelDelayMs: last ? last.delayMs : null,
-            });
+            return Response.json({ cancelCount, abortedAt });
         }
         if (url.pathname === '/timeout') {
             while (true) {

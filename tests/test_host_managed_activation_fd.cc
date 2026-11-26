@@ -4,6 +4,7 @@
 // the replacement socket. No scheduling, retry or sanitizer suppression is
 // involved; deploy/replay/persist-failure all use the real worker pipeline.
 #include "host/managed_host.h"
+#include "managed_deploy_fixture.h"
 #include "build_identity.h"
 
 #include <fcntl.h>
@@ -101,7 +102,7 @@ int main(int argc, char** argv) {
     const std::string app_state = root + "/state/apps/orders";
     write_file(
         root + "/apps/orders/v1/capsid.json",
-        R"({"apiVersion":"capsid/app-v1","entry":"bundle.mjs","permissions":{"modules":[]},"pool":{"minReady":1,"maxWorkers":1}})");
+        R"({"apiVersion":"capsid/app-v2","entry":"bundle.mjs","permissions":{"modules":[]},"pool":{"workers":1}})");
     write_file(root + "/apps/orders/v1/bundle.mjs",
                "export default { fetch: () => new Response('fd-ownership-ok') };");
     const int apps = open((root + "/apps").c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -115,12 +116,11 @@ int main(int argc, char** argv) {
     options.worker_path = argv[2];
     options.runtime_compatibility_id = CAPSID_BUILD_COMPATIBILITY_ID;
     options.host_policy.max_workers = 1;
-    options.host_policy.min_ready = 1;
     options.host_policy.max_requests_per_worker = 10000;
     options.host_policy.max_worker_memory_bytes = 256U * 1024U * 1024U;
     capsid::host::OperationStatus status;
     if (replay) {
-        const auto initial = capsid::host::managed_deploy(&options, "v1", &status);
+        const auto initial = capsid::test::deploy_for_test(options, "v1", &status);
         destroy_workers(initial);
         require(initial.ok, "prepare committed generation for replay: " + initial.error);
     }
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
         probe.source = sockets[0];
         probe.enabled = true;
     }
-    const auto outcome = capsid::host::managed_deploy(&options, "v1", &status);
+    const auto outcome = capsid::test::deploy_for_test(options, "v1", &status);
     unsigned closes;
     int replacement;
     bool duplicated;

@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
         capsid_build_info_init(&info);
         ok(capsid_runtime_build_info(&info), "linked build identity");
         Worker worker;
-        ok(capsid_worker_spawn(&config, &worker.value), "spawn worker");
+        ok(capsid_worker_spawn_ex(&config, NULL, &worker.value), "spawn worker");
         ok(capsid_worker_load_bundle(worker.value, reinterpret_cast<const uint8_t*>(bundle.data()),
                                      bundle.size()),
            "load real bundle");

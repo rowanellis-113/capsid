@@ -305,7 +305,7 @@ capsid_worker* spawn_worker(const char* worker_path) {
     capsid_worker_config_init(&config);
     config.worker_path = worker_path;
     capsid_worker* worker = nullptr;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
     return worker;
 }
 

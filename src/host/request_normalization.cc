@@ -404,12 +404,61 @@ bool validate_target(std::string_view target, RequestNormalizationError& error) 
 }
 
 // Fixed hop-by-hop and forwarding field names (lowercase).
-bool is_hop_by_hop(std::string_view name) {
-    return name == "connection" || name == "keep-alive" || name == "proxy-connection" ||
-           name == "te" || name == "trailer" || name == "transfer-encoding" || name == "upgrade";
+bool name_iequals(std::string_view name, std::string_view lower);
+bool name_iequals_anycase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (ascii_lower_char(a[i]) != ascii_lower_char(b[i])) {
+            return false;
+        }
+    }
+    return true;
 }
-bool is_forwarding(std::string_view name) {
-    return name == "forwarded" || name == "x-real-ip" || name.starts_with("x-forwarded-");
+bool name_iprefix(std::string_view name, std::string_view lower_prefix) {
+    if (name.size() < lower_prefix.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lower_prefix.size(); ++i) {
+        if (ascii_lower_char(name[i]) != lower_prefix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+bool is_hop_by_hop_icase(std::string_view name) {
+    return name_iequals(name, "connection") || name_iequals(name, "keep-alive") ||
+           name_iequals(name, "proxy-connection") || name_iequals(name, "te") ||
+           name_iequals(name, "trailer") || name_iequals(name, "transfer-encoding") ||
+           name_iequals(name, "upgrade");
+}
+bool is_forwarding_icase(std::string_view name) {
+    return name_iequals(name, "forwarded") || name_iequals(name, "x-real-ip") ||
+           name_iprefix(name, "x-forwarded-");
+}
+std::string to_ascii_lower_string(std::string_view value) {
+    std::string out(value);
+    for (char& ch : out) {
+        ch = ascii_lower_char(ch);
+    }
+    return out;
+}
+bool is_canonical_prevalidated_authority(std::string_view authority) {
+    if (authority.empty() || authority.front() == '[') {
+        return false;
+    }
+    const std::size_t colon = authority.find(':');
+    if (colon != std::string_view::npos &&
+        (colon + 1 >= authority.size() || authority[colon + 1] == '0')) {
+        return false;
+    }
+    for (const char ch : authority) {
+        if (ch >= 'A' && ch <= 'Z') {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -617,23 +666,19 @@ normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_vi
         return result;
     }
 
-    std::string routing_header_lower = "capsid-app";
-    if (policy.mode == RequestRoutingMode::kHeader) {
-        routing_header_lower.clear();
-        routing_header_lower.reserve(policy.routing_header.size());
-        for (const char c : policy.routing_header) {
-            routing_header_lower.push_back(ascii_lower_char(c));
-        }
-    }
+    const std::string_view routing_header = (policy.mode == RequestRoutingMode::kHeader)
+                                                ? policy.routing_header
+                                                : std::string_view("capsid-app");
 
     // Header syntax validation and collection. Header-value errors point at
     // the header index; missing/duplicate control fields point at their name.
-    std::vector<std::string> lowered_names;
-    lowered_names.reserve(headers.size());
     std::optional<std::size_t> host_index;
     std::optional<std::size_t> capsid_app_index;
     std::size_t capsid_app_count = 0;
-    std::vector<std::string> connection_nominated;
+    constexpr std::size_t kInlineNominatedCap = 16;
+    std::string_view inline_nominated[kInlineNominatedCap];
+    std::size_t inline_nominated_count = 0;
+    std::vector<std::string_view> overflow_nominated;
     for (std::size_t index = 0; index < headers.size(); ++index) {
         const PublicRequestHeaderView& header = headers[index];
         if (header.name.empty()) {
@@ -656,28 +701,21 @@ normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_vi
                 return result;
             }
         }
-        std::string name;
-        name.reserve(header.name.size());
-        for (const char c : header.name) {
-            name.push_back(ascii_lower_char(c));
-        }
-        lowered_names.push_back(std::move(name));
-        const std::string_view lowered = lowered_names.back();
-        if (lowered == "host") {
+        if (name_iequals(header.name, "host")) {
             if (host_index.has_value()) {
                 set_error(result.error, ErrorCode::kInvalidHeader, "/headers/host",
                           "duplicate Host header");
                 return result;
             }
             host_index = index;
-        } else if (lowered == routing_header_lower) {
+        } else if (name_iequals_anycase(header.name, routing_header)) {
             // Cardinality is enforced only by header routing; path and
             // subdomain routes strip every Capsid-App field unconditionally.
             if (!capsid_app_index.has_value()) {
                 capsid_app_index = index;
             }
             ++capsid_app_count;
-        } else if (lowered == "connection") {
+        } else if (name_iequals(header.name, "connection")) {
             // Parse Connection tokens: comma-separated, non-empty tokens.
             std::size_t start = 0;
             while (start <= header.value.size()) {
@@ -709,12 +747,11 @@ normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_vi
                         return result;
                     }
                 }
-                std::string nominated;
-                nominated.reserve(token.size());
-                for (const char c : token) {
-                    nominated.push_back(ascii_lower_char(c));
+                if (inline_nominated_count < kInlineNominatedCap) {
+                    inline_nominated[inline_nominated_count++] = token;
+                } else {
+                    overflow_nominated.push_back(token);
                 }
-                connection_nominated.push_back(std::move(nominated));
                 if (end == header.value.size()) {
                     break;
                 }
@@ -774,48 +811,76 @@ normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_vi
                       "Host App label exceeds the App ID limits");
             return result;
         }
-        application = std::string(prefix);
-        url = std::string(policy.public_scheme) + "://" + application + suffix;
+        application.assign(prefix.data(), prefix.size());
+        char port_buf[16];
+        std::string_view port_str;
         if (host_authority.port.has_value()) {
-            url += ":" + std::to_string(*host_authority.port);
-        }
-        url += std::string(target);
-    } else if (policy.mode == RequestRoutingMode::kSingle) {
-        std::string authority;
-        if (!policy.public_authority.empty()) {
-            ParsedAuthority parsed;
-            if (!parse_authority(policy.public_authority, &parsed, /*allow_ipv6=*/true)) {
-                set_error(result.error, ErrorCode::kInvalidListenerPolicy,
-                          "/listener/publicAuthority", "public authority must be host[:port]");
-                return result;
+            const auto res_len =
+                std::snprintf(port_buf, sizeof(port_buf), ":%u", unsigned(*host_authority.port));
+            if (res_len > 0) {
+                port_str = std::string_view(port_buf, static_cast<std::size_t>(res_len));
             }
-            authority = parsed.host;
-            if (parsed.port.has_value()) {
-                authority += ":" + std::to_string(*parsed.port);
+        }
+        url.reserve(policy.public_scheme.size() + 3 + application.size() + suffix.size() +
+                    port_str.size() + target.size());
+        url.append(policy.public_scheme);
+        url.append("://");
+        url.append(application);
+        url.append(suffix);
+        url.append(port_str);
+        url.append(target);
+    } else if (policy.mode == RequestRoutingMode::kSingle) {
+        std::string authority_storage;
+        std::string_view authority_view;
+        if (!policy.public_authority.empty()) {
+            if (policy_prevalidated &&
+                is_canonical_prevalidated_authority(policy.public_authority)) {
+                authority_view = policy.public_authority;
+            } else {
+                ParsedAuthority parsed;
+                if (!parse_authority(policy.public_authority, &parsed, /*allow_ipv6=*/true)) {
+                    set_error(result.error, ErrorCode::kInvalidListenerPolicy,
+                              "/listener/publicAuthority", "public authority must be host[:port]");
+                    return result;
+                }
+                authority_storage = parsed.host;
+                if (parsed.port.has_value()) {
+                    authority_storage += ":" + std::to_string(*parsed.port);
+                }
+                authority_view = authority_storage;
             }
         } else {
-            authority = host_authority.host;
+            authority_storage = host_authority.host;
             if (host_authority.port.has_value()) {
-                authority += ":" + std::to_string(*host_authority.port);
+                authority_storage += ":" + std::to_string(*host_authority.port);
             }
+            authority_view = authority_storage;
         }
-        application = std::string(policy.single_application);
-        url = std::string(policy.public_scheme) + "://" + authority + std::string(target);
+        application.assign(policy.single_application.data(), policy.single_application.size());
+        url.reserve(policy.public_scheme.size() + 3 + authority_view.size() + target.size());
+        url.append(policy.public_scheme);
+        url.append("://");
+        url.append(authority_view);
+        url.append(target);
     } else {
         // Path and header modes construct the public origin only from the
         // listener policy, never from the request Host.
-        std::string authority;
-        {
+        std::string authority_storage;
+        std::string_view authority_view;
+        if (policy_prevalidated && is_canonical_prevalidated_authority(policy.public_authority)) {
+            authority_view = policy.public_authority;
+        } else {
             ParsedAuthority parsed;
             if (!parse_authority(policy.public_authority, &parsed, /*allow_ipv6=*/true)) {
                 set_error(result.error, ErrorCode::kInvalidListenerPolicy,
                           "/listener/publicAuthority", "public authority must be host[:port]");
                 return result;
             }
-            authority = parsed.host;
+            authority_storage = parsed.host;
             if (parsed.port.has_value()) {
-                authority += ":" + std::to_string(*parsed.port);
+                authority_storage += ":" + std::to_string(*parsed.port);
             }
+            authority_view = authority_storage;
         }
         if (policy.mode == RequestRoutingMode::kPath) {
             static constexpr std::string_view kPathPrefix = "/@capsid/";
@@ -833,27 +898,31 @@ normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_vi
                           "path routing requires a valid App segment");
                 return result;
             }
-            application = std::string(app);
-            std::string rewritten;
-            if (end == target.size()) {
-                rewritten = "/";
-            } else if (target[end] == '/') {
-                rewritten = std::string(target.substr(end));
-            } else {
-                rewritten = "/" + std::string(target.substr(end));
+            application.assign(app.data(), app.size());
+            const bool need_slash = end == target.size() || target[end] != '/';
+            const std::string_view tail =
+                end == target.size() ? std::string_view() : target.substr(end);
+            url.reserve(policy.public_scheme.size() + 3 + authority_view.size() +
+                        (need_slash ? 1 : 0) + tail.size());
+            url.append(policy.public_scheme);
+            url.append("://");
+            url.append(authority_view);
+            if (need_slash) {
+                url.push_back('/');
             }
-            url = std::string(policy.public_scheme) + "://" + authority + rewritten;
+            url.append(tail);
         } else {
             // Header routing: trusted listener, exactly one configured header.
             if (capsid_app_count == 0) {
                 set_error(result.error, ErrorCode::kRouteNotFound,
-                          "/headers/" + routing_header_lower,
+                          "/headers/" + to_ascii_lower_string(routing_header),
                           "header routing requires the routing header");
                 return result;
             }
             if (capsid_app_count > 1) {
                 set_error(result.error, ErrorCode::kInvalidHeader,
-                          "/headers/" + routing_header_lower, "duplicate routing header");
+                          "/headers/" + to_ascii_lower_string(routing_header),
+                          "duplicate routing header");
                 return result;
             }
             const std::string_view app_value = headers[*capsid_app_index].value;
@@ -863,21 +932,37 @@ normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_vi
                           "routing header is not a valid App ID");
                 return result;
             }
-            application = std::string(app_value);
-            url = std::string(policy.public_scheme) + "://" + authority + std::string(target);
+            application.assign(app_value.data(), app_value.size());
+            url.reserve(policy.public_scheme.size() + 3 + authority_view.size() + target.size());
+            url.append(policy.public_scheme);
+            url.append("://");
+            url.append(authority_view);
+            url.append(target);
         }
     }
 
     // Output headers: input order, lowercase names, unsafe fields removed.
+    const bool check_custom_routing = policy.mode == RequestRoutingMode::kHeader;
+    result.request.headers.reserve(headers.size());
     for (std::size_t index = 0; index < headers.size(); ++index) {
-        const std::string_view name = lowered_names[index];
-        bool removed = name == "host" || name == "capsid-app" || name == routing_header_lower ||
-                       is_hop_by_hop(name) || is_forwarding(name);
-        if (!removed) {
-            for (const std::string& nominated : connection_nominated) {
-                if (name == nominated) {
+        const PublicRequestHeaderView& header = headers[index];
+        bool removed =
+            name_iequals(header.name, "host") || name_iequals(header.name, "capsid-app") ||
+            (check_custom_routing && name_iequals_anycase(header.name, routing_header)) ||
+            is_hop_by_hop_icase(header.name) || is_forwarding_icase(header.name);
+        if (!removed && inline_nominated_count != 0) {
+            for (std::size_t j = 0; j < inline_nominated_count; ++j) {
+                if (name_iequals_anycase(header.name, inline_nominated[j])) {
                     removed = true;
                     break;
+                }
+            }
+            if (!removed) {
+                for (const std::string_view nominated : overflow_nominated) {
+                    if (name_iequals_anycase(header.name, nominated)) {
+                        removed = true;
+                        break;
+                    }
                 }
             }
         }
@@ -885,8 +970,11 @@ normalize_public_request_impl(const RequestRoutingPolicy& policy, std::string_vi
             continue;
         }
         NormalizedPublicRequestHeader output;
-        output.name = std::string(name);
-        output.value = std::string(headers[index].value);
+        output.name.resize(header.name.size());
+        for (std::size_t k = 0; k < header.name.size(); ++k) {
+            output.name[k] = ascii_lower_char(header.name[k]);
+        }
+        output.value.assign(header.value.data(), header.value.size());
         result.request.headers.push_back(std::move(output));
     }
 

@@ -43,15 +43,8 @@ struct DeployOutcome {
     bool ok = false;
     std::string operation_id;
     std::string error; // static text
-    // The whole owning pool: every warmed worker (READY + compatibility
-    // verified), all owned by the caller after a successful deploy; the
-    // caller wires the data plane and drains the previous pool. The pool
-    // is atomic — on any failure it is empty and no worker escapes.
+    // Prepare adopts the entire warmed fleet. Recovery returns it to the caller for adoption.
     std::vector<capsid_worker*> workers;
-    // Legacy single-worker entry. Only valid when workers.size() == 1,
-    // where it aliases workers[0]; null for any other pool size, so an
-    // old consumer can never be handed just one worker of a bigger pool.
-    capsid_worker* worker = nullptr;
     // PR-09c (§8.3/§9.3) generation handoff: the §8.3 replacement factory
     // plus the generation identity. A data-plane pool adopted over
     // `workers` spawns replacements through this factory — same artifact,
@@ -109,19 +102,19 @@ struct ManagedHostOptions {
     // decision functions fail closed on an invalid policy.
     WorkerRecoveryPolicy recovery_policy;
     // §9.3 activation transaction (PR-10). The three activation callbacks
-    // must be configured together (or none): the coordinator runs prepare
+    // are required for deployment: the coordinator runs prepare
     // BEFORE the active-state persist (may fail — a failed prepare must
     // already have destroyed the warmed workers it was handed), commit
     // after a successful persist (must never fail: atomic publication +
     // drain signal only, see activation_transaction.h), and abort when
-    // the persist failed. On the transactional path the coordinator owns
+    // the persist failed. After prepare the coordinator owns
     // no workers after prepare: the plan does.
     std::function<std::unique_ptr<ActivationPlan>(
         const std::string& application, const DeployOutcome& prepared, std::string* error)>
         prepare_activation;
     std::function<void(ActivationPlan* plan)> commit_activation; // noexcept
     std::function<void(ActivationPlan* plan)> abort_activation;  // noexcept
-    // §9.3 retire transaction: prepare_retire before the tombstone
+    // All three callbacks are required to retire. Prepare runs before the tombstone
     // persist (may fail), commit_retire after it (noexcept — drain
     // signal + ledger category switch), abort_retire when it failed.
     std::function<std::unique_ptr<RetirePlan>(const std::string& application, std::string* error)>
@@ -180,8 +173,7 @@ enum class DeployErrorCode {
 };
 
 // Runs the deploy pipeline for app/version. On success the active
-// generation is persisted and the worker is warm; the caller then
-// publishes the data-plane routing.
+// generation is persisted and the activation transaction publishes the new route.
 DeployOutcome managed_deploy(ManagedHostOptions* options, const std::string& version,
                              OperationStatus* status);
 DeployOutcome managed_deploy(ManagedHostOptions* options, const std::string& version,

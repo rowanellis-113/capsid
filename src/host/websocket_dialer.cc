@@ -169,12 +169,16 @@ struct WebSocketDialer::Impl {
         std::string key, selected;
         std::shared_ptr<WebSocketSession> session;
         Dial(Impl& parent, WorkerEvent event)
-            : owner(parent), id(event.dial_id), protocols(std::move(event.protocols)),
+            : owner(parent), id(event.dial_id),
+              protocols(event.dial_extra ? std::move(event.dial_extra->protocols)
+                                         : std::vector<std::string>{}),
               max_message(event.channel_max_message), refused(event.dial_refused),
               refused_reason(event.channel_flags), resolver(parent.io), timer(parent.io) {
             fetch = event.channel_kind == protocol::kChannelKindFetchUpgrade;
             url = std::move(event.text);
-            fetch_request = std::move(event.http_request);
+            if (event.dial_extra) {
+                fetch_request = std::move(event.dial_extra->http_request);
+            }
             if (!parse_target(url, &target, fetch))
                 target.host.clear();
             response.header_limit(
@@ -215,7 +219,7 @@ struct WebSocketDialer::Impl {
             command.type = CommandType::kDialReject;
             command.dial_id = id;
             command.channel_flags = reason;
-            command.close_reason = std::move(message);
+            command.ensure_channel_extra().close_reason = std::move(message);
             owner.send(std::move(command));
         }
         void start() {
@@ -440,10 +444,11 @@ struct WebSocketDialer::Impl {
                 command.type = CommandType::kDialAccept;
                 command.dial_id = self->id;
                 command.channel_max_message = self->max_message;
-                command.close_reason = self->selected;
+                auto& extra = command.ensure_channel_extra();
+                extra.close_reason = self->selected;
                 if (self->fetch) {
                     command.fetch_upgrade = true;
-                    auto& metadata = command.http_response;
+                    auto& metadata = extra.http_response;
                     metadata.status = static_cast<uint16_t>(head.result_int());
                     metadata.status_text = std::string(head.reason());
                     metadata.url = self->url;
@@ -461,9 +466,9 @@ struct WebSocketDialer::Impl {
                         self->reject(6, "Invalid HTTP upgrade response metadata");
                         return;
                     }
-                    command.channel_reservation =
+                    extra.channel_reservation =
                         self->slots->budget->reserve_queue(encoded.size() + 1024);
-                    if (!command.channel_reservation) {
+                    if (!extra.channel_reservation) {
                         self->reject(8, "HTTP upgrade result queue exhausted");
                         return;
                     }
@@ -561,7 +566,7 @@ struct WebSocketDialer::Impl {
             terminal.close_kind = failed ? protocol::kCloseTransport : protocol::kCloseFinal;
             terminal.close_code = failed ? 1006 : 0;
             if (failed)
-                terminal.close_reason =
+                terminal.ensure_channel_extra().close_reason =
                     parse_failed ? "HTTP response body parse failed" : "Network connection lost.";
             owner.send(std::move(terminal));
         }
@@ -598,8 +603,9 @@ struct WebSocketDialer::Impl {
                     data.type = CommandType::kChannelData;
                     data.channel_id = self->channel;
                     data.channel_flags = protocol::kFlagStart | protocol::kFlagEnd;
-                    data.channel_reservation = self->slots->budget->reserve_queue(produced + 1024);
-                    if (!data.channel_reservation) {
+                    data.ensure_channel_extra().channel_reservation =
+                        self->slots->budget->reserve_queue(produced + 1024);
+                    if (!data.channel_extra->channel_reservation) {
                         self->end_body(true);
                         return;
                     }

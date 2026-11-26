@@ -111,26 +111,27 @@ class QpsProbe:
             write_json(
                 app / "capsid.json",
                 {
-                    "apiVersion": "capsid/app-v1",
+                    "apiVersion": "capsid/app-v2",
                     "entry": "bundle.mjs",
-                    "pool": {"minReady": 1, "maxWorkers": 1},
+                    "pool": {"workers": 1},
                 },
             )
             write_json(
                 folder / "host.json",
                 {
-                    "apiVersion": "capsid/host-v1",
-                    "applicationsRoot": str(folder / "apps"),
-                    "stateRoot": str(folder / "state"),
-                    "secretRootTemplate": str(folder / "secrets/{application}"),
+                    "apiVersion": "capsid/host-v2",
+                    "paths": {
+                        "applications": str(folder / "apps"),
+                        "state": str(folder / "state"),
+                        "secrets": str(folder / "secrets/{application}"),
+                    },
                     "admin": {"unix": str(folder / "run/admin.sock")},
-                    "capacity": {"workersTotal": 1, "startupsConcurrent": 1},
+                    "capacity": {"workersTotal": 1},
                     "listeners": [
                         {
                             "name": "qps",
                             "tcp": f"127.0.0.1:{ports[0]}",
-                            "publicScheme": "http",
-                            "publicAuthority": "bench.invalid",
+                            "publicOrigin": "http://bench.invalid",
                             "trusted": False,
                             "routing": {"mode": "path", "suffix": ""},
                         }

@@ -158,8 +158,7 @@ function writeLocalHostConfig(
   const listener = {
     name: 'public',
     tcp: listen,
-    publicScheme: 'http',
-    publicAuthority: 'public.example',
+    publicOrigin: 'http://public.example',
     trusted: routingTrusted,
     routing: {
       mode: routing,
@@ -171,11 +170,13 @@ function writeLocalHostConfig(
   fs.writeFileSync(
     configPath,
     JSON.stringify({
-      apiVersion: 'capsid/host-v1',
-      applicationsRoot: '/var/lib/capsid/apps',
-      stateRoot: '/var/lib/capsid/state',
-      secretRootTemplate: '/run/capsid/secrets/{application}',
-      admin: { unix: '/run/capsid/admin.sock', mode: '0600' },
+      apiVersion: 'capsid/host-v2',
+      paths: {
+        applications: '/var/lib/capsid/apps',
+        state: '/var/lib/capsid/state',
+        secrets: '/run/capsid/secrets/{application}',
+      },
+      admin: { unix: '/run/capsid/admin.sock' },
       permissions: {
         modules,
         environmentNames: envNames,
@@ -185,7 +186,7 @@ function writeLocalHostConfig(
         stdioStreams: [],
       },
       isolation: { mode: 'strict', required: [] },
-      capacity: { workersTotal: workers, startupsConcurrent: workers },
+      capacity: { workersTotal: workers },
       listeners: [listener],
     }),
   );
@@ -208,9 +209,9 @@ function createLocalAppFixture(
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'bundle.mjs',
-      pool: { minReady: 1, maxWorkers: 1 },
+      pool: { workers: 1 },
       request: { timeout: `${requestTimeoutMs}ms` },
     }),
   );
@@ -363,9 +364,9 @@ const args = parseArgs(process.argv.slice(2));
       fs.writeFileSync(
         path.join(dir, 'capsid.json'),
         JSON.stringify({
-          apiVersion: 'capsid/app-v1',
+          apiVersion: 'capsid/app-v2',
           entry: 'bundle.mjs',
-          pool: { minReady: 1, maxWorkers: 1 },
+          pool: { workers: 1 },
           request: { timeout: '10s' },
         }),
       );
@@ -427,9 +428,9 @@ const args = parseArgs(process.argv.slice(2));
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: '../outside.mjs',
-      pool: { minReady: 1, maxWorkers: 1 },
+      pool: { workers: 1 },
       request: { timeout: '10s' },
     }),
   );
@@ -709,14 +710,11 @@ try {
   await stopHost(timeout);
 }
 
-// ---- Phase C: disconnect-cancel under a 2s worker deadline. The client is
-// destroyed mid-stream; the Host must cancel the worker request within
-// hundreds of milliseconds (the abort the worker observes fires on the RST
-// of the in-flight response write), not wait for the 2s deadline. Comparing
-// against the worker's own deadline instead of a 100ms budget keeps startup
-// latency from creating a false positive.
+// Phase C measures the time from client disconnect to Worker abort under a
+// two-second request deadline. Both processes use the same machine clock.
 const cancelHost = await startHost(args, { requestTimeoutMs: 2000 });
 try {
+  let destroyedAt;
   await new Promise((resolve) => {
     const cancelled = http.request({
       host: '127.0.0.1',
@@ -728,9 +726,19 @@ try {
     });
     cancelled.on('error', resolve);
     cancelled.on('close', resolve);
+    cancelled.on('response', (response) => {
+      response.once('data', () => {
+        response.pause();
+        // Keep the established stream open longer than the propagation budget.
+        setTimeout(() => {
+          destroyedAt = Date.now();
+          cancelled.destroy();
+        }, 550);
+      });
+    });
     cancelled.end();
-    setTimeout(() => cancelled.destroy(), 35);
   });
+  assert.ok(Number.isFinite(destroyedAt), 'connection closed before the test disconnected it');
 
   // Poll /status until the worker reports the cancel. A successful answer
   // also proves the worker survived the cancel and serves new requests.
@@ -753,10 +761,11 @@ try {
   }
   assert.ok(cancelState, 'worker never observed the disconnect cancel');
   assert.equal(cancelState.cancelCount, 1);
+  assert.ok(Number.isFinite(cancelState.abortedAt), 'worker did not report its abort timestamp');
+  const propagationMs = cancelState.abortedAt - destroyedAt;
   assert.ok(
-    cancelState.lastCancelDelayMs < 500,
-    `cancel observed at ${cancelState.lastCancelDelayMs}ms ` +
-      '— not within hundreds of milliseconds of the disconnect',
+    propagationMs >= 0 && propagationMs < 500,
+    `disconnect to abort took ${propagationMs}ms`,
   );
 } finally {
   await stopHost(cancelHost);
@@ -832,31 +841,21 @@ try {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capsid-local-capsid-'));
   const bundleFile = path.join(dir, 'host-single-worker.js');
   fs.copyFileSync(args.get('bundle'), bundleFile);
-  // processAddressSpace is unsupported on Darwin (the worker rejects it
-  // fail-closed, same as the managed compile path): omit it there.
-  const worker =
-    process.platform === 'darwin'
-      ? { jsHeap: '64MiB', fileDescriptors: 64 }
-      : { jsHeap: '64MiB', processAddressSpace: '256MiB', fileDescriptors: 64 };
+  const worker = { jsHeap: '64MiB', fileDescriptors: 64 };
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'host-single-worker.js',
       pool: {
-        minReady: 1,
-        maxWorkers: 1,
+        workers: 1,
         queueRequests: 2,
-        queueHeaderBytes: '64KiB',
         queueTimeout: '1s',
       },
       worker,
       request: {
         timeout: '10s',
-        maxInflightPerWorker: 16,
-        maxStreamingInflightPerWorker: 1,
-        streamIdleTimeoutMs: 30000,
-        writeTimeoutMs: 5000,
+        maxInflight: 16,
       },
       healthCheck: { path: '/health', timeout: '5s' },
     }),
@@ -919,9 +918,9 @@ try {
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'host-single-worker.js',
-      pool: { minReady: 1, maxWorkers: 1 },
+      pool: { workers: 1 },
       request: { timeout: '10s' },
       healthCheck: { path: '/nope', timeout: '3s' },
     }),
@@ -978,9 +977,9 @@ try {
     fs.writeFileSync(
       path.join(sub, 'capsid.json'),
       JSON.stringify({
-        apiVersion: 'capsid/app-v1',
+        apiVersion: 'capsid/app-v2',
         entry: 'host-single-worker.js',
-        pool: { minReady: 2, maxWorkers: 2 },
+        pool: { workers: 2 },
         request: { timeout: '10s' },
         healthCheck: { path: healthPath, timeout: '3s' },
       }),
@@ -1064,11 +1063,9 @@ try {
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'host-single-worker.js',
-      // Local schema requires minReady == maxWorkers; the actual
-      // static-pool sizing comes from --workers on the CLI.
-      pool: { minReady: 2, maxWorkers: 2 },
+      pool: { workers: 2 },
       request: { timeout: '10s' },
     }),
   );
@@ -1145,9 +1142,9 @@ try {
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'host-single-worker.js',
-      pool: { minReady: 1, maxWorkers: 1 },
+      pool: { workers: 1 },
       request: { timeout: '10s' },
     }),
   );
@@ -1331,21 +1328,16 @@ try {
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'slow-bundle.js',
       pool: {
-        minReady: 1,
-        maxWorkers: 1,
+        workers: 1,
         queueRequests: 2,
-        queueHeaderBytes: '64KiB',
         queueTimeout: '5s',
       },
       request: {
         timeout: '10s',
-        maxInflightPerWorker: 1,
-        // The documented 1/1 streaming boundary: with one inflight slot
-        // the streaming permit must be 1 (the default 2 would exceed it).
-        maxStreamingInflightPerWorker: 1,
+        maxInflight: 1,
       },
     }),
   );
@@ -1432,9 +1424,9 @@ try {
   fs.writeFileSync(
     capsidJson,
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'secret-bundle.js',
-      pool: { minReady: 1, maxWorkers: 1 },
+      pool: { workers: 1 },
       request: { timeout: '10s' },
       permissions: {
         modules: ['capsid:env'],
@@ -1575,9 +1567,9 @@ try {
   fs.writeFileSync(
     capsidJson,
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'preresolve-bundle.js',
-      pool: { minReady: 1, maxWorkers: 1 },
+      pool: { workers: 1 },
       request: { timeout: '10s' },
       permissions: {
         fetch: { allow: [`localhost:${upstreamPort}`] },
@@ -1753,9 +1745,9 @@ async function bodylessProbe(envValue) {
   fs.writeFileSync(
     path.join(dir, 'capsid.json'),
     JSON.stringify({
-      apiVersion: 'capsid/app-v1',
+      apiVersion: 'capsid/app-v2',
       entry: 'proxy-bundle.js',
-      pool: { minReady: 1, maxWorkers: 1 },
+      pool: { workers: 1 },
       request: { timeout: '10s' },
       permissions: {
         fetch: { allow: [`127.0.0.1:${upstreamPort}`] },

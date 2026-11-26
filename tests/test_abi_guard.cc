@@ -189,7 +189,7 @@ static capsid_result configured_spawn(const capsid_worker_config* config, capsid
     const bool channels = g_configuration_case == ConfigurationCase::V4Channels ||
                           g_configuration_case == ConfigurationCase::SnapshotV4Channels;
     if (!carriage && !channels)
-        return capsid_worker_spawn(config, worker);
+        return capsid_worker_spawn_ex(config, NULL, worker);
     capsid_protocol_options options;
     const capsid_result initialized = capsid_protocol_options_init(&options, sizeof(options));
     if (initialized != CAPSID_OK)

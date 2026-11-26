@@ -37,7 +37,7 @@ ChannelRegistry::ApplyResult ChannelRegistry::apply(ChannelSide from,
         return result;
     }
     if (!hello_seen_) {
-        if (frame.version != p::kVersionV4) {
+        if (frame.version != p::kVersion) {
             result.error = "unsupported protocol version";
             return result;
         }

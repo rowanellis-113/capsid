@@ -90,9 +90,11 @@ void test_binding_log_decoder() {
     std::string error;
     require(decode_worker_log_event(binding_log_event(payload), &decoded, &error),
             "valid Binding log rejected: " + error);
-    require(decoded.binding_log && decoded.binding_id == "mongo" && decoded.log_level == "warn" &&
-                decoded.request_id == 108 && decoded.text == "visible" &&
-                decoded.log_fields_json.find("[REDACTED]") != std::string::npos,
+    require(decoded.log_extra && decoded.log_extra->binding_log &&
+                decoded.log_extra->binding_id == "mongo" &&
+                decoded.log_extra->log_level == "warn" && decoded.request_id == 108 &&
+                decoded.text == "visible" &&
+                decoded.log_extra->log_fields_json.find("[REDACTED]") != std::string::npos,
             "Binding log envelope decoded incorrectly");
 
     const std::vector<std::uint8_t> empty;
@@ -112,8 +114,8 @@ void test_binding_log_decoder() {
     capsid_event ordinary = {};
     ordinary.struct_size = sizeof(ordinary);
     ordinary.type = CAPSID_EVENT_LOG;
-    require(decode_worker_log_event(ordinary, &decoded, &error) && !decoded.binding_log &&
-                decoded.text.empty(),
+    require(decode_worker_log_event(ordinary, &decoded, &error) &&
+                (!decoded.log_extra || !decoded.log_extra->binding_log) && decoded.text.empty(),
             "empty ordinary log did not decode safely");
     std::cout << "PASS: strict Binding log decoder" << std::endl;
 }
@@ -256,7 +258,7 @@ WorkerExecutor::WorkerFactory hello_factory(const std::string& worker_path,
         config.request_timeout_ms = 2000;
         config.initial_stream_window = initial_stream_window;
         capsid_worker* worker = nullptr;
-        if (capsid_worker_spawn(&config, &worker) != CAPSID_OK) {
+        if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK) {
             *factory_error = "worker spawn failed";
             return false;
         }
@@ -286,7 +288,7 @@ WorkerExecutor::WorkerFactory bundle_factory(const std::string& worker_path, std
         config.worker_path = worker_path.c_str();
         config.request_timeout_ms = 2000;
         capsid_worker* worker = nullptr;
-        if (capsid_worker_spawn(&config, &worker) != CAPSID_OK) {
+        if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK) {
             *factory_error = "worker spawn failed";
             return false;
         }
@@ -326,8 +328,8 @@ void test_log_identity_is_host_owned(const std::string& worker_path) {
     for (const WorkerEvent& event : events) {
         if (event.type == WorkerEvent::Type::kLog &&
             event.text.find("identity-log") != std::string::npos) {
-            verified =
-                event.application_id == "orders" && event.generation_digest == "sha256:generation";
+            verified = event.log_extra != nullptr && event.log_extra->application_id == "orders" &&
+                       event.log_extra->generation_digest == "sha256:generation";
         }
     }
     require(verified, "worker-controlled LOG lost Host-owned identity");
@@ -450,7 +452,7 @@ void test_adopt_ready(const std::string& worker_path) {
     config.worker_path = worker_path.c_str();
     config.request_timeout_ms = 2000;
     capsid_worker* worker = nullptr;
-    require(capsid_worker_spawn(&config, &worker) == CAPSID_OK, "spawn");
+    require(capsid_worker_spawn_ex(&config, NULL, &worker) == CAPSID_OK, "spawn");
     require(capsid_worker_load_bundle(worker, reinterpret_cast<const std::uint8_t*>(kBundle),
                                       std::char_traits<char>::length(kBundle)) == CAPSID_OK,
             "load");

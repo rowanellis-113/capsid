@@ -1,14 +1,6 @@
 # FetchRPC v4 contract
 
-> Reviewed against the 0.3.0-beta codec, registry and public header on
-> 2026-11-18. ABI v7 and the default v3 entry remain unchanged; v4 is explicitly
-> negotiated and never mixed with v3 on one connection.
-
-This is the current byte/state reference. Early design/checkpoint journals have
-been separated from it, not reinterpreted as present-day blockers. The declared
-0.3.0-beta gates passed; references below to bounded phase observations describe
-their evidence scope, not an unpublished release. Broader graphs and historical
-causal gaps remain limited to their own evidence.
+> The v0.3.2 Host and Worker use FetchRPC v4 for all requests. Channel operations require matching capability bits in HELLO and READY.
 
 Source authority: [protocol definitions](../../src/protocol.h),
 [channel registry](../../src/channel_registry.h), [public ABI](../../include/capsid/runtime.h)
@@ -18,7 +10,7 @@ assertions are not changed by this documentation refresh.
 
 ## 1. Framing and negotiation
 
-### 1.1 Frame layout (unchanged from v3)
+### 1.1 Frame layout
 
 ```text
 offset  size  field
@@ -33,13 +25,10 @@ offset  size  field
 
 ### 1.2 Hello v4 (amended after the payload audit)
 
-The host's `kHello` carries the worker startup configuration in v3; v4
-appends a capability tail to that payload instead of replacing it (the
-draft's fixed-87-byte shape ignored the config fields — amended
-2026-10-12, recorded here):
+The Host sends its startup configuration and a mandatory eight-byte capability tail in `kHello`. A HELLO with no variable data is 116 bytes before the frame header.
 
 ```text
-[ v3 Hello payload: startup config, variable length, >= 108-byte fixed prefix ]
+[ startup config, variable length, >= 108-byte fixed prefix ]
 -8      4     capabilities (u32 LE bitset, tail)
 -4      4     reserved (u32, must be 0)
 ```
@@ -90,10 +79,10 @@ also satisfies it. A frame for a non-negotiated feature fails with
 
 When (and only when) the Hello's capability tail carries
 `CAP_CHANNEL_LAYOUT_A2`, a length-delimited extension sits **between**
-the v3 startup payload and the capability tail:
+the startup payload and the capability tail:
 
 ```text
-[ v3 startup payload, variable ]
+[ startup payload, variable ]
 u32     extension_size = 48
 u16     extension_version = 1
 u16     reserved = 0
@@ -116,30 +105,18 @@ must hold; no trailing bytes may remain. Any failure is
 `invalid hello extension`. A Hello that announces A2 without the
 extension, or carries the extension without A2, is likewise
 `invalid hello extension`. A valid Hello under A2 must also pass the
-real v3 startup decoder on its prefix — an all-zeros placeholder is
+real startup decoder on its prefix — an all-zeros placeholder is
 not a valid startup payload.
 
 ### 1.3 Version negotiation matrix (deterministic rejection)
 
-A parser rejects, as its **first** action on the offending frame, with
-`kParseError` and the exact error string below; no partial state may
-survive:
-
-| wire | v3 parser (shipped) | v4 parser |
-| --- | --- | --- |
-| version 3 frame | parse per v3 | `unsupported protocol version` |
-| version 4 frame | `unsupported protocol version` (frozen by `test_rejects_unknown_type_and_version`) | parse per v4 |
-| version <3 or >4 | `unsupported protocol version` | same |
-| v4 Hello with reserved ≠ 0 or unknown capability bits | (version rejected first) | `invalid hello capabilities` |
-
-Peers never downgrade and never mix versions on one connection.
-"Upgrading" a connection means a new connection.
+Frames must carry wire version 4. Any other version fails with `unsupported protocol version`. A nonzero reserved word or unknown capability bit in HELLO fails with `invalid hello capabilities`.
 
 ## 2. Upgrade (requires `CAP_UPGRADE`)
 
 An inbound HTTP request carrying `Upgrade: websocket` (after host
 validation, including `Sec-WebSocket-Key`/`-Version` per RFC 6455) is
-forwarded to the worker as a normal v3-shaped `RequestHead` **plus**
+forwarded to the worker as a normal ordinary `RequestHead` **plus**
 the frame flag `kFlagRequestUpgrade` and an A2 upgrade tail appended
 to its payload — `u32 channel_id` (pre-assigned by the host at
 admission; id authority stays with the host; no worker-minted ids, no
@@ -192,7 +169,7 @@ non-upgrade requests) is a protocol violation
 - `channel_id` is a **u32 assigned by the host** (the worker never
   mints ids) from a monotonic counter starting at 1 within one IPC
   connection, in announcement order; 0 is never a channel, ids are not reused, and the
-  `request_id` namespace of v3 is untouched. When the u32 space
+  `request_id` namespace is independent. When the u32 space
   exhausts, new channels are refused and the supervisor replaces the
   worker in an orderly shutdown.
 - The worker requests outbound channels with `kChannelOpen`
@@ -256,11 +233,10 @@ with nonzero `channel_id` or zero `dial_id` are all rejected. A REJECT
 for a dial that has not been assigned an id keeps `channel_id = 0`.
 
 Types 15–18 stay allocated to `kAudit`, `kMemoryMetricsRequest`,
-`kMemoryMetricsResponse`, and `kLoadBinding` (v3); v4 does not
-renumber them. The Upgrade flags ride the existing head frames:
+`kMemoryMetricsResponse`, and `kLoadBinding`. The Upgrade flags ride the existing head frames:
 `kFlagRequestUpgrade` = bit 5 (value 32) on `kRequestHead`,
 `kFlagResponseUpgrade` = bit 5 (value 32) on `kResponseHead`. Flag
-namespaces are per frame type, as in v3. Data flags: `kFlagStart` (1),
+namespaces are per frame type. Data flags: `kFlagStart` (1),
 `kFlagEnd` (2), `kFlagChanText` (4) on `kChannelData` only.
 
 ### 3.2a Optional FETCH_UPGRADE metadata (2026-10-20)
@@ -315,8 +291,7 @@ transport ACK and cancellation barriers remain mandatory.
 
 `capsid_worker_dial_accept_http()` takes a separately sized/versioned
 descriptor, synchronously copies counted inputs, and transactionally
-preserves pending state on queue refusal. Existing ABI-v7 layouts and the
-ordinary dial_accept operation remain unchanged. The old typed DIAL view
+preserves pending state on queue refusal. The old typed DIAL view
 rejects a new kind rather than silently discarding HTTP fields. The first-party
 Host now performs capability-aware typed propagation through the versioned
 HTTP descriptor. Basic public fetch/101/non-101/stream/abort/redirect behavior
@@ -345,7 +320,7 @@ open; local close and the queued-job checkpoint finish the owner and emit
 release. Worker teardown clears the set. This feature adds no network data,
 credit or WebSocket close frame and does not change their existing formats.
 
-ABI v7 appends `CAPSID_EVENT_CONNECTION_LIFETIME = 19` without changing any
+ABI v8 exposes `CAPSID_EVENT_CONNECTION_LIFETIME = 19` without changing any
 existing structure layout. Its payload is the validated eight-byte control,
 and `credit` is the range-checked total retained-owner count. The Host consumes
 it as generation liveness and publishes physical plus retained ownership as
@@ -625,8 +600,7 @@ Golden encodings and sequences live in
 schema documented in the file). The harness
 `tests/test_fetchrpc_v4.cc` parses it with a real JSON parser
 (vendored jansson), rejects missing files, wrong schemas, and
-unexecuted sequences, asserts the shipped v3 parser rejects every
-v4-versioned vector (the never-mix-silently boundary), round-trips
+unexecuted sequences, checks rejection of frames carrying the retired version, round-trips
 every vector through the v4 parser, and executes every sequence
 against an independent reference state model (test-local; the
 production registry repeats the same sequences in T06 and does not
@@ -646,18 +620,15 @@ violations, cancel, and capability gating.
 | D2 | `channel_id` is **host-assigned**, u32, monotonic from 1; the worker only requests ids (0). |
 | D3 | Half-close is a **dedicated frame** (`kChannelHalfClose`); the v0.3.0 JS API does not expose it. |
 | D4 | Ping/pong is **transport-internal** on both planes; no FetchRPC frame, no JS surface. |
-| D5 | ABI stays **v7, additive** (`capsid_worker_upgrade_*`, `CAPSID_EVENT_CHANNEL_*` on the event pump). Escalate to v8 only with a recorded embedder-blocking reason. |
+| D5 | ABI v8 exposes channel operations and events. |
 | D6 | `WebSocketPair`/`WebSocket` ship in **`CAPSID-MIN`** with the workerd method surface; v0.5 adds `env`/`ctx` around it, not a different WebSocket. |
 
 ## 7. ABI surface (informational)
 
-The implemented additive v7 entries include `capsid_worker_spawn_ex`,
+The ABI v8 entries include `capsid_worker_spawn_ex`,
 `capsid_worker_upgrade_begin`, dial accept/reject and HTTP response descriptors,
 channel send/grant/close/cancel/confirm, explicit/counted Close and protocol-info
-queries. Existing config/event layouts remain frozen. See the current
-[embedding reference](embedding-api.md) and [public header](../../include/capsid/runtime.h),
-not an older draft's proposed `upgrade_respond` symbol. The ordinary spawn entry
-remains v3; v4 capability negotiation is explicit.
+queries. See the [embedding reference](embedding-api.md) and [public header](../../include/capsid/runtime.h).
 
 ## Executable-contract notes
 

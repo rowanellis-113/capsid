@@ -147,14 +147,7 @@ void AsyncAdminBackend::worker_loop() {
                     inner_->deploy(pending.application, pending.version, pending.tenant, &recorded);
                 succeeded = outcome.ok;
                 if (succeeded && !outcome.workers.empty()) {
-                    // A successful deploy whose outcome still carries
-                    // workers can only come from a coordinator configured
-                    // WITHOUT the §9.3 transaction callbacks (the legacy
-                    // direct-call path). There is no publisher here —
-                    // worker ownership no longer hands off through this
-                    // layer — so the unclaimed pool is recycled and the
-                    // public operation fails closed instead of leaking
-                    // every worker.
+                    // The coordinator must have transferred ownership before returning.
                     succeeded = false;
                 }
             }
@@ -172,7 +165,6 @@ void AsyncAdminBackend::worker_loop() {
                 capsid_worker_destroy(worker);
             }
             outcome.workers.clear();
-            outcome.worker = nullptr;
         }
         std::lock_guard<std::mutex> lock(mutex_);
         // The task is no longer running: the capacity slot opens for the

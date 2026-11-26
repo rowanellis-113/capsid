@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "d62f00fa4fc3adfa96b59247696cc745c58283ba91690dff67b9639e34520e9d",
+      "sha256": "2ff117e8ab04c126b47d37a73292d4b2f93da4205f744459c99d7899e14ec82e",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
     },
     {
@@ -32,7 +32,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "d8611b2a65134515486d8be4063bdb30c854692cacd1190733cfb732a0dc5454",
+      "sha256": "da54d7c10147d4581876fe9ab195bbb7afa31b7b406ce48bff9ad490d664683c",
       "review": "Delivered negotiated-v4/WebSocket foundation separated from future waitUntil/Binding-v2/Wrangler work; connection owner is not general background authority."
     },
     {
@@ -80,7 +80,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "ad8f5ada50953976b48ce66f1b3837e68c972adced9bc6a944769b95b69244ba",
+      "sha256": "79d4c3bf8a8dd49fb091b55d823fa8d48aac0ee4f3c6a687ddfd5dd0bbc572e3",
       "review": "Delivered Binding v1 versus planned v2, schema/registry ownership and runtime/operation-scoped gates; no stream/native-handle RPC promise."
     },
     {
@@ -88,7 +88,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "8ec7c60e772a531a29049c2c39b3cf7e351649b6ddb22a00b6d8656aac61dd29",
+      "sha256": "ba7533f6dbd76c10bda64a1ff0688147251fec9374e9927316142aea67bb10a4",
       "review": "Config v2 orthogonal host-v2/app-v2 schema, managed-isomorphic local CLI, and v0.3.2 elastic pools + two-phase fair-share memory LRU implemented on dev/v0.3.2; v0.3.1-beta.1 release baseline stays separate in current-status.md."
     },
     {
@@ -96,7 +96,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "5f4988245d7ce5bebf32e5428c3484cf6edfb680d613249560068f210a6c617c",
+      "sha256": "e87e90a97549c50a9fd72f1bd2a20719ced47498254bb6deb534b7c99756cdc3",
       "review": "Current Host architecture/ownership/authority, experimental deployment and separate build/test/performance qualification scopes.",
       "archivedSource": "docs/history/archives/2026-11-17/host-technical-design-review.md.txt"
     },
@@ -105,7 +105,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "daa6111705debdc58d59f98c465256c3b5117a8b95518f1ded0eba0ed4797e92",
+      "sha256": "44d32a8180f72c41213db83f9e41e1dbec700022670d5dc5fb301fc5f2a87791",
       "review": "Library/distribution/Host split, ABI7, default v3/explicit v4, bounded Host-owned channels and native/strict boundaries."
     },
     {
@@ -418,7 +418,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "bfcad5bc55087119f9a88499c457ae2287b2cd26216216a193a7f41835d8a087",
+      "sha256": "5d3d2ef2a5b528c49e3f1c7292cecd331a58c097bef4bea5275ad113578e5a11",
       "review": "MSVC/static CRT/vcpkg/source prerequisites, native exits, genuine skips and SID/ACL/reparse/hard-link ownership boundary."
     },
     {
@@ -426,8 +426,8 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "37af69ebfe511e991aeab49e85b7e82e7467c580813106d2f884716d4d124afa",
-      "review": "Actual local/managed configuration authority, optional-document denial, schema fields, resource mapping/limits and ineffective pidsMax."
+      "sha256": "056f235ace83e0c218b13bb520170fcb5ea432f2420501e2590bc1555cd7c6cc",
+      "review": "Config v2 package layout, required manifest, permissions, port lists, resource ceilings and elastic pools."
     },
     {
       "path": "docs/guides/format-source.md",
@@ -435,22 +435,22 @@
       "reviewed": true,
       "hashMode": "canonical-lf-text",
       "review": "Pinned formatters, exact-byte exclusions and capture archives, beta.5 qualification boundary and clean Release checks.",
-      "sha256": "93a2fafc18b36049275ce6a3b94cef5e687d8b72236e68f828d80bbe29130832"
+      "sha256": "6d4c980ab70bbd6e369fd09f7abbb3f5858d8e8550ad02a8cce17bea0f69f828"
     },
     {
       "path": "docs/guides/install-packages.md",
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "6e8095fe1a2a6e9efe5ccb0edafd7b7eb237d0480397bbad44f3ea2f71e85140",
-      "review": "Public beta.5 with unchanged GitHub Latest and stable channel, exact asset inventory, explicit installer tag, checksums and build identity limits."
+      "sha256": "1e2be97a8da26815c43bba0ec04a399985f6ff95b6ab7c85df76d1172aee856e",
+      "review": "Published platform packages, checksum verification, architecture-qualified installer assets and source-specific release identity."
     },
     {
       "path": "docs/guides/run-application.md",
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "bd9a1e6378c1d0e818488bc38edf7998786663e9218d6da9b7b39ede897b27a5",
+      "sha256": "e506045f604f2f9b7499222804307946df59d0131cf8dab839d639d88c0d61b3",
       "review": "Shared Fetch example with separate configuration, host commands, readiness and request URLs for the published beta and v0.3.2 development branch."
     },
     {
@@ -698,7 +698,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "bacfff00f0f475c1b22c202bcd8215d069e3c488c52b1c988ca97aac9acf31c3",
+      "sha256": "c8c0e11f1d4a32b19d26e4ffc3b09a95d9130bc6c64100e6e59cbff7b1f73253",
       "review": "Trusted package operation gates, independent runtimes, asynchronous RPC and narrow credential/resource authority."
     },
     {
@@ -706,7 +706,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "ff9c7b9cc086e12a6b8876cc7b8548166b09016202c5d27415b98365f388fa82",
+      "sha256": "5a6f4417d9a0c1c6449a86bc0a42b860657feadc452e4ddc185173f839b4e3e4",
       "review": "Manifest/source module and permission gates, null-egress denial and Host policy intersection; optional C API policy is not the first-party Host behavior."
     },
     {
@@ -714,7 +714,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "96c47577ff847dedee54d2b0dda05a8b7c18691b7bb8f2339e45de88cf7b6d44",
+      "sha256": "7c74ff9d45eef1dbddd6f4a927448a95de0c056e8d9eed45fbbd8e165403a8ff",
       "review": "Public ABI7 request/event/callback/spawn lifecycle, additive protocol options and channel result/terminal confirmation; default strict off."
     },
     {
@@ -722,7 +722,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "aee7dfc2083e1ae9924d51d3b046cf8af7f81b7531851a08e02156d25f4d319a",
+      "sha256": "33c70e91ac0120bc6910178e84969581d70720a7b37a7e632f1a8afc71484f0f",
       "review": "Current immutable wire/base+A2 contract, no silent default-v4 upgrade, unsupported half-close/lifetime limits; exact old source retained.",
       "archivedSource": "docs/history/archives/2026-11-17/fetchrpc-v4.md.txt"
     },
@@ -771,15 +771,15 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "9c65a6d6866a115530fa49dad7edb2f5f27707e93e0e63d51213ca3aa6305425",
-      "review": "Delivered parser/typed projection, CLI readiness/timeouts, v1/v2 schemas, current Admin request keys, v4 Host limits and unenforced App PID caveat."
+      "sha256": "b61a3ef31889f9e437c9d150e7449c7ec88e5f57982be56d31e171991335459a",
+      "review": "Current local and managed entry points, Host v2 settings, tenant-aware Admin deployment, routing and listener CORS."
     },
     {
       "path": "docs/reference/linux-sandbox.md",
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "dfde2a2b02cb03ef14e7dd046eae73ba17f3de66877c40b48dcd9a9f330c8a3d",
+      "sha256": "67cbeab26b91069e2eb5b2530d1a566999b63d3d77ba3d969503a5efb9b66239",
       "review": "Actual C API defaults and READY bits, seccomp/Landlock/rlimit/cgroup/namespace prerequisites and production versus diagnostic profiles."
     },
     {
@@ -787,7 +787,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "ea0b9e6ed5a684b5bddfed6da8b62d8525c4c8e13728279a3ce8a95500bfcbf3",
+      "sha256": "e4c5af1d31ee4b92caa93d3da1742dd45abc61c3a8e547664cf1e05729e347ec",
       "review": "Twelve shipped modules, exact currently granted operations and unavailable/deferred capabilities; no ambient User socket/process authority."
     },
     {
@@ -803,7 +803,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "59e4169e457941e760cda0641ffd868d18cc68905b3fdd0bfc6d982fb5fc4422",
+      "sha256": "577dca612cf5a211118ed5f8cca707a8ad94fcc5a386ed5441e75cf9ab835618",
       "review": "Development-branch scope and dated published-release, compatibility and benchmark records."
     },
     {
@@ -819,7 +819,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "a2b85b715e719f5cc270598c0ff598f8ce36356c9311b702638b28a12e5d35e8",
+      "sha256": "fd90b7ae7ecd94dad3e8eeeee6be2ae12899ec27ec9550760f31d5e7ed277075",
       "review": "Source-pinned API/WPT profile, current v2 reference conflicts, 84 selected files, closed D011/open exclusions and no full-conformance claim."
     },
     {

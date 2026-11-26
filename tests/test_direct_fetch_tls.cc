@@ -532,7 +532,7 @@ Result run_case(const char* worker_path, const std::string& bundle, const char* 
     egress_policy.attach(&config);
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn TLS worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn TLS worker");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "load TLS bundle");

@@ -109,6 +109,39 @@ void test_compile_effective_bindings() {
             "digest entry secret fields are wrong");
 }
 
+void test_binding_port_list() {
+    BindingRegistrySnapshot registry;
+    registry.packages.push_back(
+        package("mongo", replace_once(kManifest, "127.0.0.1:27017",
+                                      R"(127.0.0.1:27017","127.0.0.1:27018)")));
+    AppBindingRequest request;
+    request.id = "mongo";
+    request.net_rules = {"127.0.0.1:27017,27018"};
+    auto compiled = compile_effective_bindings(registry, {request});
+    require(compiled.ok && compiled.bindings.size() == 1, "both declared ports are granted");
+    require(compiled.bindings.front().request.net_rules ==
+                std::vector<std::string>{"127.0.0.1:27017", "127.0.0.1:27018"},
+            "worker descriptor requires one concrete port per rule");
+    const auto recovered = capsid::host::parse_bindings_snapshot(
+        capsid::host::serialize_bindings_snapshot(compiled.bindings));
+    require(recovered.ok && recovered.bindings.size() == 1 &&
+                recovered.bindings.front().request.config_json == "{}" &&
+                recovered.bindings.front().request.net_rules ==
+                    compiled.bindings.front().request.net_rules,
+            "recovery must preserve both authorized ports and the default config object");
+    capsid_binding_descriptor descriptor{};
+    require(capsid::host::build_binding_descriptor(compiled.bindings.front(), &descriptor) &&
+                descriptor.policy && descriptor.policy->net_rule_count == 2 &&
+                std::string(descriptor.policy->net_rules[0]) == "127.0.0.1:27017" &&
+                std::string(descriptor.policy->net_rules[1]) == "127.0.0.1:27018",
+            "compiled descriptor must carry exactly the authorized endpoints");
+    request.net_rules = {"127.0.0.1:27017,27019"};
+    require(!compile_effective_bindings(registry, {request}).ok, "undeclared port was granted");
+    request.net_rules = {"127.0.0.1"};
+    require(!compile_effective_bindings(registry, {request}).ok,
+            "finite grants allowed every port");
+}
+
 void test_subset_proofs_fail_closed() {
     BindingRegistrySnapshot registry;
     registry.packages.push_back(package("mongo", kManifest));
@@ -462,6 +495,7 @@ int main() {
     test_parse_app_bindings();
     test_compile_effective_bindings();
     test_subset_proofs_fail_closed();
+    test_binding_port_list();
     test_digest_sensitivity_and_immutability();
     return 0;
 }

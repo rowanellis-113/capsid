@@ -1,7 +1,7 @@
 # Config v2 and multi-tenant elastic worker pools
 
 > This design targets `dev/v0.3.2`. It defines Host and application configuration, elastic pools and tenant budgets. The [v0.3.2 acceptance record](../history/v0.3.2/README.md) identifies the three P1 fixes and the remaining release checks.
-> For the published `v0.3.1-beta.1`, use the [Host configuration reference](../reference/host-configuration.md) and [application configuration guide](../guides/configure-application.md). [Release and measurement provenance](../reference/release-status.md)
+> For the published `v0.3.1-beta.1`, use the [tagged Host configuration reference](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/host-config.md) and [tagged application configuration guide](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/capsid-json.md). [Release and measurement provenance](../reference/release-status.md)
 
 ---
 
@@ -75,7 +75,7 @@ A review of `src/host/config.cc`, `src/host/host_config_model.cc`, `src/host/pol
 | `recovery.restartBackoff.*` and `replacementsConcurrentPerApp` | Use exponential backoff (`100ms..10s`, `10%` jitter, reset after `60s` of stability), with serial replacement per application. Expose `crashBudget` and `healthCheck`. |
 | `pool.queueHeaderBytes` | Remove it. Queued headers are bounded by `listeners[].limits.headerSize × pool.queueRequests`. |
 | `request.{maxStreamingInflightPerWorker, streamIdleTimeoutMs, writeTimeoutMs}` | Move slow-connection and stream protection to `listeners[].limits`. Keep `timeout` and `maxInflight` in the application request settings. |
-| `worker.processAddressSpace` | Remove it from the cross-platform `capsid.json`. The Linux strict sandbox derives address-space protection from `memoryMax`. |
+| `worker.processAddressSpace` | Remove it from the cross-platform `capsid.json`. In Linux managed mode with `isolation.cgroupRoot`, per-worker `worker.memoryMax` and shared tenant `tenancy.*.hardMemory` enforce physical memory via cgroup v2 `memory.max`; the runtime platform default `RLIMIT_AS` ceiling remains separate from `memoryMax` so mmap and WASM virtual reservations are not broken. |
 | Required equal `pool.{minReady, maxWorkers}` | Phase 1 uses the optional fixed-size `pool.workers`, falling back to `defaults.pool.workers ?? 1`. |
 
 ### 2.3 Units and inheritance
@@ -83,7 +83,7 @@ A review of `src/host/config.cc`, `src/host/host_config_model.cc`, `src/host/pol
 1. **Use one representation for each quantity.**
    - Durations use strings such as `"100ms"`, `"5s"` and `"1m"`. Remove bare `*Ms` integers.
    - Sizes use strings such as `"32KiB"`, `"256MiB"` and `"2GiB"`. Remove bare `*Bytes` integers.
-   - Host `permissions.fetchTargets`, App `permissions.fetch.allow` and Binding `permissions.net.allow` share the `<host>[:<p1>[,<p2>...]]` parser. It accepts exact names, `*.` wildcards, IPv4/IPv6 literals and CIDR ranges.
+   - Host `permissions.fetchTargets`, App `permissions.fetch.allow` and App `bindings.<id>.permissions.net.allow` share the `<host>[:<p1>[,<p2>...]]` parser. It accepts exact names, `*.` wildcards, IPv4/IPv6 literals and CIDR prefixes. Explicit ports are decimal numbers from 1 to 65535. Use a comma-separated list for multiple ports. An installed `capsid/binding-v1` manifest grants one explicit port per target. The compiler checks each requested Binding port against these grants and emits one Worker rule per authorized endpoint.
 2. **Use the same fields in Host defaults, Host maximums and the application manifest.**
    All three use the same eight leaf fields under `{ worker, request, pool }`. Resolve each field in this order:
    $$\text{effective}(f) = \text{app}(f) \;\text{??}\; \text{host.defaults}(f) \;\text{??}\; \text{builtin}(f)$$
@@ -519,7 +519,7 @@ Admin status, structured logs and `/metrics` must expose the specific reason for
 
 ## 10. Configuration retirement and delivery milestones <a id="section-10"></a>
 
-1. **Target configuration contract.** Use `capsid/host-v2` and `capsid/app-v2`. Retire `capsid/host-v1` and `capsid/app-v1` after moving the existing regression inputs. `capsid/binding-v1` and C ABI v7 are independent contracts.
+1. **Target configuration contract.** Use `capsid/host-v2` and `capsid/app-v2`. Retire `capsid/host-v1` and `capsid/app-v1` after moving the existing regression inputs. `capsid/binding-v1` and C ABI v8 are independent contracts.
 2. **Deliver each milestone with its own tests.**
    - **A. Config v2 and local CLI.** Implement the Phase 1 Host/app model, wire all eight `defaults`/`maximums` fields, and replace local `single-worker`/`static-pool` modes with one CLI that uses managed packages. Test that every accepted schema field is consumed.
    - **B. Single-pool elasticity.** Implement `0 <= minReady <= maxWorkers`, `idleTimeout`, the cold-request queue, bounded asynchronous `reaping`, and health probes isolated from idle accounting.

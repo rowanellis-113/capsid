@@ -99,9 +99,9 @@ GlobalEvictionCoordinator::GlobalEvictionCoordinator(MemoryBudgetConfig memory,
                                                      TenancyConfig tenancy,
                                                      WorkerCapacityLedger* ledger,
                                                      MemorySampler* sampler,
-                                                     MetricsRegistry* metrics)
+                                                     MetricsRegistry* metrics, StructuredLog* log)
     : memory_(std::move(memory)), tenancy_(std::move(tenancy)), ledger_(ledger), sampler_(sampler),
-      metrics_(metrics) {
+      metrics_(metrics), log_(log) {
     if (sampler_ != nullptr && memory_.check_interval_ms > 0) {
         sampler_->set_max_age_ms(memory_.check_interval_ms);
     }
@@ -268,10 +268,8 @@ bool GlobalEvictionCoordinator::check_or_reserve_deploy_quota_locked(
             std::int64_t evicted_pid = 0;
             if (!evict_oldest_idle_sibling(tenant_active_pools, /*exclude_requester_app=*/false,
                                            &evicted_pid)) {
-                if (metrics_ != nullptr) {
-                    metrics_->count_pool_rejection(std::string(application), effective_tenant,
-                                                   "tenant_hard_memory");
-                }
+                record_pool_rejection(metrics_, log_, std::string(application), effective_tenant,
+                                      {}, "tenant_hard_memory");
                 if (error != nullptr) {
                     *error = "tenant hardMemory quota exceeded";
                 }
@@ -291,10 +289,8 @@ bool GlobalEvictionCoordinator::check_or_reserve_deploy_quota_locked(
         std::uint64_t other_live = 0;
         collect(empty_skip, &tenant_active_pools, &tenant_bytes, &other_committed, &other_live);
         if (other_committed + new_min_ready > quota.max_workers) {
-            if (metrics_ != nullptr) {
-                metrics_->count_pool_rejection(std::string(application), effective_tenant,
-                                               "tenant_max_workers");
-            }
+            record_pool_rejection(metrics_, log_, std::string(application), effective_tenant, {},
+                                  "tenant_max_workers");
             if (error != nullptr) {
                 *error = "tenant maxWorkers quota exceeded";
             }
@@ -310,10 +306,8 @@ bool GlobalEvictionCoordinator::check_or_reserve_deploy_quota_locked(
             --other_live;
         }
         if (other_live + needed_slots > quota.max_workers) {
-            if (metrics_ != nullptr) {
-                metrics_->count_pool_rejection(std::string(application), effective_tenant,
-                                               "tenant_max_workers");
-            }
+            record_pool_rejection(metrics_, log_, std::string(application), effective_tenant, {},
+                                  "tenant_max_workers");
             if (error != nullptr) {
                 *error = "tenant maxWorkers quota exceeded";
             }
@@ -549,9 +543,9 @@ bool GlobalEvictionCoordinator::acquire_worker_slot(const GenerationPool* reques
     }
 
     // 4. Global elastic worker-slot ledger check (evict an idle worker above
-    // minReady on contention).
+    // minReady on contention only while async reaping headroom is available).
     if (ledger_ != nullptr && !ledger_->try_acquire_elastic(app)) {
-        for (;;) {
+        while (ledger_->reaping_available()) {
             if (!evict_one_elastic_locked()) {
                 break;
             }

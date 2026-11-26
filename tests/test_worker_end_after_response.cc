@@ -197,7 +197,7 @@ int main(int argc, char** argv) {
     config.worker_path = argv[1];
 
     capsid_worker* worker = NULL;
-    require_result(capsid_worker_spawn(&config, &worker), "spawn worker");
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn worker");
     require_result(capsid_worker_load_bundle(
                        worker, reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size()),
                    "load bundle");

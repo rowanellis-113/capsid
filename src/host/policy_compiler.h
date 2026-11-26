@@ -23,7 +23,6 @@ struct FetchTarget {
 };
 
 struct HostPolicy {
-    bool is_v2 = false;
     std::vector<std::string> module_allowlist;
     // Env patterns in the frozen Host grammar: "NAME", "PREFIX*", "*SUFFIX"
     // or "*" (any). Longest-prefix matching wins for denials.
@@ -46,7 +45,6 @@ struct HostPolicy {
     std::uint32_t max_pool_workers = 0; // 0 = no per-app cap beyond max_workers
     bool has_max_min_ready = false;     // true when maximums.pool caps minReady
     std::uint32_t max_min_ready = 0;
-    std::uint32_t min_ready = 1;               // legacy; not a ceiling (see compile_policy)
     std::uint64_t max_requests_per_worker = 0; // 0 = unlimited
     // request.timeout is finite. Zero here means no Host override/ceiling;
     // an omitted App value uses the Host default, then the Runtime default.
@@ -57,17 +55,8 @@ struct HostPolicy {
     // §10.3). 0 = not set: unlike the worker-count ceiling, queueing is
     // App-decided and the Host only caps it, so 0 is the natural
     // "no cap" sentinel.
-    std::uint64_t max_queue_requests = 0;     // 0 = no depth cap
-    std::uint64_t max_queue_header_bytes = 0; // 0 = no header-bytes cap
-    std::uint64_t max_queue_timeout_ms = 0;   // 0 = no deadline cap
-    // Host-side SSE-permit maximums (host.json maximums.request.*, E-2
-    // §9.3). Same cap-only semantics as the queue maximums: 0 = the Host
-    // imposes no ceiling; the 1/1 boundary rule is enforced at the shard.
-    std::uint64_t max_streaming_inflight_per_worker = 0;
-    std::uint64_t max_stream_idle_timeout_ms = 0;
-    // Host-side slow-client write deadline maximum (host.json
-    // maximums.request.writeTimeoutMs, E-3 §9.2): 0 = no ceiling.
-    std::uint64_t max_write_timeout_ms = 0;
+    std::uint64_t max_queue_requests = 0;   // 0 = no depth cap
+    std::uint64_t max_queue_timeout_ms = 0; // 0 = no deadline cap
     std::uint64_t max_js_heap_bytes = 0;
     std::uint64_t max_file_descriptors = 0;
     std::uint64_t default_worker_memory_bytes = 0;
@@ -82,11 +71,7 @@ struct HostPolicy {
     std::uint64_t max_idle_timeout_ms = 0;
     bool has_default_queue_requests = false;
     std::uint64_t default_queue_requests = 0;
-    std::uint64_t default_queue_header_bytes = 0;
     std::uint64_t default_queue_timeout_ms = 0;
-    std::uint64_t default_max_streaming_inflight_per_worker = 0;
-    std::uint64_t default_stream_idle_timeout_ms = 0;
-    std::uint64_t default_write_timeout_ms = 0;
     bool strict_sandbox = true; // isolation is host-decided only
     std::vector<std::string> isolation_required;
     std::string isolation_cgroup_root;
@@ -106,7 +91,6 @@ struct HealthCheckConfig {
 };
 
 struct AppRequest {
-    bool is_v2 = false;
     std::vector<std::string> modules;
     struct EnvRequest {
         std::string name;
@@ -130,17 +114,8 @@ struct AppRequest {
     // pool.queue* (E-1 §10.3): the bounded per-shard admission queue.
     // 0 = queueing disabled (inflight-full rejects with 429 directly).
     bool has_queue_requests = false;
-    std::uint64_t queue_requests = 0;     // queue depth; 0 = disabled
-    std::uint64_t queue_header_bytes = 0; // 0 = unbounded header bytes
-    std::uint64_t queue_timeout_ms = 0;   // 0 = no queue deadline
-    // request.* SSE permit (E-2 §9.3). 0 = unset: the shard keeps its
-    // defaults (2 slots, 60s idle). An explicit non-zero value overrides;
-    // the 1/1 boundary is validated at the shard.
-    std::uint64_t max_streaming_inflight_per_worker = 0; // 0 = unset
-    std::uint64_t stream_idle_timeout_ms = 0;            // 0 = unset
-    // request.writeTimeoutMs (E-3 §9.2): 0 = unset keeps the shard default
-    // (60s). The slow-client write deadline is a Host-side socket view.
-    std::uint64_t write_timeout_ms = 0; // 0 = unset
+    std::uint64_t queue_requests = 0;   // queue depth; 0 = disabled
+    std::uint64_t queue_timeout_ms = 0; // 0 = no queue deadline
     // M2 item 6 (design §7.4): the App's active health probe. A
     // healthCheck object with a path arms the probe; configured=false
     // (no healthCheck, or no usable path) means the App keeps passive
@@ -150,16 +125,15 @@ struct AppRequest {
     // worker.* resource fields. memory_bytes is worker.memoryMax (the
     // process memory ceiling); the three sub-resources keep their own
     // slots so none of them impersonates another at the Runtime boundary.
-    std::uint64_t memory_bytes = 0;          // worker.memoryMax
-    std::uint64_t js_heap_bytes = 0;         // worker.jsHeap
-    std::uint64_t process_address_bytes = 0; // worker.processAddressSpace
-    std::uint64_t file_descriptors = 0;      // worker.fileDescriptors, 0 = unset
+    std::uint64_t memory_bytes = 0;     // worker.memoryMax
+    std::uint64_t js_heap_bytes = 0;    // worker.jsHeap
+    std::uint64_t file_descriptors = 0; // worker.fileDescriptors, 0 = unset
     bool has_workers = false;
     bool has_min_ready = false;
     bool has_max_workers = false;
     bool has_idle_timeout = false;
-    std::uint32_t workers = 1; // fixed static pool or maxWorkers
-    std::uint32_t min_ready = 1;
+    std::uint32_t workers = 0;
+    std::uint32_t min_ready = 0;
     std::uint32_t max_workers = 0;
     std::uint64_t idle_timeout_ms = 0;
 };
@@ -193,19 +167,13 @@ struct EffectiveConfig {
     std::vector<std::string> stdio_streams;    // canonical order
     std::vector<std::uint32_t> stdio_rule_ids; // parallel to streams
     std::uint64_t requests_per_worker = 0;
-    std::uint64_t request_timeout_ms = 0;                // -> Runtime request_timeout_ms
-    std::uint64_t queue_requests = 0;                    // pool.queueRequests
-    std::uint64_t queue_header_bytes = 0;                // pool.queueHeaderBytes
-    std::uint64_t queue_timeout_ms = 0;                  // pool.queueTimeout
-    std::uint64_t max_streaming_inflight_per_worker = 0; // request.*, 0 = unset
-    std::uint64_t stream_idle_timeout_ms = 0;            // request.*, 0 = unset
-    std::uint64_t write_timeout_ms = 0;                  // request.*, 0 = unset
-    // The effective process-memory permit: the largest stated ceiling
-    // (memoryMax, jsHeap, processAddressSpace) for Host-budget accounting.
+    std::uint64_t request_timeout_ms = 0; // -> Runtime request_timeout_ms
+    std::uint64_t queue_requests = 0;     // pool.queueRequests
+    std::uint64_t queue_timeout_ms = 0;   // pool.queueTimeout
+    // Effective memory budget for worker admission and cgroup enforcement.
     std::uint64_t memory_bytes = 0;
-    std::uint64_t js_heap_bytes = 0;         // -> Runtime js_heap_limit
-    std::uint64_t process_address_bytes = 0; // -> Runtime process_memory_limit
-    std::uint64_t file_descriptors = 0;      // -> Runtime resource_limits
+    std::uint64_t js_heap_bytes = 0;    // -> Runtime js_heap_limit
+    std::uint64_t file_descriptors = 0; // -> Runtime resource_limits
     std::uint32_t workers = 1;
     std::uint32_t min_ready = 1;
     std::uint64_t idle_timeout_ms = 0;

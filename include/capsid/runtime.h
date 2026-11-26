@@ -8,8 +8,7 @@
 extern "C" {
 #endif
 
-#define CAPSID_ABI_VERSION 7u
-#define CAPSID_CAPABILITY_POLICY_VERSION_1 1u
+#define CAPSID_ABI_VERSION 8u
 #define CAPSID_CAPABILITY_POLICY_VERSION 2u
 #define CAPSID_MEMORY_METRICS_VERSION 1u
 #define CAPSID_BUILD_INFO_VERSION 2u
@@ -52,7 +51,7 @@ typedef enum capsid_result {
     CAPSID_PROTOCOL_ERROR = 4,
     CAPSID_SYSTEM_ERROR = 5,
     CAPSID_CHILD_ERROR = 6,
-    /* WP-06 additions to ABI v7: no exception may cross an extern "C"
+    /* WP-06 additions to ABI v8: no exception may cross an extern "C"
      * boundary. CAPSID_OUT_OF_MEMORY is a std::bad_alloc caught by the
      * ABI guard; CAPSID_INTERNAL_ERROR is any other C++ exception. */
     CAPSID_OUT_OF_MEMORY = 7,
@@ -77,13 +76,7 @@ const char* capsid_last_error(void);
  * documented order. build_id is "sha256:" plus 64 lowercase hexadecimal
  * digits and covers the build-provenance record v1 minus its buildId line.
  *
- * This structure is additive to ABI v7. Version 2 (CAPSID_BUILD_INFO_VERSION
- * 2) appended the provenance fields after compatibility_id. Callers
- * compiled against the version-1 headers pass the smaller v1 struct_size
- * and still succeed: capsid_runtime_build_info() fills exactly the leading
- * fields that fit and never touches memory beyond the caller's buffer.
- * Callers must initialize the envelope first (capsid_build_info_init or
- * memset + struct_size) and preserve struct_size for size negotiation.
+ * Initialize the complete version 2 descriptor with capsid_build_info_init().
  */
 typedef struct capsid_build_info {
     uint32_t struct_size;
@@ -165,7 +158,7 @@ typedef struct capsid_resource_limits {
 
 /*
  * Host-only direct-egress policy. A NULL policy is deny-all. The descriptor
- * and every rule are copied synchronously by capsid_worker_spawn().
+ * and every rule are copied synchronously by capsid_worker_spawn_ex().
  *
  * Targets are exact ASCII hostnames, "*.example.com" DNS-label wildcards,
  * numeric IP addresses, or canonical IPv4/IPv6 CIDRs. A 0/0 port pair means
@@ -200,7 +193,7 @@ typedef struct capsid_egress_policy {
 
 /*
  * Host-only capability policy. This is an immutable worker-startup snapshot:
- * capsid_worker_spawn() validates and synchronously copies every descriptor,
+ * capsid_worker_spawn_ex() validates and synchronously copies every descriptor,
  * module name, rule, identity, and nested network policy.
  *
  * Build availability, module visibility, and operation permission are
@@ -252,7 +245,7 @@ typedef struct capsid_permission_rule {
 /*
  * Explicit host-provided environment snapshot entry. Values are never read
  * from the worker process environment. The descriptor and both strings are
- * copied synchronously by capsid_worker_spawn().
+ * copied synchronously by capsid_worker_spawn_ex().
  */
 typedef struct capsid_env_entry {
     uint32_t struct_size;
@@ -321,7 +314,7 @@ typedef struct capsid_worker_config {
     const char* sandbox_cgroup_path;
     /*
      * Optional typed resource controls. The descriptor is read synchronously
-     * by capsid_worker_spawn() and is never exposed to JavaScript.
+     * by capsid_worker_spawn_ex() and is never exposed to JavaScript.
      */
     const capsid_resource_limits* resource_limits;
     /*
@@ -330,8 +323,7 @@ typedef struct capsid_worker_config {
      */
     const capsid_egress_policy* egress_policy;
     /*
-     * Optional immutable module/capability policy. NULL preserves the legacy
-     * module-deny behavior and leaves direct fetch governed only by
+     * Optional immutable module/capability policy. NULL denies module access and leaves direct fetch governed only by
      * egress_policy. When non-NULL, its net policy is an additional gate.
      */
     const capsid_capability_policy* capability_policy;
@@ -349,7 +341,7 @@ typedef struct capsid_worker_config {
  * FetchRPC v4 capability bits (docs/reference/fetchrpc-v4.md §1.2). Effective
  * capabilities are the conjunction with the worker's READY reply.
  * Requested through capsid_protocol_options (spawn_ex); the published
- * capsid_worker_config layout is frozen at the ABI v7 shape.
+ * capsid_worker_config layout is frozen at the ABI v8 shape.
  */
 #define CAPSID_PROTOCOL_CAP_DUPLEX_CHANNEL (1u << 0)
 #define CAPSID_PROTOCOL_CAP_UPGRADE (1u << 1)
@@ -378,7 +370,7 @@ typedef struct capsid_protocol_options {
     uint32_t struct_size;
     /* Descriptor layout version, independent of CAPSID_ABI_VERSION. */
     uint32_t descriptor_version;
-    /* Wire version: 3 (default) or 4. */
+    /* Wire version: 4. */
     uint16_t wire_version;
     uint16_t reserved16;
     /* CAPSID_PROTOCOL_CAP_* bitset; unknown bits are rejected. */
@@ -503,7 +495,7 @@ typedef enum capsid_event_type {
     /*
      * FetchRPC v4 A2 channel events (T07). Delivered only on workers
      * spawned with capsid_worker_spawn_ex at wire version 4 and the
-     * A2/DUPLEX capabilities; a v3 worker can never produce them.
+     * A2/DUPLEX capabilities.
      * event.payload carries the raw A2 frame payload; decode it with
      * capsid_channel_event_decode. capsid_event itself is NOT extended.
      */
@@ -673,7 +665,7 @@ capsid_result capsid_worker_upgrade_begin(capsid_worker* worker, uint64_t reques
 capsid_result capsid_worker_dial_accept(capsid_worker* worker, uint64_t dial_id,
                                         uint32_t channel_id, uint64_t max_message_bytes,
                                         const char* selected_protocol);
-/* Additive ABI-v7 descriptor for a negotiated FETCH_UPGRADE result.
+/* Additive ABI-v8 descriptor for a negotiated FETCH_UPGRADE result.
  * Initialize every field (including struct_size and version) before use.
  * Names/values are counted HTTP ByteString octets, with duplicate headers
  * preserved in order. All input bytes are copied before the call returns.
@@ -709,18 +701,7 @@ void capsid_env_entry_init(capsid_env_entry* entry);
 void capsid_capability_policy_init(capsid_capability_policy* policy);
 void capsid_audit_record_init(capsid_audit_record* record);
 void capsid_memory_metrics_init(capsid_memory_metrics* metrics);
-/*
- * Initializes the build-info envelope for size negotiation. Stamps the
- * CALLER's struct size — which only the caller's own header knows — so
- * this is an inline: callers compiled against the current headers use it
- * directly. Callers compiled against the build-info v1 headers (which
- * declare it as a plain function) link the library's legacy symbol of the
- * same name instead, which stamps a v1-sized envelope and never writes
- * past a v1 buffer. In both cases the version stamped is the current
- * CAPSID_BUILD_INFO_VERSION; a caller from an older ABI must treat newer
- * versions conservatively.
- */
-#ifndef CAPSID_BUILD_INFO_INIT_IMPLEMENTATION
+/* Initialize the build identity descriptor before querying the runtime. */
 static inline void capsid_build_info_init(capsid_build_info* info) {
     if (info == NULL) {
         return;
@@ -728,16 +709,17 @@ static inline void capsid_build_info_init(capsid_build_info* info) {
     info->struct_size = (uint32_t)sizeof(*info);
     info->version = CAPSID_BUILD_INFO_VERSION;
 }
-#endif
-void capsid_worker_config_init(capsid_worker_config* config);
+/* The header supplies its layout and ABI before the library writes any defaults. */
+capsid_result capsid_worker_config_init_sized(capsid_worker_config* config, uint32_t size,
+                                              uint32_t abi_version);
+static inline capsid_result capsid_worker_config_init(capsid_worker_config* config) {
+    return capsid_worker_config_init_sized(config, (uint32_t)sizeof(*config), CAPSID_ABI_VERSION);
+}
 const char* capsid_result_string(capsid_result result);
 
 /*
- * Returns the library-side build identity and provenance. struct_size is a
- * size negotiation: the caller announces its buffer size and only the
- * leading fields that fit are written. Callers compiled against the
- * build-info v1 headers pass the v1 size and receive the v1 fields;
- * anything below the v1 size is CAPSID_INVALID_ARGUMENT.
+ * Returns build identity and provenance for a full, initialized descriptor.
+ * An unsupported version or size returns CAPSID_INVALID_ARGUMENT.
  *
  * The compatibility ID is computed from this exact canonical UTF-8 record
  * (compatibility record v2, spec §11.2), including the final newline:
@@ -775,11 +757,9 @@ const char* capsid_result_string(capsid_result result);
  */
 capsid_result capsid_runtime_build_info(capsid_build_info* out_info);
 
-capsid_result capsid_worker_spawn(const capsid_worker_config* config, capsid_worker** out_worker);
-
 /*
- * Protocol-selected spawn. options == NULL is exactly the published v3
- * behavior of capsid_worker_spawn. With options the wire version,
+ * FetchRPC v4 spawn. NULL options select HTTP carriage with zero channel capabilities.
+ * With options the wire version,
  * requested capabilities, and (for the A2 layout) channel limits are
  * negotiated: every option field is validated BEFORE any process,
  * socketpair, cgroup, or handle is created, so a rejected spawn leaves
@@ -802,7 +782,7 @@ capsid_result capsid_worker_spawn_ex(const capsid_worker_config* config,
  * writes at most min(caller_size, library-known size) bytes and
  * records caller_size in struct_size. A caller_size smaller than the
  * fixed prefix (through capabilities) is CAPSID_INVALID_ARGUMENT and
- * writes nothing. Defaults: descriptor version 1, wire version 3, no
+ * writes nothing. Defaults: descriptor version 1, wire version 4, no
  * capabilities, zero limits (deployment defaults).
  */
 capsid_result capsid_protocol_options_init(capsid_protocol_options* options, uint32_t caller_size);

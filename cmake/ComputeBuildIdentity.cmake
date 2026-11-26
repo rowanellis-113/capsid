@@ -222,6 +222,36 @@ function(capsid_generate_build_identity)
     set(CGBI_TREE_CLEAN "false")
     find_program(CGBI_GIT git)
     if(CGBI_GIT)
+        # Re-run configure whenever git HEAD, its active branch ref, packed-refs,
+        # or index changes so incremental builds/packages never ship a stale
+        # build-info.txt or capsid_runtime_build_info() commit SHA.
+        set(CGBI_GIT_WATCH_REFS HEAD packed-refs index)
+        execute_process(
+            COMMAND "${CGBI_GIT}" -C "${CGBI_CAPSID_SOURCE_DIR}"
+                symbolic-ref -q HEAD
+            OUTPUT_VARIABLE CGBI_HEAD_SYMREF
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE CGBI_SYMREF_RESULT)
+        if(CGBI_SYMREF_RESULT EQUAL 0 AND NOT CGBI_HEAD_SYMREF STREQUAL "")
+            list(APPEND CGBI_GIT_WATCH_REFS "${CGBI_HEAD_SYMREF}")
+        endif()
+        foreach(CGBI_GIT_REL IN LISTS CGBI_GIT_WATCH_REFS)
+            execute_process(
+                COMMAND "${CGBI_GIT}" -C "${CGBI_CAPSID_SOURCE_DIR}"
+                    rev-parse --git-path "${CGBI_GIT_REL}"
+                OUTPUT_VARIABLE CGBI_GIT_DEP_RAW
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE CGBI_GIT_DEP_RESULT)
+            if(CGBI_GIT_DEP_RESULT EQUAL 0 AND NOT CGBI_GIT_DEP_RAW STREQUAL "")
+                get_filename_component(CGBI_GIT_DEP_ABS "${CGBI_GIT_DEP_RAW}"
+                    ABSOLUTE BASE_DIR "${CGBI_CAPSID_SOURCE_DIR}")
+                if(EXISTS "${CGBI_GIT_DEP_ABS}" AND NOT IS_DIRECTORY "${CGBI_GIT_DEP_ABS}")
+                    set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND PROPERTY
+                        CMAKE_CONFIGURE_DEPENDS "${CGBI_GIT_DEP_ABS}")
+                endif()
+            endif()
+        endforeach()
+
         execute_process(
             COMMAND "${CGBI_GIT}" -C "${CGBI_CAPSID_SOURCE_DIR}"
                 rev-parse HEAD
@@ -248,7 +278,7 @@ function(capsid_generate_build_identity)
             endif()
             execute_process(
                 COMMAND "${CGBI_GIT}" -C "${CGBI_CAPSID_SOURCE_DIR}"
-                    status --porcelain
+                    status --porcelain=v1 --untracked-files=normal --ignore-submodules=none
                 OUTPUT_VARIABLE CGBI_TREE_STATUS
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 RESULT_VARIABLE CGBI_GIT_STATUS_RESULT)
@@ -275,6 +305,20 @@ function(capsid_generate_build_identity)
                 "Release configure requires a clean worktree; "
                 "git status --porcelain must be empty")
         endif()
+        # Ordinary source edits do not touch the Git refs watched by CMake.
+        # Direct install and CPack can also run without invoking the build.
+        set(release_check "${CMAKE_CURRENT_BINARY_DIR}/generated/VerifyReleaseSource.cmake")
+        configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/VerifyReleaseSource.cmake.in"
+            "${release_check}" @ONLY)
+        add_custom_target(capsid_verify_release_source ALL
+            COMMAND "${CMAKE_COMMAND}" -P "${release_check}" VERBATIM)
+        foreach(target IN ITEMS capsid_runtime capsid_host_core capsid-host capsid-worker
+                capsid-bytecode-compile tjs tjsc)
+            if(TARGET ${target})
+                add_dependencies(${target} capsid_verify_release_source)
+            endif()
+        endforeach()
+        install(SCRIPT "${release_check}")
     endif()
     if(CGBI_BUILD_TYPE STREQUAL "Release" AND CGBI_COMMIT_KNOWN AND
        CGBI_TREE_CLEAN STREQUAL "true")

@@ -125,7 +125,7 @@ WorkerExecutor::WorkerFactory spawn_factory(const std::string& worker_path,
         config.worker_path = worker_path.c_str();
         config.request_timeout_ms = request_timeout_ms;
         capsid_worker* worker = nullptr;
-        if (capsid_worker_spawn(&config, &worker) != CAPSID_OK) {
+        if (capsid_worker_spawn_ex(&config, NULL, &worker) != CAPSID_OK) {
             *factory_error = "worker spawn failed";
             return false;
         }

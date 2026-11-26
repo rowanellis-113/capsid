@@ -36,7 +36,7 @@ struct AppBindingRequest {
     std::vector<std::string> fs_write;
     std::vector<std::string> env;
     std::vector<std::string> stdio;
-    std::string config_json;               // canonical compact serialization
+    std::string config_json = "{}";        // canonical compact serialization
     std::vector<BindingSecretRef> secrets; // sorted by key_id
 };
 

@@ -1,6 +1,6 @@
 # Capsid Binding v1 Technical Design
 
-> Source/API reviewed 2026-11-18 against 0.3.0-beta; historical dated results in §8.2
+> Host configuration and local commands describe v0.3.2. Dated results in §8.2
 > keep their original scope. [Current status](../reference/release-status.md) links current acceptance.
 >
 > Status: implemented. The acceptance matrix in §8 maps the design to current
@@ -72,14 +72,9 @@ separate Binding process; that is outside v1.
 
 ### 2.1 Host registry
 
-`capsid/host-v2` accepts an optional `bindingsRoot`:
-
-```json
-{
-  "apiVersion": "capsid/host-v2",
-  "bindingsRoot": "/etc/capsid/bindings"
-}
-```
+In a v0.3.2 Host configuration, set the optional `paths.bindings` directory alongside
+`paths.applications`, `paths.state` and `paths.secrets`. For example, add
+`"bindings": "/etc/capsid/bindings"` to `paths`. [Host configuration](../reference/host-configuration.md)
 
 The directory layout is fixed:
 
@@ -128,7 +123,7 @@ The scanner enforces these rules:
   ID, strictly bounded, and rejects duplicate/extra fields. Recovery reads
   that snapshot and revalidates manifest, App subset, derived modules and
   profiles, config, secret revisions, and aggregate limits; it does not rescan
-  `bindingsRoot`;
+  `paths.bindings`;
 - `index.js` is one self-contained ESM file. Third-party dependencies must be
   bundled. Relative, absolute, `file:`, and remote imports are denied. Dynamic
   imports can resolve only a manifest-granted `capsid:*` module under the
@@ -137,42 +132,21 @@ The scanner enforces these rules:
 Discovering a package does not load it into every worker. Only Bindings
 declared by the App enter its Generation and startup protocol.
 
-#### Local single-worker and static-pool development
+#### Local development
 
-Binding development does not require the managed coordinator. `single-worker`
-and `static-pool` accept the same `capsid/app-v2` document and an explicit
-`--bindings-root`:
-
-These are **option fragments**, not standalone runnable launches. Append them
-to the complete command in [getting started](../guides/run-application.md), including the
-worker, source name, routing/public authority, timeout, strict mode and ready fd.
+Run the application package with a Binding registry:
 
 ```sh
-# Keep all normal required arguments from the quick start as well.
-capsid-host --mode single-worker \
-  --capsid-json ./capsid.json \
-  --bindings-root ./bindings
-
-capsid-host --mode static-pool \
-  --workers 2 \
-  --capsid-json ./capsid.json \
-  --bindings-root ./bindings
+capsid-host --app-dir ./dist --bindings-dir ./bindings
 ```
 
-There is no implicit current-directory lookup. Declaring a Binding without an
-explicit registry fails startup. With a registry, the CLI scans once before
-spawn. Static-pool also reads, validates, and compiles the App policy once;
-every shard shares the immutable registry and effective Binding snapshot while
-still running its own worker process and Binding Runtime.
+The Host validates `dist/capsid.json` and compiles its declared Bindings against the
+installed manifests before starting the pool. Each worker uses the same snapshot.
+Provide the registry with `--bindings-dir` or `paths.bindings` in a local `--host-config`.
+Use `--secrets-dir` when a Binding references a local secret through `valueFrom`.
 
-Local modes use the production scanner, manifest validator, manifest/App
-intersection, `LOAD_BINDING` ordering, and READY sandbox proof. They do not
-have a managed secret provider, so any `secrets.valueFrom` declaration fails
-explicitly. Secret integration must be tested in managed mode.
-
-If an App declares no Binding, `--bindings-root` is unnecessary, no
-`LOAD_BINDING` message is sent, and no Binding Runtime is created. Secure
-local registry scanning is supported on Linux, macOS, and Windows native-dev.
+An application with no Binding declarations starts without loading a Binding Runtime.
+Local registry scanning is available on Linux, macOS and Windows.
 Windows uses reparse-point (symlink/junction) and hard-link rejection plus
 an ownership allow-list of the process identity and Administrators/SYSTEM
 (broad groups such as Everyone, Users and Authenticated Users are never
@@ -265,15 +239,15 @@ Rules:
   unknown fields;
 - one App can configure one entry per Binding ID in v1;
 - `config` is an opaque JSON object. The Host validates JSON depth and size
-  but does not interpret members. The limit is 256 KiB per Binding;
+  but does not interpret members. Omission supplies an empty object. The limit is 256 KiB per Binding;
 - a secret reference is exactly `{"valueFrom":"<secret-key>"}`; inline secret
   values are forbidden;
 - App `net`, `fs`, `env`, and `stdio` entries must be statically
   provable subsets of the manifest. Omission means deny all in that class;
 - the manifest, not the App, selects required Capsid modules and sandbox profiles;
-- strict `host-v1` and `app-v1` schemas retain their prior behavior.
+- the v0.3.2 Host and App configuration validators require Config v2.
 
-Network rules describe a final host, IP, or CIDR plus one exact port. Database
+Each Binding manifest rule grants a host, IP or CIDR and one exact port. The App may request a list such as `db.example.com:443,8443`. Every port must be covered by a manifest rule. Database
 schemes such as `mongo://` and `mysql://` are not policy syntax:
 
 ```text
@@ -642,7 +616,7 @@ and uses normal recovery replacement.
 
 ## 6. ABI, protocol, and Generation identity
 
-The existing `capsid_worker_config` layout and ABI v7 remain compatible.
+The Host loads bindings through ABI v8.
 Bindings use an additive, versioned descriptor API:
 
 ```c
@@ -710,7 +684,7 @@ deterministic digests.
 
 Tests prove no second runtime, heap, scheduler, profile, or Landlock path is
 created; undeclared imports do not lazy-load Bindings; the single-runtime ABI
-and performance path remain intact; local single-worker/static-pool skip the
+and performance path remain intact; local pools skip the
 registry when no Binding is declared and use the production registry and READY
 proof when one is declared.
 
@@ -783,7 +757,7 @@ become allowlists.
 - READY contains a Host-verifiable sandbox proof.
 - package, policy, profile, config, and secret revision enter immutable
   Generation identity; secret values never persist.
-- ABI v7 and the full zero-Binding path remain compatible.
+- The ABI v8 Worker supports applications with zero Bindings.
 
 ### 8.1 Requirement-to-test matrix
 
@@ -793,7 +767,7 @@ tests are not sufficient evidence by themselves.
 | Acceptance boundary | Primary automated evidence |
 | --- | --- |
 | Directory, App, and import IDs match; provider aliases are rejected | `host_binding_config`, `host_binding_manifest`, `host_binding_registry`, `host_binding_compile` |
-| Local single-worker/static-pool use the production registry/compiler/READY path and shards share immutable compilation | `host_local_capsid_policy`, `host_static_pool_server_binding_local_policy` |
+| Local pools use the production registry/compiler/READY path and shards share immutable compilation | `host_local_capsid_policy`, `host_static_pool_server_binding_local_policy` |
 | FD-relative registry scanning, replacement races, owner/mode/link/size checks, immutable recovery | `host_binding_registry`, `host_binding_compile`, `host_secret_snapshot` |
 | Zero Bindings preserve the single-runtime and sandbox baseline | `worker_zero_binding_regression` |
 | Runtime heap/global/module/job isolation and asynchronous queues | `worker_zero_binding_regression` (32 MiB per-Binding allocation smoke + global/module visibility), `binding_rpc` |
