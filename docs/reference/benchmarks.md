@@ -109,7 +109,7 @@ ABBA trials; physical Windows-host exclusivity is not claimed):
 | Trickle PSS (10 req/s) | 15.0 MiB | 15.7 MiB (`8.3 / 7.5`) | **16.1 MiB** (`8.6 / 7.5`) |
 | Loaded PSS (64 conn) | 18.5 MiB | 19.6 MiB (`9.8 / 9.7`) | **19.3 MiB** (`9.5 / 9.8`) |
 | 1K QPS / MiB | 1,175.5 | 1,234.0 | **2,130.8** |
-| 1 MiB Bytecode Cold Start / PSS | 20.43 ms / 14.3 MiB | 20.24 ms / 16.0 MiB | **21.43 ms / 14.7 MiB** |
+| 1 MiB Bytecode Cold Start / PSS | 18.64 ms / 16.0 MiB | 20.24 ms / 16.0 MiB | **21.43 ms / 14.7 MiB** |
 | 2 GiB Density `10k` (cold / warm) | 735 / 729 | 721 / 715 (99.2% warm) | **709 / 705** (99.4% warm) |
 | 2 GiB Density `100k` (cold / warm) | 503 / 503 | 497 / 496 (99.8% warm) | **502 / 501** (99.8% warm) |
 | 2 GiB Density `1m` (cold / warm) | 128 / 128 | 127 / 127 (100.0% warm) | **135 / 135** (100.0% warm) |

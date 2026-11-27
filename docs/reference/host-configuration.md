@@ -118,25 +118,28 @@ return 431/413 respectively.
 
 ## Request routing
 
-The `routing` object currently defines and reads only `mode` and `suffix`; `mode`
-supports three values:
+The `routing` object defines `mode`, `suffix`, and optional `header`; `mode`
+supports four values:
 
 | mode | App source | Constraint |
 | --- | --- | --- |
 | `path` | The `/@capsid/<app>/` prefix in the URL | Strip the routing prefix, then hand the path to the worker |
 | `subdomain` | The single DNS label before `suffix` in the Host | `suffix` must be a valid, portless domain starting with a dot, such as `.apps.example.com` |
-| `header` | The sole `Capsid-App` request header | The listener must explicitly set `trusted: true`; duplicate or invalid App IDs are rejected |
+| `header` | The sole configured routing header (default `Capsid-App`) | The listener must explicitly set `trusted: true`; duplicate or invalid App IDs are rejected |
+| `single` | Single-application local Host mount at `/` | For local single-app serving (`capsid-host --app-dir`); managed mode rejects `single` when `single_app` is unset |
 
-Each mode requires exactly one valid Host header. `path` and `header` use the
-listener's `publicOrigin` to construct the worker-visible URL. For subdomain routing
-the Host uses the selected scheme, extracted application and configured suffix. The
-`Capsid-App` header name is fixed.
+Each mode requires exactly one valid Host header. `path`, `header`, and `single`
+use the listener's `publicOrigin` to construct the worker-visible URL. For
+subdomain routing the Host uses the selected scheme, extracted application and
+configured suffix. In `header` mode, `routing.header` customizes the routing
+header name (lowercased at parse time, defaulting to `Capsid-App` when omitted;
+if `header` is omitted and `suffix` is set, `suffix` is used as a fallback).
 
 `trusted: true` is an explicit declaration of a security boundary in front of the
 listener, not TLS, authentication, or a firewall automatically established by Capsid.
 Before enabling header routing, deployers must ensure that only a controlled reverse
 proxy or trusted source can reach the listener, and that the proxy removes or
-overwrites `Capsid-App` carried by external requests. The typical approach is binding
+overwrites the configured routing header (`Capsid-App` by default) carried by external requests. The typical approach is binding
 to loopback/controlled internal network addresses with network ACLs; simply setting
 `trusted: true` after exposing the listener to the public Internet is not safe. A
 header listener with `trusted: false` fails closed before bind; path and subdomain

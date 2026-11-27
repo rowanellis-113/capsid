@@ -1,6 +1,6 @@
 # Binding Modules and Permissions
 
-> Source/profile reviewed 2026-11-18 against 0.3.0-beta. The grantable Binding set
+> Source/profile reviewed 2026-11-27 against `dev/v0.3.2`. The grantable Binding set
 > is separate from the User profile; see [current status](release-status.md).
 
 This reference defines the authority available to Host-authored

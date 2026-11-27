@@ -1,6 +1,6 @@
 # workerd WebSocket Semantics and Compatibility Scope
 
-Reviewed 2026-11-18 against the published 0.3.0-beta source and locked reference.
+Reviewed 2026-11-27 against the `dev/v0.3.2` source and locked reference (published prerelease `v0.3.1-beta.1`).
 This is a bounded compatibility reference, not a browser/workerd certification
 or a pending-release diary. [Current status](release-status.md) identifies the
 actual released source, raw standards conflicts and independent performance scope.
@@ -16,8 +16,9 @@ actual released source, raw standards conflicts and independent performance scop
 - source-bound required gate in
   [`tools/run-workerd-ws-gate.mjs`](../../tools/run-workerd-ws-gate.mjs).
 
-The Linux comparison uses the reference and single-worker/static-pool/managed
-Capsid backends. Native Windows/macOS qualification uses its actual supported
+The Linux comparison uses the reference plus Capsid's unified local dev Host
+(single-worker and multi-worker harness legs, historically labeled
+`single-worker` / `static-pool`) and Linux managed mode. Native Windows/macOS qualification uses its actual supported
 profile, not an assumption that managed mode exists there. Node ws and Python
 websockets are independent clients/servers, not aliases for the same Node
 implementation. TLS fixtures use the declared CA; verification is not disabled.
@@ -157,8 +158,10 @@ rather than retaining an unannounced actor.
 - Capsid rejects invalid received Close codes with 1002 instead of reproducing
   the reference's selected invalid-code echo. Malformed Close-reason UTF-8 is
   checked separately.
-- Default message and pending-send budgets are finite (the recorded default
-  scope uses 1 MiB messages and a 4 MiB pending-send budget). A synchronous 8 MiB
+- Default message and pending-send budgets are finite: Config v2 defaults to a
+  1 MiB max message size with a 4 MiB worker-wide `send_budget_bytes` and
+  2 MiB `per_channel_queue_bytes` (raw C ABI `ChannelLimits` defaults are
+  1 MiB max message, 16 MiB worker-wide, and 4 MiB per-channel). A synchronous 8 MiB
   burst is resource-policy denial, not an unbounded retry queue. The reference
   default message limit is different.
 - Compression, hibernation, raw listeners and cross-worker broadcast are not
@@ -181,8 +184,9 @@ profile and Headers differences are documented in [conformance](web-conformance.
 Ordinary suite success and full standards conformance remain false; the older
 v1/two-file classification is not the current release policy.
 
-The declared 0.3.0-beta full/native/sanitizer/fuzz/soak/package gates passed; see
-[qualification](../history/v0.3.0/release-qualification.md). This does not certify every
+The declared `0.3.x` beta full/native/sanitizer/fuzz/soak/package gates passed; see
+[current status](release-status.md), the [v0.3.2 verification record](../history/v0.3.2/README.md),
+and the earlier [v0.3.0 qualification](../history/v0.3.0/release-qualification.md). This does not certify every
 possible lifecycle/proxy graph, resolve missing historical schedules, grant
 native macOS/Windows production isolation or turn a reference observation into
 a universal specification. No new runtime/reference execution is claimed merely

@@ -1,7 +1,7 @@
 # Framework compatibility
 
-> Source/profile reviewed 2026-11-18. The four dependency locks below describe
-> the 0.3.0-beta matrix, not upstream-latest packages. See [current status](../release-status.md).
+> Source/profile reviewed 2026-11-27 against `dev/v0.3.2`. The four dependency locks below describe
+> the `0.3.x` matrix, not upstream-latest packages. See [current status](../release-status.md).
 
 Capsid implements the WinterTC **ECMA-429 Minimum Common Web API** profile
 `CAPSID-MIN-2025-subset-v0` (see [standards and conformance](../web-conformance.md)).
@@ -44,7 +44,7 @@ spawn worker
   → FetchRPC response/credit
 ```
 
-The differential between the reference and the real worker is only part of the evidence. Every vector containing `expect` also has independent absolute assertions, so a reference and runtime failing at the same time cannot still appear as a pass.
+The differential between the reference and the real worker is only part of the evidence. Independent absolute assertions prevent a reference and runtime failing identically from appearing as a pass (via per-vector `expect` in `itty-router` and H3 v2, and via a dedicated `absoluteExpectations` map in Hono and Elysia).
 
 Common exclusions: Node/Deno/Bun/Cloudflare adapters, server/listener, filesystem static serving, raw listeners and framework-specific WebSocket server adapters, external/remote/`file:` imports, and provider ambient bindings. These boundaries are maintained by separate expected-rejection tests and are not counted as framework core incompatibilities.
 

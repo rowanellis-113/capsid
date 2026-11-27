@@ -1,6 +1,6 @@
 # Linux strict sandbox
 
-> Reviewed against the 0.3.0-beta source/API on 2026-11-18. Release acceptance
+> Reviewed against the `dev/v0.3.2` source/API on 2026-11-27. Release acceptance
 > and its limits are recorded in [current status](release-status.md).
 >
 > For a cross-platform capability overview and selection guidance, see [Platform Support Overview](platform-support.md).
@@ -9,7 +9,7 @@ The Linux sandbox is configured by the host only through the C ABI; it is not ex
 
 ## Strict baseline
 
-All workers close unrelated inherited fds before initializing txiki.js and start with an explicitly empty environment. Strict mode also closes inherited stdin/stdout/stderr; application logs continue to go through FetchRPC. The bundle is parsed only after the HELLO checksum and sandbox installation complete.
+All workers close unrelated inherited fds before initializing txiki.js and start with an explicitly empty environment. Strict mode also closes inherited stdin/stdout/stderr; application logs continue to go through FetchRPC. The bundle is parsed only after HELLO frame and field validation and sandbox installation complete.
 
 `strict_sandbox = 1` requires every item in `CAPSID_SANDBOX_FEATURE_STRICT_BASE` to succeed:
 
@@ -18,7 +18,7 @@ All workers close unrelated inherited fds before initializing txiki.js and start
 - default-deny Landlock filesystem rules;
 - seccomp BPF syscall allowlist.
 
-Landlock opens only resolver/hosts configuration, system CAs, timezone data, the kernel random device, and the explicit `tls_ca_bundle_path` read-only. The application bundle always stays in memory.
+Landlock opens only resolver/hosts configuration, system CAs, timezone data, the kernel random device, the explicit `tls_ca_bundle_path`, and any User `capsid:fs` `CAPSID_PERMISSION_READ` allow paths read-only. The application bundle always stays in memory.
 
 seccomp allows the process memory, event loop, DNS, TLS, and IPv4/IPv6 stream/datagram operations required by txiki.js standard `fetch()`; it denies listeners, Unix/raw sockets, process/thread creation, exec, ptrace, namespace/mount changes after sandbox installation, filesystem writes, executable mappings, and kernel interfaces such as key/BPF/perf. Because thread creation is denied after installation, the libuv work pool that `fetch()` hostname pre-resolution runs on is warmed — and the system resolver primed — before the sandbox installs.
 
@@ -45,7 +45,7 @@ a User permission grant; see [Binding profiles](binding-permissions.md#sandbox-p
 - cgroup v2 membership;
 - entering a host-preconfigured network namespace.
 
-When namespaces are required, the runtime first establishes a user namespace; all namespace setup happens before Landlock/seccomp.
+When a preconfigured network namespace fd is supplied, the runtime enters it via `setns(CLONE_NEWNET)` first before unsharing user/mount/IPC/UTS namespaces (establishing a user namespace first when required without a preconfigured netns fd); all namespace setup happens before Landlock/seccomp.
 
 ### cgroup v2
 

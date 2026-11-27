@@ -1,6 +1,6 @@
 # Hono compatibility
 
-> Source/profile reviewed 2026-11-18. This is the pinned 0.3.0-beta scope, not a
+> Source/profile reviewed 2026-11-27 against `dev/v0.3.2`. This is the pinned `0.3.x` scope, not a
 > promise for every Hono release. See [current status](../release-status.md).
 
 ## Status

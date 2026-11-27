@@ -34,12 +34,11 @@ backports) on Apple Silicon and sanitizers. Worker startup configures
 eager inline-hint tails) and `property_ic = QJS_TURBO_ON` with
 `property_ic_warmup = 12` (lazy warmup allocation, overridable via environment),
 plus a pre-`READY` `JS_PurgePropertyIC(rt)` pass in `src/worker_runtime.cc` so
-high-density worker packing and native Property IC performance coexist. The
-derived release qualification record below describes the published
-`v0.3.1-beta.1` (`845ae5d`) release, while the latest accepted local performance
-record measures the clean local WSL2 Release/LTO rebuild of `6d4cc61` (tagged
+high-density worker packing and native Property IC performance coexist. The derived release qualification record below describes the published
+`v0.3.1-beta.1` (`845ae5d`) release, while the recorded `v0.3.1-beta.1` baseline
+local performance record below measures the clean local WSL2 Release/LTO rebuild of `6d4cc61` (tagged
 prior to the Alpine musl build-script fix in `v0.15.1-turbo.8` and docs/archive
-packaging in `845ae5d`).
+packaging in `845ae5d`). For the newer `dev/v0.3.2` (`24671d9`) local session, see [benchmarks](benchmarks.md).
 See [source formatting](../guides/format-source.md) for exact-byte
 exclusions and [package architecture](../guides/install-packages.md#development-package-matrix)
 for the five-platform archive matrix.
@@ -71,8 +70,8 @@ Bindings remain v1 with independent User/Binding runtimes and operation gates.
 The ordinary handler is still `fetch(request)`, not a complete Wrangler,
 Cloudflare platform or `fetch(request, env, ctx)` compatibility layer.
 
-Local single-worker/static-pool modes support trusted development and
-integration on Linux, macOS and native Windows. Linux managed mode is the
+On published `v0.3.1-beta.1`, local `single-worker`/`static-pool` modes support trusted development and
+integration on Linux, macOS and native Windows (`dev/v0.3.2` unifies local execution into `capsid-host --app-dir`). Linux managed mode is the
 first-party production path, but its deployment interface remains experimental.
 Untrusted workloads require a verified Linux strict sandbox and surrounding
 policy/resource/network boundaries. Native macOS/Windows do not provide that
@@ -122,12 +121,13 @@ failure, changed source or extra failure. See [conformance](web-conformance.md)
 and [testing](../guides/run-tests.md). Required compatibility acceptance must not be
 reported as complete WPT, browser or workerd conformance.
 
-## Latest Accepted Local Performance Record
+## Recorded v0.3.1-beta.1 Baseline Local Performance Record
 
-The latest accepted session was measured on **2026-11-22** using a clean local
+This recorded `v0.3.1-beta.1` baseline session was measured on **2026-11-22** using a clean local
 Release/LTO rebuild of `6d4cc616619dfd1ada0e484c2c47b79046d680dc` (`quickjs-turbo`
 native register-frame VM, recorded prior to the `v0.15.1-turbo.8` Alpine musl
-build-script fix in published `v0.3.1-beta.1` `845ae5d`). It does **not** measure
+build-script fix in published `v0.3.1-beta.1` `845ae5d`; the newer `dev/v0.3.2`
+`24671d9` local session is recorded in [benchmarks](benchmarks.md)). It does **not** measure
 the distributed release binaries directly. It uses `capsid-perf-lane-v3` (pure-JS seven-stack matrix across
 three reference tiers plus `dynamic-api`).
 

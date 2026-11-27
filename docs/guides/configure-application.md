@@ -104,9 +104,11 @@ socket or listener. The syntax is `host` or
   resolution, and **every redirect**;
 - In managed mode, the target must also be allowed by host.json's
   `permissions.fetchTargets`; the local Host also applies these limits when given `--host-config`;
-- Omitting this section denies outbound Fetch. At the C API layer a null
-  direct `egress_policy` also denies Fetch, even if a separate capability net
-  policy has grants.
+- Omitting this section denies outbound Fetch. At the C API layer, a null
+  `egress_policy` denies Fetch when `capability_policy` (or its `net_policy`)
+  is absent; when `capability_policy->net_policy` has grants and
+  `egress_policy` is `NULL`, `net_policy` governs; when both are non-null,
+  both must allow the request.
 
 ## In-memory storage and logging (`permissions.storage` / `permissions.stdio`)
 
@@ -151,7 +153,8 @@ Each requested target must fit the Host's egress ceiling. For `bindings.<id>.per
 
 ```sh
 # 1. Put capsid.json and the bundle into the version directory (app id: starts with
-#    a lowercase letter/digit, [a-z0-9._-], ≤63 chars; version id uses the same grammar)
+#    a lowercase letter/digit, [a-z0-9._-], ≤63 chars; version id: starts with an
+#    ASCII letter/digit, [A-Za-z0-9._-], ≤128 chars, cannot contain "..")
 mkdir -p /srv/capsid/applications/orders/v2
 cp capsid.json bundle.mjs /srv/capsid/applications/orders/v2/
 

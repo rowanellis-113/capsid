@@ -523,14 +523,14 @@ policies remain separate. Startup proceeds in this order:
    User Runtime for a zero-Binding worker) and load code;
 8. return READY with the sandbox proof.
 
-READY v3 adds:
+READY (FetchRPC v4) includes sandbox proof fields (before the mandatory 8-byte v4 capability tail):
 
 ```text
-sandbox_profile_digest
+applied_feature_bits
 seccomp_mode
 landlock_abi
-applied_feature_bits
 network_namespace_identity (when configured)
+sandbox_profile_digest
 ```
 
 The Host compares every required field. A successful install and proof show
@@ -640,7 +640,7 @@ capsid_result capsid_worker_load_binding(
 The API copies descriptors, source, config, secrets, and policy before return.
 `capsid_worker_load_binding()` is valid only before the App bundle.
 
-Worker protocol v3:
+Worker protocol (FetchRPC v4):
 
 ```text
 HELLO
@@ -676,7 +676,7 @@ run the focused suite, full `ctest`, and applicable sanitizers.
 ### 7.1 Schema and registry
 
 Tests cover the one-to-one directory/config/import ID, rejection of
-`provider/alias/instance`, unchanged v1 schemas, secure file ownership and
+`provider/alias/instance`, Config v2 schemas (`capsid/host-v2` and `capsid/app-v2`; v1 schemas retired), secure file ownership and
 FD-relative scanning, size limits, profile/module consistency, and
 deterministic digests.
 

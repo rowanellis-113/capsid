@@ -1,6 +1,6 @@
 # Host Capability Policy
 
-> Reviewed against the 0.3.0-beta source/API on 2026-11-18. See the
+> Reviewed against the `dev/v0.3.2` source/API on 2026-11-27. See the
 > [current status and data scope](release-status.md) for release and measurement identities.
 
 The public ABI provides an optional and immutable `capsid_capability_policy`. It
@@ -11,9 +11,13 @@ permission prompt.
 
 Capabilities are evaluated independently in the following order:
 
-1. The module or operation must exist in the restricted build;
-2. The module must appear in `allowed_modules`;
-3. The concrete resource must match an allow rule and must not match any deny
+1. The specifier must not be permanently forbidden (for example `tjs:*` or
+   `capsid:process`);
+2. The module must appear in `allowed_modules` (otherwise import fails with
+   `module is not authorized`);
+3. The module or operation must exist in the restricted build (otherwise import
+   fails with `module is unavailable`, even if listed in `allowed_modules`);
+4. The concrete resource must match an allow rule and must not match any deny
    rule.
 
 Unknown descriptors, unknown modules in `allowed_modules`, duplicate or zero
@@ -363,7 +367,8 @@ initializers/translation units/loader specifiers do not enter the final worker,
 and the auditor can catch injection), `worker_sandbox_enforcement` (real process
 strict seccomp/Landlock, including raw socket denial), and the capability
 manifest rejection matrix (importing either module from an application returns
-`unavailable`).
+`module is not authorized` when omitted from `allowed_modules`, and
+`module is unavailable` even when listed in `allowed_modules`).
 
 If the product genuinely needs either capability in the future, a new security
 design and ABI version should be opened, covering at least library path and

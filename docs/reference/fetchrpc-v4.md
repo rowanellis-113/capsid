@@ -68,7 +68,8 @@ and therefore DUPLEX and A2 (complete minimal mask 123).
 `CAP_CONNECTION_LIFETIME` additionally requires UPGRADE and CONFIRM,
 and therefore DUPLEX and A2 (complete minimal mask 155). It does not require
 FETCH_UPGRADE or CLOSE_FINAL. The known mask is 255; the first-party effective
-mask is 251 because HALF_CLOSE is not advertised.
+mask is 251 because the Worker never advertises HALF_CLOSE in READY (and default
+Host launches without explicit channel options omit it).
 
 Allocation rule: a feature is usable only when both sides announce it.
 Both announcements must satisfy the dependency closure, so their intersection
@@ -183,7 +184,7 @@ non-upgrade requests) is a protocol violation
 - Ownership (exactly one per channel, fixed at open): `handshake`
   (pending upgrade, pre-101), `duplex-connection` (post-101 inbound),
   `request`, `response-stream`, `standalone` (outbound dial), `tail`
-  (reserved; creating one is refused in v0.3.0). The owner kind is
+  (reserved; creating one is currently refused). The owner kind is
   carried in OPEN and drives cleanup (§3.4).
 
 ### 3.2 Frame table (types are stable; payloads below are A2, v4.1)
@@ -348,8 +349,7 @@ or compatibility with an old worker advertising unknown bits is implied.
   message bytes is legal when no more than 65535 of that total credit was
   already consumed: credit arithmetic is over the running
   balance, not the initial window.
-- Per-channel receive buffering is capped at 4 MiB (v3
-  `kMaxBufferedBytes`); a sender pushing a peer over the cap is
+- Per-channel receive buffering is capped at 4 MiB (`kMaxBufferedBytes`); a sender pushing a peer over the cap is
   throttled by credit exhaustion, never by silent drop.
 - Effective message cap per channel: `min(OPEN.max_message_bytes,
   ACCEPT.accepted_max_message_bytes)` (dial) or `min(request tail,
@@ -373,7 +373,7 @@ when both directions are closed or half-closed in baseline A2. With CONFIRM,
 HalfClose stops DATA only: CREDIT may still follow it, and the entry remains
 until both full Close markers or a terminal ACK. For WebSockets,
 half-close maps to "stop sending" (the JS API does not expose it in
-v0.3.0; it exists on the wire for transport correctness).
+`v0.3.x`; it exists on the wire for transport correctness).
 
 ### 3.5 Sequencing rules
 
@@ -618,7 +618,7 @@ violations, cancel, and capability gating.
 | - | --- | --- |
 | D1 | WebSocket framing lives in the **host** (minimal RFC 6455 codec, property-tested). The worker never frames; txiki's `ws.c` stays unexposed (it would bypass egress mediation). |
 | D2 | `channel_id` is **host-assigned**, u32, monotonic from 1; the worker only requests ids (0). |
-| D3 | Half-close is a **dedicated frame** (`kChannelHalfClose`); the v0.3.0 JS API does not expose it. |
+| D3 | Half-close is a **dedicated frame** (`kChannelHalfClose`); the `v0.3.x` JS API does not expose it. |
 | D4 | Ping/pong is **transport-internal** on both planes; no FetchRPC frame, no JS surface. |
 | D5 | ABI v8 exposes channel operations and events. |
 | D6 | `WebSocketPair`/`WebSocket` ship in **`CAPSID-MIN`** with the workerd method surface; v0.5 adds `env`/`ctx` around it, not a different WebSocket. |

@@ -148,7 +148,7 @@ retain only their original evidence scope.
 
 Configuration notes:
 
-- **Static CRT**: the top-level `CMakeLists.txt` pins `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` under MSVC. The vendored txiki.js and its dependencies (libwebsockets/mbedtls, etc.) also pin the static CRT; mixing `/MD` fails at link time with LNK2038.
+- **Static CRT**: the top-level `CMakeLists.txt` pins `CMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>"` (`/MT` in Release, `/MTd` in Debug) under MSVC. The vendored txiki.js and its dependencies (libwebsockets/mbedtls, etc.) also pin the static CRT; mixing `/MD` fails at link time with LNK2038.
 - **MSVC compiler**: in a shell without vcvars (CI, ordinary terminal), Ninja picks up MinGW gcc from PATH and cannot build the CRT/winsock portability layer; you must explicitly pass `-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl`. When a non-MSVC compiler is configured, the top-level CMakeLists emits a FATAL_ERROR directly.
 - **iconv**: Windows has no system iconv; the build uses the repository-bundled [win-iconv](../../vendor/win-iconv/VENDOR.txt) (public domain, a Win32 MultiByteToWideChar implementation). Linux/macOS continue to use the system iconv.
 - **txiki overlay**: the build copies the vendored txiki.js into the build tree and applies patches. Machines without Developer Mode enabled cannot create symbolic links, so `PrepareTxiki.cmake` automatically falls back to copying the whole directory (content is identical; the overlay key hashes only file contents).
@@ -176,10 +176,10 @@ Configuration notes:
 | `capsid-bytecode-compile` (M1D trusted bytecode) | ✅ | ✅ | ✅ |
 | Host local mode (`--app-dir` on `dev/v0.3.2`; `--mode single-worker`/`static-pool` on `v0.3.1-beta.1`) | ✅ | ✅ | ✅ (shared listener + `GenerationPool`) |
 | Host `--mode managed` (coordinator/Admin/multiple Apps) | ✅ | ❌ (runtime notice) | ❌ (runtime notice) |
-| Egress network policy (egress host/address rules, protected segments) | ✅ | ✅ | ✅ (JS layer) |
+| Egress network policy (egress host/address rules, protected segments) | ✅ | ✅ | ✅ (native C/C++ worker hooks & Host dialer) |
 | Capability policy (module/permission/environment snapshot) | ✅ | ✅ | ✅ |
 | fs permission module (capsid:fs read/stat/list) | ✅ full | ⚠️ degraded (dirfd walk, symlink rejection) | ⚠️ degraded (drive-letter paths, reparse rejection) |
-| RLIMIT_AS / RLIMIT_NOFILE / RLIMIT_CORE | ✅ | partial (RLIMIT_AS rejected at compile time) | partial (see below) |
+| RLIMIT_AS / RLIMIT_NOFILE / RLIMIT_CORE | ✅ | partial (non-zero RLIMIT_AS rejected at runtime) | partial (see below) |
 | strict sandbox (seccomp/Landlock/namespace/cgroup) | ✅ | ❌ | ❌ (see below) |
 | Multi-worker shared listener (`GenerationPool`) | ✅ | ✅ | ✅ (single listener fronting pool) |
 | worker CPU affinity (`capsid_worker_set_cpu_affinity`) | ✅ | ❌ | ✅ (within current processor group) |
@@ -196,7 +196,7 @@ Configuration notes:
 ### Host (Windows)
 
 - **Unified local mode (`LocalDevHost`) fully available**: on `dev/v0.3.2`, `capsid-host --app-dir <dir>` (with optional `--workers <n>`) replaces the `v0.3.1-beta.1` `--mode single-worker` / `static-pool` split and shares the same `GenerationPool + ManagedListener` external contract across Linux, macOS, and Windows. Process stop signal: Windows uses `SetConsoleCtrlHandler` (`CTRL_C_EVENT`/`CTRL_BREAK_EVENT`/`CTRL_CLOSE_EVENT`/`CTRL_SHUTDOWN_EVENT`) while POSIX uses Boost.Asio `signal_set` (`SIGTERM`/`SIGINT`) to trigger the same graceful stop path.
-- **Multi-worker scenario tests** (`host_static_pool_server_shared_port_lifecycle`, `host_admission_pool_forwards_options`, `host_concurrent_pool_wait`) are registered and run on Windows; single-worker drain scenarios are also registered. Only two m2-group scenarios are not registered because of POSIX dependencies; see "Test coverage differences on Windows" below.
+- **Multi-worker scenario tests** (`host_static_pool_server_shared_port_lifecycle`, `host_admission_pool_forwards_options`, `host_concurrent_pool_wait`) are registered and run on Windows; single-worker drain scenarios are also registered. Only three m2-group scenarios are not registered because of Linux/POSIX dependencies; see "Test coverage differences on Windows" below.
 - **Parent-controlled normal exit**: local mode accepts an optional `--stop-fd` pointing to an inherited readable pipe, distinct from `--ready-fd`. Writing any byte or closing the parent's end requests the same normal stop as console events. The Host owns a non-inheritable duplicate and cancels its watcher on startup failure. Active inbound WebSockets receive a 1001 Close and have at most one second to reply before their transport closes; Workers are then stopped and joined. Node `child.kill('SIGTERM')` on Windows terminates the process and does not exercise this normal shutdown path. The test backend uses the explicit parent pipe and still requires exit code 0, no signal, and no forced cleanup.
 - **managed mode**: the Windows build keeps the `--mode managed` CLI entry, but the runtime directly prints "managed coordinator requires Linux strict sandbox" and exits, matching macOS behavior; the coordinator implementation remains Linux-only and is not included in the Windows package. Process snapshots (RSS/CPU) on Windows are provided through `GetProcessMemoryInfo`/`GetProcessTimes` (PSS has no equivalent; RSS is the fallback).
 - **File owner/permission checks**: Windows has no POSIX uid/mode contract. Local `capsid.json` reads do not perform the POSIX `geteuid()` comparison; this must not be generalized into a blanket ownership bypass. The Binding registry has explicit trusted-owner, ACL and reparse checks below. Managed deployment/state paths remain Linux-only; native Windows development is not equivalent production isolation.
@@ -214,7 +214,7 @@ Configuration notes:
 - **IPC transport**: host↔worker IPC switches from `socketpair(AF_UNIX)` to a loopback TCP socket pair. Child process handles are explicitly inherited through `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (only the IPC socket and on-demand stdio cross the process boundary, equivalent to POSIX close_range cleanup). `--ipc-fd` carries a handle value rather than an fd number. An accepted socket must call `SO_UPDATE_ACCEPT_CONTEXT` to rebind the listener context before the listener is closed: otherwise, after AFD reclaims the listener's endpoint name, subsequent I/O on the accepted socket fails randomly with `ERROR_ALREADY_EXISTS` (both ends of the socket pair can be poisoned).
 - **fs module (degraded but usable)**: on Windows, `capsid:fs` readText/stat/list are available. Paths must be drive-letter absolute paths (`C:/...` or `C:\...`, uniformly normalized to `C:/...`; UNC is not supported); the open process uses `FILE_FLAG_OPEN_REPARSE_POINT` per component and rejects any symlink/junction. Linux uses `openat2(RESOLVE_NO_SYMLINKS)`, macOS uses `openat(O_NOFOLLOW)` dirfd walk, the three platforms share the same external contract, and symlink/reparse paths are always rejected.
 - **Connection termination semantics**: on Windows, reads on a peer-reset socket end with EOF (returning 0) (`WSAECONNRESET` is folded into the normal close path), so the host observes an EXIT event when a worker terminates abnormally; Linux can distinguish CLOSED from ERROR. WSAPoll does not report `POLLHUP`; a connection close can only be detected by a read returning 0.
-- **Startup handshake timeout**: the non-blocking retry path for protocol reads during worker startup has a 2s cap (unbounded on the POSIX side); if the startup fd itself is blocking, both platforms wait indefinitely.
+- **Startup handshake timeout**: the non-blocking `EAGAIN` retry path for protocol reads during worker startup has a 2s cap on both Windows and POSIX; if the startup fd itself is blocking, both platforms wait indefinitely.
 - **Process termination exit code**: `TerminateProcess` always reports exit code 1 (the semantic equivalent of SIGKILL), unlike Linux's signal-mapped 128+N exit codes — this difference is only visible in tests that inspect exit codes.
 - **TextDecoder**: arbitrary encoding→UTF-8 conversion in the restricted core is provided by win-iconv on Windows. win-iconv does not perform strict encoding validation (its readme states this explicitly), so TextDecoder semantics may differ within the allowed range from Linux (glibc iconv).
 
@@ -227,7 +227,7 @@ The Worker process receives only `SystemRoot`, resolved through the operating
 system API. It does not copy the parent's value or other process variables.
 Winsock needs this value to load its provider; application environment values
 continue to arrive in the HELLO snapshot. `worker_windows_environment` checks
-actual v3/v4 startup and requests with a deliberately incorrect parent value,
+actual FetchRPC v4 startup (`options = NULL` HTTP-only and explicit v4 channels) and requests with a deliberately incorrect parent value,
 and uses a separate native peer to check the physical environment entries.
 
 The ABI guard executes its attached-worker `runtime_error`, request OOM and
@@ -241,8 +241,8 @@ allocation override is effective. Hosted execution remains a separate gate.
 The following contracts are not fully covered on Windows (Linux CI retains all scenarios):
 
 - **WPT conformance suite**: the native Node/MSVC toolchain supports the same manifest-pinned 84 files and audits every upstream input against its Git blob. Set `CAPSID_WPT_ROOT` to the pinned checkout when configuring; an unconfigured Windows build still omits `wpt_conformance_not_configured` and provides no WPT evidence. The local qualification now builds the fixtures on Windows rather than importing Linux bundles. The Windows hosted job still needs this configuration and an evidence audit before its WPT coverage can be claimed.
-- **m2-group POSIX-dependent scenarios**: `host_static_pool_activation_barrier` wraps the worker with a POSIX shell script (mkdir/sleep/exec semantics), and `host_static_pool_worker_exit_isolation` needs `/proc` exit evidence; both are not registered on Windows. Multi-shard and single-shard static-pool scenarios are already registered and run on Windows.
-- **generation pool kill-injection scenario**: without `/proc/<pid>/status`, the "killed worker is replaced" path cannot be verified; after the create/drain and startup-failure scenarios run normally, the test reports the skip honestly with SKIP_RETURN_CODE 77 overall (same on Windows and macOS).
+- **m2-group Linux/POSIX-dependent scenarios**: `host_static_pool_activation_barrier` wraps the worker with a POSIX shell script (mkdir/sleep/exec semantics), `host_static_pool_worker_exit_isolation` needs `/proc` exit evidence, and `host_admission_worker_death_returns_503` is Linux-only; these three are not registered on Windows. Multi-worker and single-worker local Host scenarios are registered and run on Windows.
+- **generation pool kill-injection scenario**: Windows natively executes all seven kill-injection scenarios via Toolhelp32 + `TerminateProcess` and exits `0` (only macOS skips with `SKIP_RETURN_CODE 77`).
 - **A/B benchmark evidence contract** (`host_single_worker_ab_emits_complete_evidence`): the runner is a POSIX shell wrapper (`bench/run-ab.sh`), and Windows has no usable perf path, so it is skipped with 77.
 - **Package gates are not excluded**: the local command above and the native hosted profile exclude only `wpt_conformance_not_configured`, not `worker_package_*`. Package contents, smoke, metadata and reproducibility checks must actually execute with their required fixtures; an earlier profile's exclusion cannot be presented as current coverage.
 

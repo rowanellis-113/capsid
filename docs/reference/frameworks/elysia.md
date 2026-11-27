@@ -1,7 +1,7 @@
 # Elysia compatibility
 
-> Source/profile reviewed 2026-11-18. The exact pinned app configuration below
-> is part of the 0.3.0-beta matrix; see [current status](../release-status.md).
+> Source/profile reviewed 2026-11-27 against `dev/v0.3.2`. The exact pinned app
+> configuration below is part of the `0.3.x` matrix; see [current status](../release-status.md).
 
 ## Status
 
@@ -10,9 +10,10 @@ exact version and integrity are pinned by
 `examples/elysia-reference/package.json` and the lockfile; this conclusion
 does not automatically cover other 1.4.x or future versions.
 
-All entry bundles must be single-file ESM with zero external imports and must
-pass the build audit. The runtime adds no Elysia global, platform adapter, or
-framework-specific branch.
+All entry bundles must be single-file ESM passing the build audit (zero external
+imports except the single permitted dynamic import `--external:file-type`,
+verified by `tests/elysia/audit-bundle.mjs`). The runtime adds no Elysia global,
+platform adapter, or framework-specific branch.
 
 ## Build and verification
 
@@ -54,7 +55,7 @@ ESM; the audit enforces that nothing else enters the graph.
 
 ## Verified
 
-- `app.fetch()`, default `{ fetch }`, and named `fetch` entries;
+- `app.fetch()` via default export (`entry-default.js`: `export default app`) and named `fetch` export (`entry-named.js`: `export const fetch = app.fetch`);
 - method/path routing, params/wildcard/query, 404 handling;
 - onRequest/onBeforeHandle/onError hooks, header/cookie manipulation;
 - JSON auto-serialization, binary/streaming responses, redirect boundary;
@@ -139,7 +140,7 @@ Explicit exclusions:
 - external, remote, and `file:` module loading.
 
 These exclusions are enforced by the bundle audit (`tests/elysia/audit-bundle.mjs`)
-and runtime module-denial tests (`test-module-denial`). Product
+and the generic capability-manifest module-denial tests. Product
 capability changes do not automatically expand this pinned-version
 compatibility statement.
 

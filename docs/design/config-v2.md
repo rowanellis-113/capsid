@@ -85,7 +85,7 @@ A review of `src/host/config.cc`, `src/host/host_config_model.cc`, `src/host/pol
    - Sizes use strings such as `"32KiB"`, `"256MiB"` and `"2GiB"`. Remove bare `*Bytes` integers.
    - Host `permissions.fetchTargets`, App `permissions.fetch.allow` and App `bindings.<id>.permissions.net.allow` share the `<host>[:<p1>[,<p2>...]]` parser. It accepts exact names, `*.` wildcards, IPv4/IPv6 literals and CIDR prefixes. Explicit ports are decimal numbers from 1 to 65535. Use a comma-separated list for multiple ports. An installed `capsid/binding-v1` manifest grants one explicit port per target. The compiler checks each requested Binding port against these grants and emits one Worker rule per authorized endpoint.
 2. **Use the same fields in Host defaults, Host maximums and the application manifest.**
-   All three use the same eight leaf fields under `{ worker, request, pool }`. Resolve each field in this order:
+   All three use the same 11 leaf fields under `{ worker, request, pool }` (`worker.{memoryMax, jsHeap, fileDescriptors}`, `request.{timeout, maxInflight}`, and `pool.{workers, minReady, maxWorkers, idleTimeout, queueRequests, queueTimeout}`). Resolve each field in this order:
    $$\text{effective}(f) = \text{app}(f) \;\text{??}\; \text{host.defaults}(f) \;\text{??}\; \text{builtin}(f)$$
    At startup require $\text{host.defaults}(f) \le \text{host.maximums}(f)$. Reject deployment if an explicit `app(f)` exceeds `host.maximums(f)`. When the application omits the field, clamp the built-in default to the Host maximum.
    After resolving inheritance, the effective `worker.memoryMax` must accommodate `worker.jsHeap`. Reject a 32 MiB application limit combined with an inherited 64 MiB heap.
@@ -340,10 +340,10 @@ Host capacity.workersTotal = 64 (maximum total worker processes)
 | `admin` | `unix` | Yes | — | Local administration socket. The Host enforces mode `0600` and same-UID access. |
 | `isolation` | `mode` / `required` / `cgroupRoot` | | `mode: "strict"` | Linux production sandbox mode, required kernel features and delegated cgroup root. |
 | `trustedBytecodeKeys` | `<keyId>: <path>` | | `{}` | Maps signing key IDs to Ed25519 public keys for verifying precompiled bytecode. |
-| `listeners[]` | `name` / `tcp` / `publicOrigin` / `trusted` / `routing` / `limits` / `cors` | `name`, `tcp`, `routing.mode` | `publicOrigin: "http://<tcp>"`, `trusted: false` | Ingress address and public origin, routing (`path`, `subdomain`, `header`), slow-connection and concurrency limits, and gateway CORS. |
+| `listeners[]` | `name` / `tcp` / `publicOrigin` / `trusted` / `routing` / `limits` / `cors` | `name`, `tcp`, `routing.mode` | `publicOrigin: "http://<tcp>"`, `trusted: false` | Ingress address and public origin, routing (`path`, `subdomain`, `header`, `single`; optional `routing.header`), slow-connection and concurrency limits, and gateway CORS. |
 | `permissions` | `modules` / `environmentNames` / `fsReadRoots` / `fetchTargets` / `storageNamespaces` / `stdioStreams` | | All empty (deny all) | Machine-wide grant ceiling. Effective permissions are its intersection with `capsid.json#permissions`. |
-| `defaults` / `maximums` | `worker.{memoryMax, jsHeap, fileDescriptors}`, `request.{timeout, maxInflight}`, `pool.{workers, queueRequests, queueTimeout}` | | Built-in defaults / `0` (unlimited) | Per-application defaults and hard ceilings. |
-| `capacity` | `workersTotal` / `channelsTotal` / `maxChannelMessageSize` / `channelIdleTimeout` | | `1` / `1024` / `"1MiB"` / `"60s"` | Limits total resident workers, WebSocket channels and message size, and sets the channel idle timeout. |
+| `defaults` / `maximums` | `worker.{memoryMax, jsHeap, fileDescriptors}`, `request.{timeout, maxInflight}`, `pool.{workers, minReady, maxWorkers, idleTimeout, queueRequests, queueTimeout}` | | Built-in defaults / omitted = unlimited (`0` internally; explicit `0` in JSON is rejected for positive ceilings) | Per-application defaults and hard ceilings. |
+| `capacity` | `workersTotal` / `memory` / `channelsTotal` / `maxChannelMessageSize` / `channelIdleTimeout` | | `1` / disabled / `1024` / `"1MiB"` / `"60s"` | Limits total resident workers, Host memory budget/watermarks, WebSocket channels and message size, and sets the channel idle timeout. |
 | `recovery` | `crashBudget.{maxEvents, window}` / `healthCheck.{interval, failures}` | | 5 events per 60s / 30s and 3 failures | Crash quarantine threshold and active health-check interval and failure threshold. |
 
 ---
@@ -372,10 +372,13 @@ On Linux, macOS and Windows, the local Host mounts a version directory that can 
    | Local CLI argument | Default | Managed counterpart |
    | --- | --- | --- |
    | `--app-dir <dir>` | `.` (working directory) | Version directory using the managed package layout. |
+   | `--app <id>` | `"local"` | Application ID used in routing, metrics, and logs. |
    | `--listen <ip:port>` | `127.0.0.1:8080` | Local counterpart of `listeners[].tcp`. |
+   | `--host-config <path>` | Empty | Optional `capsid/host-v2` file for exercising Host ceilings, listener routing, and CORS locally. |
+   | `--worker <path>` | Sibling `capsid-worker` | Explicit path to the `capsid-worker` binary. |
    | `--secrets-dir <dir>` | Empty | Supplies the single-app `paths.secrets` directory for testing `valueFrom`. |
    | `--bindings-dir <dir>` | Empty | Supplies the `paths.bindings` plugin directory for testing `bindings`. |
-   | `--workers <n>` | `capsid.json#pool.workers` (default `1`) | Temporary concurrency override for local load tests. |
+   | `--workers <n>` | `capsid.json#pool.workers` (default `1`, max `256`) | Temporary concurrency override for local load tests. |
    | `--strict-sandbox` | Optional `on`/`off` on Linux, automatically `off` on macOS/Windows | Exercise Linux production sandboxing locally. |
    | `--ready-fd` / `--stop-fd` | Optional in interactive terminals | Readiness and shutdown signalling for test harnesses and parent supervisors. |
 
@@ -482,7 +485,7 @@ The elastic pool and tenancy settings build on the existing `defaults` inheritan
      "idleTimeout": "60s"
    }
    ```
-   > The built-in `defaults.pool` supplies `idleTimeout: "60s"`, `queueRequests: 64` and `queueTimeout: "5s"`. An app that specifies only `"minReady": 0, "maxWorkers": 8` can queue concurrent cold requests during the roughly 9 ms startup. Omitting the queue settings alone does not cause a `503`.
+   > Built-in `defaults.pool` are conditional on pool shape: `idleTimeout: "60s"` applies only to elastic pools (`minReady < maxWorkers`; fixed pools default to `0`/disabled), and `queueRequests: 64` / `queueTimeout: "5s"` apply only when `minReady == 0` (`minReady >= 1` defaults queueing to `0`/disabled unless configured). An app that specifies only `"minReady": 0, "maxWorkers": 8` can therefore queue concurrent cold requests during the roughly 9 ms startup without failing with `503`.
 
 2. **Host memory budget under `host.json#capacity`**
    Set `memory` to `"2GiB"` for default watermarks of `85% / 75%` and a `5s` residency and inspection interval. The object form is `{ limit, highWatermarkPercent=85, lowWatermarkPercent=75, minResidency="5s", checkInterval="5s" }`.
@@ -519,8 +522,8 @@ Admin status, structured logs and `/metrics` must expose the specific reason for
 
 ## 10. Configuration retirement and delivery milestones <a id="section-10"></a>
 
-1. **Target configuration contract.** Use `capsid/host-v2` and `capsid/app-v2`. Retire `capsid/host-v1` and `capsid/app-v1` after moving the existing regression inputs. `capsid/binding-v1` and C ABI v8 are independent contracts.
+1. **Target configuration contract.** `dev/v0.3.2` uses `capsid/host-v2` and `capsid/app-v2` and has retired `capsid/host-v1` and `capsid/app-v1`. `capsid/binding-v1` and C ABI v8 are independent contracts.
 2. **Deliver each milestone with its own tests.**
-   - **A. Config v2 and local CLI.** Implement the Phase 1 Host/app model, wire all eight `defaults`/`maximums` fields, and replace local `single-worker`/`static-pool` modes with one CLI that uses managed packages. Test that every accepted schema field is consumed.
+   - **A. Config v2 and local CLI.** Implement the Phase 1 Host/app model, wire all 11 `defaults`/`maximums` fields, and replace local `single-worker`/`static-pool` modes with one CLI that uses managed packages. Test that every accepted schema field is consumed.
    - **B. Single-pool elasticity.** Implement `0 <= minReady <= maxWorkers`, `idleTimeout`, the cold-request queue, bounded asynchronous `reaping`, and health probes isolated from idle accounting.
    - **C. Memory budget and tenant fairness.** Implement `capacity.memory`, cgroup v2 and sampled PSS accounting, tenant assignment by the Admin deployment API, `tenancy` quotas, two-stage LRU and operational metrics.

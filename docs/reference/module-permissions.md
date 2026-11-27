@@ -1,6 +1,6 @@
 # JavaScript Modules and Permissions Reference
 
-> Reviewed against the 0.3.0-beta source/API on 2026-11-18. See the
+> Reviewed against the `dev/v0.3.2` source/API on 2026-11-27. See the
 > [current status and data scope](release-status.md) for the pinned profile and release identity.
 
 This article is for users writing bundles and configuring host policy. It
@@ -46,7 +46,8 @@ the host through `capsid:permissions`.
 | Specifier in the bundle | Configurable? | Result |
 | --- | --- | --- |
 | Built `capsid:*` | Yes | Must be listed in `allowed_modules`, otherwise `module is not authorized` |
-| Known but not built `capsid:*` | Can be listed but cannot be used | `module is unavailable` on import |
+| Known but not built `capsid:*` | Can be listed but cannot be used | `module is not authorized` when omitted from `allowed_modules`; `module is unavailable` when listed in `allowed_modules` |
+| Permanently forbidden `capsid:*` (`capsid:internal`, `capsid:internal/*`, `capsid:process`, `capsid:worker`, `capsid:http-server`, `capsid:ipc`, `capsid:wasi`) | No | Permanently `module is forbidden` |
 | Any `tjs:*` | No | Permanently `module is forbidden` |
 | `tjs:internal/*` | No | Permanently `module is forbidden` |
 | `node:`, `file:`, `http:`, `https:`, `data:` | No | Permanently `module is forbidden` |

@@ -27,8 +27,9 @@ must not be inferred from an old design checkbox.
 | `local` (`--app-dir`) | One package mounted at `/` with `pool.workers` or `--workers` | Managed-isomorphic `capsid/app-v2` manifest plus optional `--host-config` | Trusted local integration on Linux/macOS/Windows (Windows uses a shared acceptor, not `SO_REUSEPORT`; replaces retired `single-worker` and `static-pool` CLI modes from `v0.3.1-beta.1`) |
 | `managed` | Linux coordinator, immutable generation snapshots, elastic OS process pools (`minReady..maxWorkers`, scale-to-zero, cold queueing, two-stage tenant-fair eviction) | `capsid/host-v2` maximums and tenancy budgets intersected with per-version `capsid/app-v2` requests | Linux strict sandbox and optional delegated `cgroup v2` prerequisites; deployment API remains experimental |
 
-Local modes with sandbox off are not production isolation. They remain
-loopback-only and retain configuration/registry safety checks. A Binding grant
+Local modes with sandbox off are not production isolation. They default to
+loopback (`127.0.0.1:8080`) and retain configuration/registry safety checks,
+though `--listen` does not enforce loopback-only binding when `--strict-sandbox off`. A Binding grant
 uses the same validated package registry and policy intersection in local mode,
 but managed secrets and rollout services are not thereby available.
 

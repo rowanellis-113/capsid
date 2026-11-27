@@ -1,7 +1,7 @@
 # Platform Support Overview
 
-Reviewed 2026-11-24 against the published `0.3.1-beta` (`v0.3.1-beta.1`) source and platform gates.
-On `dev/v0.3.2`, the local `single-worker` and `static-pool` CLI modes below are unified into one local Host (`--app-dir`); see [Config v2](../design/config-v2.md).
+Reviewed 2026-11-27 against the `dev/v0.3.2` source and platform gates
+(published `v0.3.1-beta.1` retains the earlier `single-worker` and `static-pool` CLI modes; see [Config v2](../design/config-v2.md)).
 [Current status](release-status.md) distinguishes current interfaces and
 source-bound results from historical execution counts.
 
@@ -14,17 +14,15 @@ Being able to build does not mean being able to isolate in production. Native bu
 
 ## Unified Capability Contract (Three-Platform Intersection)
 
-**single-worker and static-pool are committed to uniform behavior across the three platforms**: `static-pool`'s single and multi shard modes are available on Linux, macOS, and Windows with identical external behavior (same public port, same READY/drain/request contract). All three use one pool-owned acceptor that dispatches connections to available shards. If all Workers exit, the endpoint remains available for HTTP 503 responses, including failed WebSocket handshakes, until stop/drain closes it. This local fixture uses round-robin among available Workers; it does not implement managed-pool recovery. Only capabilities whose behavior is consistent across all three platforms enter the ✅ list; any capability that is missing, semantically inconsistent, or only partially implemented on any platform is listed separately as a difference.
+**The unified local dev Host (`--app-dir`, single or multi-worker) is committed to uniform behavior across the three platforms**: local single-worker and multi-worker pools (`pool.workers` / `--workers`) are available on Linux, macOS, and Windows with identical external behavior (same public port, same READY/drain/request contract). All three run `LocalDevHost` on `GenerationPool` with one pool-owned shared acceptor, least-inflight worker selection with round-robin tie-breaking, and automatic worker replacement on crash/exit, while keeping managed multi-app rollout and Admin control planes Linux-only. If no worker is ready to serve, the endpoint remains available for HTTP 503 responses, including failed WebSocket handshakes, until stop/drain closes it. (Published `v0.3.1-beta.1` used separate `--mode single-worker` / `--mode static-pool` flags with static round-robin and no automatic replacement.) Only capabilities whose behavior is consistent across all three platforms enter the ✅ list; any capability that is missing, semantically inconsistent, or only partially implemented on any platform is listed separately as a difference.
 
 Unified commitments:
 
 - Runtime C ABI (spawn/request/credit/streaming) ✅
 - `capsid-worker` (txiki.js + `quickjs-turbo` + restricted core) ✅
 - `capsid-bytecode-compile` (trusted bytecode) ✅
-- Host `--mode single-worker` ✅
-- Host `--mode static-pool` (single / multi shard) ✅
-- Listener-level CORS (`--cors-*` on single-worker/static-pool; the same
-  shared engine backs the managed host.json listeners) ✅
+- Unified local dev Host (`--app-dir`, single or multi-worker via `pool.workers` / `--workers`) ✅
+- Listener-level CORS (`listeners[].cors` via `--host-config` locally and in managed `host.json`; shared engine) ✅
 - Egress network policy (egress host/address rules) ✅
 - Capability policy (modules/permissions/environment snapshot) ✅
 
@@ -33,7 +31,7 @@ Unified commitments:
 - Host `--mode managed` (coordinator/Admin/multi-App): Linux only; macOS/Windows exit after a direct CLI message
 - `capsid:fs` (read/stat/list): fully supported on Linux; degraded but usable on macOS/Windows, and always rejects symlink/reparse paths (macOS: `openat(O_NOFOLLOW)` dirfd walk; Windows: drive-letter absolute paths, reparse points rejected)
 - strict sandbox (seccomp/Landlock/namespace/cgroup): Linux only
-- `SO_REUSEPORT` socket option: available on Linux/macOS only; static-pool uses a pool-owned shared acceptor on all platforms
+- `SO_REUSEPORT` socket option: available on Linux/macOS only; the local Host uses a pool-owned shared acceptor on all platforms
 - Worker CPU affinity: full on Linux; current processor group only on Windows; none on macOS
 - `RLIMIT_AS` / `RLIMIT_NOFILE` / `RLIMIT_CORE`: semantics differ by platform, so there is no unified commitment
 - Secure `bindingsRoot` scanning for local Binding development: Linux/macOS
@@ -60,7 +58,7 @@ Use [building from source](../guides/build-from-source.md) for shared setup and 
 ### macOS
 
 - Built natively with system Clang. Published `0.3.1-beta` ships separate thin native archives for Apple Silicon (`capsid-<version>-darwin-arm64.tar.gz`) and Intel (`capsid-<version>-darwin-x86_64.tar.gz`), built on native runners rather than as universal binaries;
-- single-worker and static-pool (single / multi shard) are part of the three-platform unified contract; static-pool uses one pool-owned acceptor;
+- The unified local dev Host (`--app-dir`, single or multi-worker) is part of the three-platform unified contract and uses one pool-owned shared acceptor;
 - `capsid:fs` is degraded but usable: readText/stat/list behave consistently with Linux, implemented as a component-by-component `openat(O_NOFOLLOW)` dirfd walk; symlinks are always rejected;
 - There is no API equivalent to `sched_setaffinity`; CPU affinity tests are skipped with CTest 77;
 - `--strict-sandbox on` fails directly at the CLI ("requires Linux strict sandbox"); `--mode managed` fails directly at the CLI with the message "managed coordinator requires Linux strict sandbox", matching Windows behavior. A programmatic spawn that still requests strict sandbox fails during the worker startup handshake (defense in depth).
@@ -68,7 +66,7 @@ Use [building from source](../guides/build-from-source.md) for shared setup and 
 ### Windows
 
 - Built with MSVC + Ninja + vcpkg (static CRT); the Release package is `capsid-<version>-windows-x86_64.zip`;
-- single-worker and static-pool (single / multi shard) are part of the three-platform unified contract; there is no `SO_REUSEPORT`, and multi shard is dispatched by a pool-level shared acceptor;
+- The unified local dev Host (`--app-dir`, single or multi-worker) is part of the three-platform unified contract; there is no `SO_REUSEPORT`, and multi-worker serving is dispatched by a pool-level shared acceptor;
 - `capsid:fs` is degraded but usable: readText/stat/list behave consistently with Linux; paths accept only `C:/...` (also `C:\...`) drive-letter absolute paths, opened component by component, and reparse points (symlink/junction) are rejected; UNC paths are not supported;
 - strict sandbox and managed Host are unavailable; `--mode managed` fails directly at the CLI with a message, matching macOS behavior;
 - CPU affinity is implemented via `SetProcessAffinityMask`, but only covers the current processor group;
@@ -80,7 +78,7 @@ Use [building from source](../guides/build-from-source.md) for shared setup and 
 
 - Ubuntu 24.04 Release/LTO + pinned WPT + delegated sandbox;
 - Ubuntu ASan, UBSan, TSan;
-- Four Clang/libFuzzer corpus gates;
+- Nine Clang/libFuzzer gates (seven fuzz harnesses plus two corpus checks);
 - macOS 15 (`macos-15`) POSIX host-library and native worker contracts;
 - `windows-latest` MSVC host-library (platform-neutral matrix + JUnit evidence).
 
@@ -93,7 +91,7 @@ Unsupported scenarios on each platform follow the "skip unless registered" princ
 | Local development and AI code-generation integration | Linux, macOS, or Windows, any |
 | Benchmark reproduction | Linux, using the exact recorded source/build/protocol; a newer release is not the historical baseline |
 | Running untrusted code | **Linux only**, with strict sandbox enabled and READY feature bits verified |
-| Need a Windows native host | Windows single-worker or single/multi-shard static-pool, trusted code only |
+| Need a Windows native host | Windows unified local dev Host (`--app-dir`, single or multi-worker), trusted code only |
 | Need managed multi-App / Admin / blue-green deployment | Linux |
 
 When facts conflict, public headers, `docs/data/capability-manifest.json`, build configuration, and CI workflows take precedence; Markdown is only for navigation and explanation.
