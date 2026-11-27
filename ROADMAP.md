@@ -1,9 +1,10 @@
 # Capsid Roadmap: Progressive workerd Compatibility
 
-> Updated 2026-11-22 against published `0.3.1-beta` (`v0.3.1-beta.1`, `quickjs-turbo`
-> integration). Stable is `v0.2.2`; this roadmap separates
-> delivered beta scope from future milestones and does not claim complete
-> workerd/Cloudflare parity. See [current status](docs/reference/release-status.md).
+> Updated 2026-11-27 against published `0.3.1-beta` (`v0.3.1-beta.1`, `quickjs-turbo`
+> integration) and the `dev/v0.3.2` candidate (Config v2, Elastic OS Process Pools,
+> C ABI v8). Stable is `v0.2.2`; this roadmap separates delivered scope from future
+> milestones and does not claim complete workerd/Cloudflare parity. See
+> [current status](docs/reference/release-status.md).
 
 ## Purpose
 
@@ -30,17 +31,24 @@ not part of this roadmap.
 
 The stable channel is `0.2.2`. Experimental `0.3.0-beta` introduced the delivered
 FetchRPC v4/WebSocket foundation while retaining ABI v7 and the legacy v3 entry;
-`0.3.1-beta` (`v0.3.1-beta.1`) is the current experimental prerelease and
-integrates `quickjs-turbo`. The shared HTTP runtime contains:
+`0.3.1-beta` (`v0.3.1-beta.1`) is the current published prerelease and
+integrates `quickjs-turbo`. The `dev/v0.3.2` candidate builds directly on that
+line with Config v2 (`capsid/host-v2` and `capsid/app-v2`, retiring v1),
+Elastic OS Process Pools (scale-to-zero, two-stage tenant-fair eviction, and
+tenant-wide Linux `cgroup v2` `memory.max`), unified `--app-dir` local dev,
+HTTP/stream IPC batching fast paths, and C ABI v8 (FetchRPC v4 default, Build
+Info v2, Capability Policy v2). The shared HTTP runtime contains:
 
-- a pinned txiki.js, `quickjs-turbo` (QuickJS-NG 0.15.1-derived), and WAMR stack;
+- a pinned txiki.js, `quickjs-turbo` (`v0.15.1-turbo.8`, QuickJS-NG 0.15.1-derived
+  zero-JIT native register-frame VM with portable C fallback), and WAMR stack;
 - self-contained ESM bundles with `default.fetch(request)` or a named `fetch`;
 - Fetch, Headers, Request, Response, Streams, URL, Encoding, Crypto,
   Compression, MessageChannel, and a WebAssembly subset;
 - request-scoped async context, timeout, cancellation, streaming, and credit
   backpressure;
 - a pinned WPT profile, explicit deviations, and process-level platform tests;
-- process isolation, the Linux strict sandbox, and capability policy;
+- process isolation, the Linux strict sandbox, Elastic OS Process Pools,
+  tenant-wide `cgroup v2` memory limits, and capability policy;
 - Binding v1 with isolated User and Binding QuickJS runtimes.
 
 The current standards baseline is
@@ -221,13 +229,72 @@ This delivery does not imply complete standards conformance, every historical
 R1–R9 causal closure, native Windows/macOS production isolation, or direct
 benchmarking of distributed release packages. The
 [accepted measurements](docs/reference/benchmarks.md) belong to their respective
-local Release/LTO rebuilds (`v0.3.0-beta.5` at `c7a80b9` and the `v0.3.1-beta.1`
-pre-publication snapshot at `6d4cc61`).
+local Release/LTO rebuilds (`v0.3.0-beta.5` at `c7a80b9`, the `v0.3.1-beta.1`
+pre-publication snapshot at `6d4cc61`, and `dev/v0.3.2` at `24671d9`).
 
 Acceptance: real client/server interoperability, fragmented messages, slow
 consumers, simultaneous close, half-close where applicable, invalid frames,
 timeouts, disconnects, shutdown, and worker replacement all pass process-level
 tests, sanitizers, and protocol fuzzing.
+
+### v0.3.1: `quickjs-turbo` Native Register-Frame VM
+
+Delivered in published prerelease `v0.3.1-beta.1` (`845ae5d`). Replaced the
+stock QuickJS-NG bytecode dispatch loop with the pinned `vendor/quickjs-turbo`
+(`v0.15.1-turbo.8`, commit `8fcb4751`) zero-JIT native register-frame VM while
+keeping C ABI v7 and FetchRPC v3/v4 wire compatibility intact:
+
+- native register-frame interpreter backends on Linux x86-64 (`LINUX_X86_64`),
+  Linux ARM64 (`LINUX_AARCH64`), macOS Intel x86-64 (`MACOS_X86_64`), and
+  Windows x86-64 (`WIN_X86_64`), with automatic portable C fallback (`PORTABLE`)
+  on Apple Silicon and sanitizer builds;
+- density-preserving defaults via `QJS_SetTurboDefaults` (`own_bytecode_tail=OFF`,
+  lazy `property_ic_warmup=12`) plus pre-`READY` `JS_PurgePropertyIC(rt)` so
+  native Property IC throughput and high worker density coexist;
+- five-platform native Release packaging and validation (Linux musl x86-64/arm64,
+  macOS arm64/x86-64, Windows x86-64) plus the `v0.3.1-beta.1` (`6d4cc61`)
+  formal `capsid-perf-lane-v3` local rebuild baseline.
+
+### v0.3.2: Config v2, Elastic OS Process Pools, and C ABI v8
+
+Design spec: [docs/design/config-v2.md](docs/design/config-v2.md) ·
+verification summary: [docs/history/v0.3.2/README.md](docs/history/v0.3.2/README.md) ·
+benchmark record: [docs/reference/benchmarks.md](docs/reference/benchmarks.md).
+
+Delivered on the `dev/v0.3.2` candidate ahead of the `v0.4.0`–`v0.6.0` runtime
+and compatibility milestones to lock down Host ergonomics, multi-tenant memory
+governance, and the ABI v8 / FetchRPC v4 baseline:
+
+- **Config v2 & unified local CLI:** orthogonal `capsid/host-v2` and
+  `capsid/app-v2` schemas with explicit duration/size units, inheritance
+  (`app ?? host.defaults ?? builtin <= host.maximums`), complete retirement of
+  legacy `host-v1`/`app-v1` and `single-worker`/`static-pool` CLI modes, and
+  one managed-isomorphic `capsid-host --app-dir <dir>` local runner across
+  Linux, macOS, and Windows;
+- **Elastic OS Process Pools:** per-app `minReady..maxWorkers` (including
+  scale-to-zero `minReady: 0`), bounded cold-request queueing, isolated active
+  health probes, non-blocking slot handoff with bounded asynchronous reaping,
+  two-stage tenant-fair eviction (`GlobalEvictionCoordinator`, `85% / 75%`
+  hysteresis), drain-safe rolling generations protecting active HTTP/SSE/WS
+  sessions, explainable eviction/rejection metrics, and tenant-wide Linux
+  delegated `cgroup v2` `memory.max` enforcement;
+- **C ABI v8 & FetchRPC v4 default:** `CAPSID_ABI_VERSION == 8`, FetchRPC v4
+  as the default wire version (rejecting legacy v3), Build Info v2, Capability
+  Policy v2, `CAPSID_OUT_OF_MEMORY` / `CAPSID_INTERNAL_ERROR` C-boundary guards,
+  and deterministic service-level channel queue refusal;
+- **HTTP/stream fast paths & IPC batching:** formal local Release/LTO
+  `capsid-perf-lane-v3` session at `24671d9` (`4,533` replay-verified files)
+  measured `41,124.8` 1 KiB JSON / `23,202.4` 16 KiB JSON / `14,675.0` Stream /
+  `19,511.5` Dynamic API QPS inside `19.3 MiB` loaded PSS (`28.8×` lower than
+  `workerd`'s `555.7 MiB`), `8.89 ms` 10 KiB bytecode (`9.29 ms` source) cold
+  start, and `705 / 501 / 135` warm OS workers in `2 GiB`.
+
+> **Prioritization note (`v0.4.0`–`v0.6.0` first):** Following `v0.3.2`, the next
+> development cycle intentionally front-loads and thoroughly hardens **`v0.4.0`
+> (Binding RPC v2)**, **`v0.5.0` (Module Worker Runtime Model)**, and **`v0.6.0`
+> (Web Platform Core and Runtime Utilities)** as a rock-solid core runtime
+> foundation before taking on `v0.7.0`–`v0.9.0` (platform facades, Wrangler CLI
+> wrapper, and Node.js compatibility subset).
 
 ### v0.4.0: Binding RPC v2
 

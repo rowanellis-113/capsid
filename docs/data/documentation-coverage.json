@@ -32,8 +32,8 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "da54d7c10147d4581876fe9ab195bbb7afa31b7b406ce48bff9ad490d664683c",
-      "review": "Delivered negotiated-v4/WebSocket foundation separated from future waitUntil/Binding-v2/Wrangler work; connection owner is not general background authority."
+      "sha256": "3480bae24419cba1ebfbfa766e6a520442ed957b0ad87b6964279359806b2d8f",
+      "review": "Records delivered v0.3.0/v0.3.1/v0.3.2 milestones (FetchRPC v4, quickjs-turbo, Config v2, Elastic OS Process Pools, C ABI v8), prioritizes hardening v0.4.0-v0.6.0 core runtime foundations first, and separates future Binding-v2/Wrangler work."
     },
     {
       "path": "SECURITY.md",
