@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "a953e482d1797aa67e6c92a40ef31dc372e038ffe6c1b7f83b5e20009815130b",
+      "sha256": "19f2e3258c92dd5ec0ccc5206685039bdd918621ba71a8fa5ac2c4a336eeec60",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
     },
     {
