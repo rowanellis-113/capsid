@@ -550,6 +550,30 @@
     .elastic-flow { grid-template-columns: 1fr; gap: 6px; }
     .ef-arr { transform: rotate(90deg); justify-self: center; line-height: 1; }
   }
+  .elastic-facts {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+    margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-soft);
+  }
+  @media (max-width: 960px) { .elastic-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .elastic-facts { grid-template-columns: 1fr; } }
+  .ef-fact {
+    background: var(--bg-elev); border: 1px solid var(--border-soft); border-radius: 9px;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0;
+  }
+  .ef-fact strong { font: 700 12px var(--mono); color: var(--brand-ink); }
+  .ef-fact span { font-size: 12px; color: var(--text-3); line-height: 1.48; }
+  details.fold-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 20px; box-shadow: var(--shadow-card); margin-top: 14px;
+  }
+  details.fold-card > summary {
+    cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between;
+    font-size: 14px; font-weight: 700; color: var(--text); user-select: none;
+  }
+  details.fold-card > summary::-webkit-details-marker { display: none; }
+  details.fold-card > summary::after { content: "Expand +"; font: 600 11px var(--mono); color: var(--brand-ink); }
+  details.fold-card[open] > summary::after { content: "Collapse −"; }
+  details.fold-card[open] > summary { margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border-soft); }
 
   /* ============ Use Case 2x2 Grid ============ */
   .usecase-card {
@@ -1008,10 +1032,9 @@
       <div class="hero-eyebrow"><span class="pulse"></span>DEV/v0.3.2 &middot; ELASTIC OS PROCESS POOLS &middot; C/C++ ABI v8</div>
       <h1>Run untrusted AI code <span class="grad">in elastic OS process pools.</span></h1>
       <p class="hero-desc" id="hero-desc">
-        A <b>secure, embeddable, high-density JavaScript runtime</b> powered by <b>Elastic OS Process Pools</b>.
-        Isolate untrusted <span class="mono">fetch(request)</span> handlers inside mandatory Linux
-        <b>Namespaces, Landlock, Seccomp, and cgroup v2</b> — scaling from zero to hundreds of warm workers
-        per 2&nbsp;GiB with sub-10&nbsp;ms cold starts and full OS memory reclamation.
+        Dedicated Linux OS sandboxes (<b>Namespaces, Landlock, Seccomp, cgroup v2</b>) powered by
+        <b>Zero-JIT</b> <span class="mono">quickjs-turbo</span> — sub-20&nbsp;MiB serving PSS, scale-to-zero elastic
+        pools, and zero external storage dependencies.
       </p>
 
       <div class="hero-cta">
@@ -1103,9 +1126,6 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
   <section id="why-capsid" class="no-border">
     <div class="eyebrow">Why Capsid</div>
     <h2>Security without the V8 memory tax or MicroVM latency</h2>
-    <p class="lede">Running untrusted user or AI-generated JavaScript usually forces an ugly trade-off:
-      unsandboxed runtimes risk host compromise, V8 isolates balloon to hundreds of megabytes under load,
-      and full containers stall cold starts. Capsid closes that gap at the runtime boundary.</p>
 
     <div class="grid-3">
       <div class="story-card">
@@ -1114,8 +1134,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         </div>
         <div class="st-tag">01 / Hard OS Isolation</div>
         <h3>Default-deny Linux capsule</h3>
-        <p>Every tenant runs in its own OS process fenced by <b>Namespaces, Landlock, Seccomp, and cgroup v2</b>.
-           Outbound egress fails closed by default; <span class="mono">tjs:*</span>, FFI, and raw sockets stay disabled.</p>
+        <p>Dedicated OS process per worker fenced by <b>NS, Landlock, Seccomp, and cgroup v2</b> — deny-by-default egress, zero FFI/RWX.</p>
         <div class="story-metric"><span>JIT RWX pages</span><strong>Zero</strong></div>
       </div>
 
@@ -1124,10 +1143,8 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
         <div class="st-tag">02 / Elastic Process Pools</div>
-        <h3>Scale-to-zero with sub-10 ms wakeup</h3>
-        <p>Idle apps drop to <b>zero processes (0&nbsp;B RAM)</b> and wake on demand with precompiled
-           <span id="story-engine-name">quickjs-turbo</span> bytecode, while cold request queueing absorbs bursts and
-           process exit reclaims <b>100% of private pages</b> — zero shared heap bloat.</p>
+        <h3>Scale-to-zero &amp; full OS reclaim</h3>
+        <p>Idle apps drop to <b>0 processes (0&nbsp;B RAM)</b>, wake on <span id="story-engine-name">quickjs-turbo</span> bytecode, and return 100% of private pages on exit.</p>
         <div class="story-metric"><span>10 KiB / 1 MiB C ABI cold</span><strong id="story-cold-val">8.9 / 21.4 ms</strong></div>
       </div>
 
@@ -1136,124 +1153,75 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
         </div>
         <div class="st-tag">03 / Tenant-Fair Density</div>
-        <h3>Hundreds of workers + fair eviction</h3>
-        <p>Host + strict worker stays in the <b>low tens of MiB</b> with 99%+ warm retention. Two-stage tenant-fair
-           eviction reclaims bursty excess before touching quiet tenants, backed by delegated per-tenant Linux
-           <b>cgroup v2</b> <span class="mono">memory.max</span> and bounded-drain rollouts.</p>
+        <h3>Hundreds of workers per 2 GiB</h3>
+        <p>Two-stage tenant-fair eviction, delegated <b>cgroup v2</b> <span class="mono">memory.max</span>, and bounded-drain blue-green rollouts.</p>
         <div class="story-metric"><span>2 GiB warm pool</span><strong id="story-dens-val">705 workers</strong></div>
       </div>
     </div>
   </section>
 
-  <!-- ================= 02b. Elastic OS Process Pools Deep Dive ================= -->
+  <!-- ================= 02b. Elastic OS Process Pools ================= -->
   <section id="elastic-pools">
     <div class="eyebrow">Elastic OS Process Pools</div>
     <h2>Serverless elasticity with real OS-process memory reclamation</h2>
-    <p class="lede">V8 isolates share a single in-process heap whose loaded service footprint grows steeply under
-      concurrent traffic, while containers and MicroVMs pay 100&nbsp;ms–1&nbsp;s+ cold starts that punish scale-to-zero.
-      Capsid's <b>Elastic OS Process Pools</b> (<span class="mono">dev/v0.3.2</span>) pair dedicated Linux-sandboxed worker
-      processes with sub-10&nbsp;ms C ABI worker cold starts, two-stage tenant-fair eviction, and full OS private-page
-      reclamation on process exit.</p>
+    <p class="lede">Scale-to-zero Linux worker processes (<span class="mono">dev/v0.3.2</span>) — sub-10&nbsp;ms C ABI cold starts, tenant-fair LRU, and 100% kernel page reclamation on exit.</p>
 
     <div class="card featured">
       <div class="card-head">
         <div>
-          <h3>Elastic worker lifecycle — from 0&nbsp;B idle to kernel-reclaimed exit</h3>
-          <div class="sub">Managed Host coordinates scale-from-zero, cold queueing, idle-eviction protection for active streams, and fair eviction while keeping process reaping off the worker spawn path</div>
+          <h3>Elastic worker lifecycle — 0&nbsp;B idle to kernel-reclaimed exit</h3>
+          <div class="sub">Cold queueing, active-stream exemption, and async reaping off the spawn critical path</div>
         </div>
-        <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md#section-6" target="_blank" rel="noopener">Architecture spec &rarr;</a>
+        <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md#section-6" target="_blank" rel="noopener">Spec &rarr;</a>
       </div>
       <div class="elastic-flow">
         <div class="ef-step">
           <div class="ef-k">01 &middot; Scale-to-Zero</div>
-          <div class="ef-t">0 Processes &middot; 0 B RAM</div>
-          <div class="ef-s"><span class="mono">minReady: 0</span> keeps idle apps at zero worker processes; health probes never wake them.</div>
+          <div class="ef-t">0 Procs &middot; 0 B RAM</div>
+          <div class="ef-s"><span class="mono">minReady: 0</span>; health probes never wake idle apps.</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step">
-          <div class="ef-k">02 &middot; Burst Absorption</div>
-          <div class="ef-t">Cold Request Queue</div>
-          <div class="ef-s">Bounded <span class="mono">queueRequests</span> &amp; <span class="mono">queueTimeout</span> hold concurrent arrivals smoothly with zero 503 storms.</div>
+          <div class="ef-k">02 &middot; Burst Queue</div>
+          <div class="ef-t">Cold Queueing</div>
+          <div class="ef-s">Bounded <span class="mono">queueRequests</span> / <span class="mono">queueTimeout</span> avoid 503 storms.</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step is-hl">
-          <div class="ef-k">03 &middot; Fast Worker Spawn</div>
-          <div class="ef-t">Isolated OS Worker</div>
-          <div class="ef-s"><b>8.89 ms</b> C ABI cold start to first response (10 KiB trusted bytecode, Linux strict sandbox; Host queue wait &amp; optional delegated tenant <span class="mono">cgroup v2</span> attach are separate).</div>
+          <div class="ef-k">03 &middot; Fast Spawn</div>
+          <div class="ef-t">Isolated Worker</div>
+          <div class="ef-s"><b>8.89 ms</b> C ABI cold start (10 KiB bytecode; Host queue &amp; delegated <span class="mono">cgroup v2</span> attach separate).</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step">
           <div class="ef-k">04 &middot; Fair Eviction</div>
-          <div class="ef-t">Two-Stage Tenant LRU</div>
-          <div class="ef-s"><span class="mono">85% / 75%</span> watermarks reclaim over-share idle replicas first; active HTTP / SSE / WS are exempt from idle eviction.</div>
+          <div class="ef-t">2-Stage Tenant LRU</div>
+          <div class="ef-s"><span class="mono">85% / 75%</span> reclaims bursty excess first; active HTTP/SSE/WS exempt.</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step is-hl">
           <div class="ef-k">05 &middot; Full Reclaim</div>
-          <div class="ef-t">100% Pages Returned</div>
-          <div class="ef-s">Steady-state slot handoff is immediate; process exit, async reaping, and kernel private-page reclamation finish off the spawn path.</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="grid-2">
-      <div class="usecase-card">
-        <div class="usecase-head">
-          <span class="usecase-num">01 / MEMORY RECLAMATION</span>
-          <span class="usecase-pill">Dedicated Process Exit</span>
-        </div>
-        <h3>OS process exit vs shared V8 heaps</h3>
-        <p>In a shared V8 isolate server, isolates share one process address space and loaded service PSS expands
-           steeply under concurrent load (<span class="mono">555.7 MiB</span> loaded service PSS for
-           <span class="mono">workerd</span> at 64 connections vs <span class="mono">19.3 MiB</span> for Capsid).
-           Evicting an idle Capsid worker terminates a dedicated OS process so the Linux kernel reclaims
-           <b>100% of its private physical pages</b> once the process exits.</p>
-        <div class="usecase-chips">
-          <span>19.3 MiB loaded PSS</span><span>Dedicated process exit</span><span>Zero GC pause spillover</span>
+          <div class="ef-t">100% Pages Freed</div>
+          <div class="ef-s">Immediate slot handoff; async exit &amp; kernel page reclaim off spawn path.</div>
         </div>
       </div>
 
-      <div class="usecase-card">
-        <div class="usecase-head">
-          <span class="usecase-num">02 / MULTI-TENANT FAIRNESS</span>
-          <span class="usecase-pill">GlobalEvictionCoordinator</span>
+      <div class="elastic-facts">
+        <div class="ef-fact">
+          <strong>OS Exit vs Shared V8</strong>
+          <span><b>19.3 MiB</b> loaded PSS vs <span class="mono">workerd</span> <b>555.7 MiB</b> @ 64c; worker process exit returns 100% of private pages.</span>
         </div>
-        <h3>Two-stage tenant-fair eviction</h3>
-        <p>Under a host memory ceiling (<span class="mono">capacity.memory</span>), plain global LRU lets one bursty tenant
-           evict a quiet tenant's only warm worker. Capsid's Stage&nbsp;1 reclaims excess idle replicas from over-share
-           tenants by ratio first, falling back to global LRU in Stage&nbsp;2 only when every tenant sits within fair share.</p>
-        <div class="usecase-chips">
-          <span>85% / 75% hysteresis</span><span>minResidency guard</span><span>Explainable metrics</span>
+        <div class="ef-fact">
+          <strong>GlobalEvictionCoordinator</strong>
+          <span>Reclaims over-share bursty replicas by ratio before touching quiet tenants (<span class="mono">minResidency</span> guard).</span>
         </div>
-      </div>
-
-      <div class="usecase-card">
-        <div class="usecase-head">
-          <span class="usecase-num">03 / KERNEL BUDGETS</span>
-          <span class="usecase-pill">cgroup v2</span>
+        <div class="ef-fact">
+          <strong>Delegated cgroup v2</strong>
+          <span>Shared tenant parent <span class="mono">memory.max</span> seals sibling apps, bursts, and rolling rollouts inside one tenant.</span>
         </div>
-        <h3>Tenant-wide <span class="mono">memory.max</span> governance</h3>
-        <p>With a delegated Linux <span class="mono">cgroup v2</span> root, sibling apps, elastic scale-out bursts,
-           and overlapping blue-green generations for one tenant share a single kernel-enforced parent
-           <span class="mono">memory.max</span> ceiling — sealing OOMs and traffic spikes strictly inside that tenant.</p>
-        <div class="usecase-chips">
-          <span>Parent tenant cgroup</span><span>Per-worker leaf cap</span><span>Hard OOM containment</span>
-        </div>
-      </div>
-
-      <div class="usecase-card">
-        <div class="usecase-head">
-          <span class="usecase-num">04 / ZERO-DOWNTIME OPS</span>
-          <span class="usecase-pill">Bounded Drain</span>
-        </div>
-        <h3>Non-blocking slot handoff &amp; bounded-drain rollouts</h3>
-        <p>When scaling up under memory pressure, evicted idle workers transfer steady-state capacity slots immediately
-           while process exit, <span class="mono">waitpid</span> reaping, and kernel page reclamation finish asynchronously
-           in a bounded <span class="mono">reaping</span> set off the spawn critical path. Active HTTP, SSE, and WebSocket
-           sessions are exempt from idle eviction and drain during rolling retirements up to the configured
-           <span class="mono">drain_deadline</span> before forced shutdown.</p>
-        <div class="usecase-chips">
-          <span>Async reaping</span><span>Bounded drain deadline</span><span>Blue-green handoff</span>
+        <div class="ef-fact">
+          <strong>Bounded-Drain Rollouts</strong>
+          <span>Async <span class="mono">waitpid</span> reaping off spawn path; live HTTP/SSE/WS drain up to <span class="mono">drain_deadline</span>.</span>
         </div>
       </div>
     </div>
@@ -1263,8 +1231,6 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
   <section id="use-cases">
     <div class="eyebrow">Use Cases</div>
     <h2>Built for untrusted code under tight budgets</h2>
-    <p class="lede">Whether executing LLM-generated tool handlers on every prompt or embedding
-      a programmable extension layer in C++, Capsid keeps all authority in the Host.</p>
 
     <div class="grid-2">
       <div class="usecase-card">
@@ -1273,8 +1239,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-pill">Flagship</span>
         </div>
         <h3>AI Agent &amp; Code-Gen Sandboxes</h3>
-        <p>Run LLM-generated JavaScript tools and transforms inside a fresh kernel-enforced sandbox
-           with explicit egress allowlists, hard deadlines, and instant teardown.</p>
+        <p>Execute LLM-generated JS tools in kernel-enforced sandboxes with explicit egress allowlists and instant teardown.</p>
         <div class="usecase-chips">
           <span id="uc-cold-10k">8.9 ms cold (10 KiB)</span><span>Default-deny egress</span><span>Zero ambient FS</span>
         </div>
@@ -1286,8 +1251,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-pill">High Density</span>
         </div>
         <h3>Customer Plugins &amp; Webhooks</h3>
-        <p>Give every tenant custom request hooks, auth rules, or transforms without per-tenant containers.
-           Tenant-fair eviction and per-tenant <span class="mono">cgroup v2</span> limits contain bursts and OOMs inside each tenant.</p>
+        <p>Run custom tenant hooks without per-tenant containers — fair eviction and delegated <span class="mono">cgroup v2</span> contain OOMs.</p>
         <div class="usecase-chips">
           <span id="uc-dens-2g">705 workers / 2 GiB</span><span>Tenant cgroup v2</span><span>Binding RPC</span>
         </div>
@@ -1298,9 +1262,8 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-num">03 / SERVERLESS &amp; EDGE</span>
           <span class="usecase-pill">Elastic Pools</span>
         </div>
-        <h3>Long-Tail FaaS &amp; Edge Routing</h3>
-        <p>Stop paying idle RAM tax to keep rarely-invoked functions warm. Scale idle apps to zero OS processes,
-           wake in sub-10&nbsp;ms on demand with cold queueing, and reclaim 100% of private pages on eviction while protecting active SSE and WebSocket streams.</p>
+        <h3>Long-Tail FaaS &amp; Private Edge</h3>
+        <p>Scale idle apps to zero OS processes, wake on demand with cold queueing, and keep active SSE/WS streams exempt from idle eviction.</p>
         <div class="usecase-chips">
           <span id="uc-mem-tree">19.3 MiB tree</span><span id="uc-eff-qps">2,131 QPS / MiB</span><span>Scale-to-zero</span>
         </div>
@@ -1312,8 +1275,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-pill">Embeddable</span>
         </div>
         <h3>Embeddable C11 / C++11 Engine</h3>
-        <p>Embed into gateways, proxies, or databases via <span class="mono">&lt;capsid/runtime.h&gt;</span> (ABI v8).
-           Your Host owns listeners, TLS, credits, backpressure, and trusted credential Bindings.</p>
+        <p>Drop <span class="mono">&lt;capsid/runtime.h&gt;</span> (ABI v8) into gateways or databases with Host-owned TLS, credits, and credential Bindings.</p>
         <div class="usecase-chips">
           <span>C11 / C++11 ABI v8</span><span>CMake SDK</span><span>Linux &middot; macOS &middot; Win</span>
         </div>
@@ -1321,41 +1283,11 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
     </div>
   </section>
 
-  <!-- ================= 04. Visual 2 GiB Packing & Scenario Decision Guide ================= -->
-  <section id="economics">
-    <div class="eyebrow">Density &amp; Trade-Offs</div>
-    <h2>How many isolated tenants fit in 2 GiB of RAM?</h2>
-    <p class="lede">Raw single-process QPS hides the real cost of tenant isolation.
-      Below translates our verified measurements into <b>2&nbsp;GiB node capacity</b> and clear runtime trade-offs.</p>
-
-    <div class="card featured" id="packing-card">
-      <div class="card-head">
-        <div>
-          <h3>2 GiB multi-tenant packing comparison</h3>
-          <div class="sub">Capsid &amp; workerd show measured 2,048 MiB warmed pools (10 KiB, 100 req/worker); single-process peers show <span class="mono">floor(2048 &divide; loaded PSS)</span> upper bounds before sandbox overhead</div>
-        </div>
-      </div>
-      <div class="packing-bars" id="packing-visual"></div>
-    </div>
-
-    <div class="card" id="scenario-card">
-      <div class="card-head">
-        <div>
-          <h3>Scenario selection guide</h3>
-          <div class="sub">Choosing between OS isolation, V8 isolates, and unsandboxed JIT ceilings by workload</div>
-        </div>
-      </div>
-      <div class="scenario-grid" id="scenario-grid"></div>
-    </div>
-  </section>
-
-  <!-- ================= 05. Interactive Verified Benchmark Hub ================= -->
+  <!-- ================= 04. Interactive Verified Benchmark Hub ================= -->
   <section id="overview">
     <div class="eyebrow">Verified Benchmarks</div>
     <h2>Comprehensive strength across every production axis</h2>
-    <p class="lede">Single-metric charts hide real operational trade-offs: a runtime can post high raw QPS
-      while consuming hundreds of megabytes per process, skipping OS isolation, or stalling on cold start.
-      Every chart below is generated directly from replay-verified archives across <b>three fair reference tiers</b>.</p>
+    <p class="lede">Generated directly from <b>4,533 replay-verified archive files</b> across three fair reference tiers.</p>
 
     <!-- Executive Overview Visuals (Always Visible) -->
     <div class="grid-2">
@@ -1363,20 +1295,20 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         <div class="card-head">
           <div>
             <h3>Multi-axis capability profile</h3>
-            <div class="sub">Normalized to 100 = leader in this record on each measured axis</div>
+            <div class="sub">100 = leader in this record per axis (hover vertices for raw values)</div>
           </div>
           <div class="pills" id="radar-tabs"></div>
         </div>
         <div class="legend" id="radar-legend"></div>
         <div id="radar-chart"></div>
-        <div class="footnote" id="radar-note">Each spoke is normalized linearly (or inversely for lower-is-better latency/PSS) to 100 = best measured stack in this record. No subjective weights are applied; hover any vertex for raw values.</div>
+        <div class="footnote" id="radar-note">Linearly normalized (inverse for lower-is-better latency/PSS), no subjective weights.</div>
       </div>
 
       <div class="card chart">
         <div class="card-head">
           <div>
             <h3>Throughput vs. memory frontier</h3>
-            <div class="sub">Top-left is ideal: higher req/s inside smaller serving PSS (log X-axis)</div>
+            <div class="sub">Top-left is ideal: higher req/s in smaller PSS (log X-axis)</div>
           </div>
           <div class="pills" id="frontier-tabs"></div>
         </div>
@@ -1389,7 +1321,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
       <div class="card-head">
         <div>
           <h3>Unified runtime scorecard</h3>
-          <div class="sub" id="scorecard-sub">Side-by-side synthesis grouped by Reference Tier (Isolated &middot; Non-JIT Peer &middot; Unsandboxed JIT Ceiling) — Capsid highlighted</div>
+          <div class="sub" id="scorecard-sub">Grouped by tier: Isolated &middot; Non-JIT Peer &middot; Unsandboxed JIT Ceiling</div>
         </div>
       </div>
       <div class="scroll-x" id="scorecard-table"></div>
@@ -1411,7 +1343,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         <div class="card-head">
           <div>
             <h3>Throughput efficiency — req/s per MiB of serving PSS</h3>
-            <div class="sub" id="qps-eff-sub">median QPS divided by each stack's loaded process-tree PSS — higher is better</div>
+            <div class="sub" id="qps-eff-sub">median QPS &divide; loaded process-tree PSS — higher is better</div>
           </div>
           <div class="pills" id="qps-eff-tabs"></div>
         </div>
@@ -1425,7 +1357,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         <div class="card-head">
           <div>
             <h3>Raw serving throughput — requests per second</h3>
-            <div class="sub" id="qps-raw-sub">median of five 15 s rounds at 64 connections / 64 in-flight — higher is better</div>
+            <div class="sub" id="qps-raw-sub">median of five 15 s rounds at 64 connections / 64 in-flight</div>
           </div>
           <div class="pills" id="qps-raw-tabs"></div>
         </div>
@@ -1434,11 +1366,11 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
       </div>
 
       <div class="card">
-        <div class="tbl-cap">Median throughput (req/s) and 1 KiB memory efficiency — Capsid’s row highlighted</div>
+        <div class="tbl-cap">Median throughput (req/s) and 1 KiB memory efficiency</div>
         <div class="scroll-x" id="qps-table"></div>
       </div>
       <div class="card">
-        <div class="tbl-cap">Per-request latency (ms) in the last measured round — lower is better</div>
+        <div class="tbl-cap">Per-request latency (ms) in the last measured round</div>
         <div class="scroll-x" id="qps-latency"></div>
       </div>
     </div>
@@ -1447,7 +1379,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
     <div class="bench-panel is-hidden" id="memory" role="tabpanel">
       <div class="card chart featured">
         <h3>Observed pool density — 2048 MiB budget</h3>
-        <div class="sub">Final pool counts and process-tree PSS in the sampled window. The cold target is one validated request per worker/cell; the warm target is 100 per worker/cell. Complete archives prove that coverage individually. A probe cap is a lower-bound observation, not a measured maximum.</div>
+        <div class="sub">Cold = 1 validated req/worker; warm = 100 req/worker. Probe cap = lower bound, not maximum.</div>
         <div class="legend" id="density-legend"></div>
         <div class="scroll-x" id="density-chart" style="margin-bottom:18px"></div>
         <div class="scroll-x" id="budget-table"></div>
@@ -1457,14 +1389,14 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
       <div class="grid-2">
         <div class="card chart">
           <h3>At a trickle — 10 req/s</h3>
-          <div class="sub">process-tree PSS after 15 s of gentle traffic on a fresh process, before any load — MiB (lower is better)</div>
+          <div class="sub">Fresh process-tree PSS after 15 s gentle traffic (MiB)</div>
           <div class="scroll-x" id="mem-low-chart"></div>
           <div class="legend" id="mem-low-legend" style="margin-top:14px;margin-bottom:0"></div>
         </div>
 
         <div class="card chart">
           <h3>Under load — 64 connections</h3>
-          <div class="sub">process-tree PSS stacked by component, MiB — lower is better</div>
+          <div class="sub">Process-tree PSS stacked by component (MiB)</div>
           <div class="scroll-x" id="mem-chart"></div>
           <div class="legend" id="mem-legend" style="margin-top:14px;margin-bottom:0"></div>
         </div>
@@ -1472,7 +1404,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
 
       <div class="card chart">
         <h3>Marginal cost per serving worker</h3>
-        <div class="sub">the worker process alone — amortized infrastructure (capsid host, nginx, masters) excluded. Single-process runtimes combine server and worker inside one process, so their bar is an upper bound on per-worker cost. MiB — lower is better</div>
+        <div class="sub">Worker process alone (MiB; single-process peers are upper bounds)</div>
         <div class="legend" id="wc-legend"></div>
         <div class="scroll-x" id="worker-cost-chart"></div>
       </div>
@@ -1499,51 +1431,64 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
       </div>
 
       <div class="card">
-        <div class="tbl-cap">Cold start (total / ready ms) and runtime PSS — Capsid’s rows highlighted</div>
+        <div class="tbl-cap">Cold start (total / ready ms) and runtime PSS</div>
         <div class="scroll-x" id="cold-table"></div>
       </div>
 
       <div class="card chart">
         <h3>Warm request latency</h3>
-        <div class="sub">median per-request latency on an already-warmed process, ms — lower is better</div>
+        <div class="sub">Median per-request latency on a warm process (ms)</div>
         <div class="scroll-x" id="warm-chart"></div>
         <div class="footnote" id="warm-note"></div>
       </div>
     </div>
   </section>
 
+  <!-- ================= 05. Visual 2 GiB Packing & Scenario Guide ================= -->
+  <section id="economics">
+    <div class="eyebrow">Density &amp; Trade-Offs</div>
+    <h2>How many isolated tenants fit in 2 GiB of RAM?</h2>
+
+    <div class="card featured" id="packing-card">
+      <div class="card-head">
+        <div>
+          <h3>2 GiB multi-tenant packing comparison</h3>
+          <div class="sub">Measured 2,048 MiB warmed pools (10 KiB, 100 req/worker) for Capsid &amp; workerd; single-process peers show <span class="mono">floor(2048 &divide; PSS)</span> upper bounds</div>
+        </div>
+      </div>
+      <div class="packing-bars" id="packing-visual"></div>
+    </div>
+
+    <details class="fold-card" id="scenario-card">
+      <summary>Scenario selection guide — OS isolation vs V8 isolates vs JIT ceilings</summary>
+      <div class="scenario-grid" id="scenario-grid"></div>
+    </details>
+  </section>
+
   <!-- ================= 06. Quick Start (60s dev/v0.3.2 Onboarding) ================= -->
   <section id="quickstart">
     <div class="eyebrow">Quick Start &middot; dev/v0.3.2</div>
-    <h2>Ship your first dev/v0.3.2 worker in 60 seconds</h2>
-    <p class="lede">Build and install the <b>dev/v0.3.2</b> Host, Worker, bytecode compiler, and C/C++ ABI v8 SDK on
-      <b>Linux</b>, <b>macOS</b>, or <b>Windows</b> — featuring unified Config v2 (<span class="mono">capsid/app-v2</span>),
-      one-command <span class="mono">--app-dir</span> local dev, and Linux managed <b>Elastic OS Process Pools</b>.
-      Need prebuilt binaries instead? The latest published release archive is
-      <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1</a>
-      (earlier <span class="mono">single-worker</span> CLI &amp; ABI v7).</p>
+    <h2>Ship your first worker in 60 seconds</h2>
+    <p class="lede">Unified Config v2 (<span class="mono">capsid/app-v2</span>) &amp; <span class="mono">--app-dir</span> CLI on Linux, macOS, and Windows. Prebuilt archive: <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1</a>.</p>
 
     <div class="qs-os-bar">
       <div class="pills" role="tablist" aria-label="Quick Start operating system">
         <button type="button" class="pill active" role="tab" aria-selected="true" id="qs-os-unix">Linux &amp; macOS</button>
         <button type="button" class="pill" role="tab" aria-selected="false" id="qs-os-win">Windows (PS)</button>
       </div>
-      <span class="qs-os-note" id="qs-os-note">Strict sandboxing &amp; managed elastic pools are <b>Linux-only</b>; macOS &amp; Windows builds share the same <span class="mono">--app-dir</span> Config v2 local CLI and C ABI v8 SDK.</span>
+      <span class="qs-os-note" id="qs-os-note">Strict sandbox &amp; managed elastic pools are <b>Linux-only</b>; macOS &amp; Windows share the same <span class="mono">--app-dir</span> CLI and ABI v8 SDK.</span>
     </div>
 
     <div class="qs-timeline">
       <!-- Step 01 -->
       <div class="qs-row">
         <div class="qs-info">
-          <div class="qs-badge"><span class="qs-idx">01</span>Install dev/v0.3.2</div>
-          <h3>Build &amp; install the dev/v0.3.2 toolchain</h3>
-          <p>Checks out <span class="mono">dev/v0.3.2</span> recursively (including <span class="mono">quickjs-turbo</span>
-             and <span class="mono">txiki.js</span>), builds Release binaries with Ninja, and installs
-             <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>,
-             <span class="mono">capsid-bytecode-compile</span>, and the ABI v8 CMake SDK.
-             See <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">Build from source</a>
-             or grab published <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1 Releases</a>.</p>
-          <div class="qs-meta"><span>dev/v0.3.2 &middot; ABI v8</span><span>Linux &middot; macOS &middot; Windows</span></div>
+          <div class="qs-badge"><span class="qs-idx">01</span>Install</div>
+          <h3>Build the dev/v0.3.2 toolchain</h3>
+          <p>Installs <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>, bytecode compiler, and ABI v8 SDK.
+             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">Build guide</a> &middot;
+             <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">Prebuilt beta</a>.</p>
+          <div class="qs-meta"><span>dev/v0.3.2 &middot; ABI v8</span><span>Linux &middot; macOS &middot; Win</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
@@ -1575,12 +1520,10 @@ $env:PATH = "$PWD\build-release;$env:PATH"</pre>
       <!-- Step 02 -->
       <div class="qs-row">
         <div class="qs-info">
-          <div class="qs-badge"><span class="qs-idx">02</span>Create app &amp; Config v2</div>
-          <h3>Write the ESM handler &amp; capsid/app-v2 manifest</h3>
-          <p>Create a user-owned package directory (identical to the Linux managed deployment layout), save a
-             self-contained <span class="mono">bundle.mjs</span> handler, and add a minimal default-deny
-             <span class="mono">capsid/app-v2</span> manifest with zero ambient modules or outbound egress.</p>
-          <div class="qs-meta"><span>capsid/app-v2</span><span>Default-deny policy</span><span>Zero bundler</span></div>
+          <div class="qs-badge"><span class="qs-idx">02</span>Create app</div>
+          <h3>Write handler &amp; capsid/app-v2</h3>
+          <p>Self-contained <span class="mono">bundle.mjs</span> + default-deny <span class="mono">capsid.json</span> (zero ambient modules or egress).</p>
+          <div class="qs-meta"><span>capsid/app-v2</span><span>Default-deny</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
@@ -1623,13 +1566,10 @@ export default {
       <!-- Step 03 -->
       <div class="qs-row">
         <div class="qs-info">
-          <div class="qs-badge"><span class="qs-idx">03</span>Run &amp; verify</div>
-          <h3>Launch the unified Config v2 Host</h3>
-          <p>One command replaces the old 12-flag invocation: <span class="mono">capsid-host --app-dir .</span>
-             auto-discovers the sibling <span class="mono">capsid-worker</span>, validates
-             <span class="mono">capsid.json</span>, and mounts your app directly at <span class="mono">/</span>.
-             Once stdout prints <span class="mono">capsid-host-ready-v1</span>, send a request from Terminal 2.</p>
-          <div class="qs-meta"><span>Unified --app-dir CLI</span><span>Mounted at /</span></div>
+          <div class="qs-badge"><span class="qs-idx">03</span>Run</div>
+          <h3>Launch Config v2 Host</h3>
+          <p>Auto-discovers <span class="mono">capsid-worker</span> and mounts at <span class="mono">/</span> once <span class="mono">capsid-host-ready-v1</span> prints.</p>
+          <div class="qs-meta"><span>Unified --app-dir</span><span>Mounted at /</span></div>
         </div>
         <div class="qs-term-stack">
           <div class="qs-term">
@@ -1657,16 +1597,10 @@ export default {
       <!-- Step 04 (Optional Production Extras) -->
       <div class="qs-row is-optional">
         <div class="qs-info">
-          <div class="qs-badge"><span class="qs-idx">04</span>Optional &middot; Production</div>
-          <h3>Elastic Process Pools, npm bundles &amp; trusted bytecode</h3>
-          <p>In Linux managed mode, configure <span class="mono">pool.minReady: 0</span> for scale-to-zero
-             <b>Elastic OS Process Pools</b> with tenant-fair eviction and <span class="mono">cgroup v2</span>
-             <span class="mono">memory.max</span>. Apps with npm dependencies (Hono, itty-router, H3, Elysia)
-             bundle into one ESM file; for 8.9&nbsp;ms (10&nbsp;KiB) / 21.4&nbsp;ms (1&nbsp;MiB) cold starts,
-             precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode with
-             <span class="mono">capsid-bytecode-compile</span>
-             (see <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host configuration</a>).</p>
-          <div class="qs-meta"><span>Scale-to-zero pools</span><span>8.9 ms (10 KiB) / 21.4 ms (1 MiB)</span><span>Signed attestation</span></div>
+          <div class="qs-badge"><span class="qs-idx">04</span>Production</div>
+          <h3>Elastic pools, npm &amp; bytecode</h3>
+          <p>Add <span class="mono">pool.minReady: 0</span> for scale-to-zero, bundle npm apps with <span class="mono">esbuild</span>, or precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode (<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host config</a>).</p>
+          <div class="qs-meta"><span>Scale-to-zero</span><span>8.9 / 21.4 ms C ABI</span><span>Signed attestation</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
@@ -1711,21 +1645,19 @@ capsid-bytecode-compile.exe `
     </div>
 
     <div class="quick-links">
-      <a class="btn-primary" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/run-application.md" target="_blank" rel="noopener">Getting Started Guide &rarr;</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md" target="_blank" rel="noopener">Elastic Process Pools &amp; Config v2</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/embedding-api.md" target="_blank" rel="noopener">Embed C/C++ SDK (ABI v8)</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/linux-sandbox.md" target="_blank" rel="noopener">Linux Strict Sandbox</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/releases" target="_blank" rel="noopener">All Releases &amp; SHA-256</a>
+      <a class="btn-primary" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/run-application.md" target="_blank" rel="noopener">Getting Started &rarr;</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md" target="_blank" rel="noopener">Config v2 &amp; Pools</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/embedding-api.md" target="_blank" rel="noopener">C/C++ SDK (ABI v8)</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/linux-sandbox.md" target="_blank" rel="noopener">Linux Sandbox</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/releases" target="_blank" rel="noopener">Releases</a>
     </div>
   </section>
 
   <!-- ================= 07. Verifiable Provenance & Record Switcher ================= -->
   <section id="method">
     <div class="eyebrow">Verifiable Evidence</div>
-    <h2>Don't trust marketing charts — replay every byte yourself</h2>
-    <p class="lede">Every verified point on this page ships its complete sealed lane logs, exact-body check records,
-      process-tree <span class="mono">smaps_rollup</span> snapshots, and SHA-256 transport manifests.
-      Switch between current and archived measurement records below.</p>
+    <h2>Replay every byte yourself</h2>
+    <p class="lede">Sealed lane logs, exact-body checks, <span class="mono">smaps_rollup</span> snapshots, and SHA-256 manifests for every verified point.</p>
 
     <div class="prov-strip" role="region" aria-label="Release status and measurement record selector">
       <div class="prov-top">
@@ -1746,12 +1678,7 @@ capsid-bytecode-compile.exe `
 
   <footer>
     <div class="foot-left">
-      <p><b>Capsid</b> — A secure, embeddable, high-density JavaScript runtime for untrusted AI code.
-         Verified points require clean-tree Release measurements from
-         <span class="mono">bench/cold-start.sh</span>, <span class="mono">bench/qps-lane.sh</span>,
-         <span class="mono">bench/density-lane.sh</span>, and <span class="mono">bench/collect-perf-point.py</span>.
-         Each point carries measured source and binary identities, a machine fingerprint, and revalidated archive digests.
-         Quiet WSL guest windows do not prove physical Windows-host exclusivity.</p>
+      <p><b>Capsid</b> — Process-isolated JavaScript at isolate density. Verified points bind clean-tree Release measurements (<span class="mono">cold-start</span>, <span class="mono">qps-lane</span>, <span class="mono">density-lane</span>) with binary identities and archive digests. Quiet WSL guest windows do not prove physical Windows-host exclusivity.</p>
     </div>
     <div class="foot-links">
       <a href="https://github.com/rowanellis-113/capsid" target="_blank" rel="noopener">GitHub</a>
