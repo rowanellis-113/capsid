@@ -1,13 +1,12 @@
 <div align="center">
 
-<img src="logo.png" alt="Capsid" width="144" />
+<img src="logo.png" alt="Capsid" width="360" />
 
 ### Process-isolated JavaScript at isolate density.
 
 Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in dedicated **OS-sandboxed elastic process pools** — scaling cleanly from zero to hundreds of warm workers per host with standard Web `fetch(Request)` handlers, sub-10 ms cold starts, and a zero-JIT footprint engineered for high-density multi-tenancy.
 
 <p>
-  <a href="docs/design/config-v2.md"><img src="https://img.shields.io/badge/branch-dev%2Fv0.3.2-0284C7?style=flat-square" alt="Development Branch dev/v0.3.2" /></a>
   <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2"><img src="https://img.shields.io/badge/stable-v0.2.2-2563EB?style=flat-square" alt="Stable v0.2.2" /></a>
   <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1"><img src="https://img.shields.io/badge/prerelease-v0.3.1--beta.1-7C3AED?style=flat-square" alt="Prerelease v0.3.1-beta.1" /></a>
   <a href="docs/reference/embedding-api.md"><img src="https://img.shields.io/badge/C_ABI-v8-0F766E?style=flat-square" alt="Public C ABI v8" /></a>
