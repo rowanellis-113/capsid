@@ -4,7 +4,7 @@ The [machine-readable release record](../data/current-status.json) binds the 202
 
 ## Development Checkout
 
-The v0.3.2 development SDK requires ABI v8 and FetchRPC v4 with Build Info v2 and Capability Policy v2. Rebuild embedders against this SDK. The working branch `dev/v0.3.2` develops Config v2, elastic pools and tenant memory limits. Its [design](../design/config-v2.md) and [verification record](../history/v0.3.2/README.md) track implementation and remaining release work.
+The v0.3.2 development SDK requires ABI v8 and FetchRPC v4 with Build Info v2 and Capability Policy v2. Rebuild embedders against this SDK. The working branch `dev/v0.3.2` delivers Config v2 (`capsid/host-v2` / `capsid/app-v2`, retiring `host-v1` / `app-v1` and legacy `single-worker` / `static-pool` CLI modes), Elastic OS Process Pools (scale-to-zero, two-stage tenant-fair eviction, and tenant-wide `cgroup v2` `memory.max`), and its latest accepted local `capsid-perf-lane-v3` measurement at `24671d9` (see [benchmarks](benchmarks.md)). Its [design](../design/config-v2.md) and [verification record](../history/v0.3.2/README.md) track implementation and verification. The sections below retain the captured `v0.3.1-beta.1` published-release baseline separately.
 
 ### Source of the published beta
 

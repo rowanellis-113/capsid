@@ -1,16 +1,18 @@
 # First-party Host Architecture and Review Boundary
 
-Reviewed 2026-11-18 against the published 0.3.0-beta source. This page describes the
-implemented Host, not a pending M1/M2 work queue. The original milestone design
-and all checkpoints are preserved in the historical snapshot linked below.
-Use [current status](../reference/release-status.md) for source, release, test and data identities.
+Reviewed 2026-11-27 against the `dev/v0.3.2` Host (Config v2, Elastic OS Process
+Pools, C ABI v8, FetchRPC v4). This page describes the implemented Host, not a
+pending M1/M2 work queue. The original milestone design and all checkpoints are
+preserved in the historical snapshot linked below. Use
+[current status](../reference/release-status.md) for published release, source,
+test and data identities.
 
 ## Responsibility Split
 
 | Layer | Owns | Does not imply |
 | --- | --- | --- |
 | Runtime/C ABI v8 | Worker creation, IPC, bounded queues, request credit, lifecycle and OS sandbox installation | An HTTP listener, deployment policy or tenant scheduler |
-| First-party Host | HTTP admission/routing, worker pools, Upgrade framing, outbound channel dialer, generation rollout, Admin API and metrics | A stable deployment interface or a complete external gateway |
+| First-party Host | HTTP admission/routing, elastic worker pools, two-stage tenant-fair eviction, tenant cgroup v2 budgets, Upgrade framing, outbound channel dialer, generation rollout, Admin API and metrics | A stable deployment interface or a complete external gateway |
 | Application | A self-contained ESM Fetch handler and explicitly authorized capability calls | Ambient filesystem/environment, a raw socket, listener or process |
 | Deployment | TLS/gateway policy, DNS/network namespace/firewall, delegated resource roots, secrets and host hardening | Isolation merely because a process started |
 
@@ -22,9 +24,8 @@ must not be inferred from an old design checkbox.
 
 | Mode | Data plane | Configuration/authority | Platform boundary |
 | --- | --- | --- | --- |
-| `single-worker` | One persistent worker | Explicit CLI and optional local `capsid.json` | Trusted local integration on Linux/macOS/Windows |
-| `static-pool` | Fixed worker/shard pool and one public listener | Local application authority; explicit worker count | Native Windows uses a shared acceptor, not SO_REUSEPORT |
-| `managed` | Linux coordinator, immutable generation snapshots and supervised pools | `host.json` maximum intersected with per-version application requests | Linux strict sandbox prerequisites; deployment API remains experimental |
+| `local` (`--app-dir`) | One package mounted at `/` with `pool.workers` or `--workers` | Managed-isomorphic `capsid/app-v2` manifest plus optional `--host-config` | Trusted local integration on Linux/macOS/Windows (Windows uses a shared acceptor, not `SO_REUSEPORT`; replaces retired `single-worker` and `static-pool` CLI modes from `v0.3.1-beta.1`) |
+| `managed` | Linux coordinator, immutable generation snapshots, elastic OS process pools (`minReady..maxWorkers`, scale-to-zero, cold queueing, two-stage tenant-fair eviction) | `capsid/host-v2` maximums and tenancy budgets intersected with per-version `capsid/app-v2` requests | Linux strict sandbox and optional delegated `cgroup v2` prerequisites; deployment API remains experimental |
 
 Local modes with sandbox off are not production isolation. They remain
 loopback-only and retain configuration/registry safety checks. A Binding grant

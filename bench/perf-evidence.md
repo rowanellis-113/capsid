@@ -12,7 +12,7 @@ does not qualify a measurement point.
 The current validator and site staging path implement the T16 collection
 boundary. All three controllers produce this contract. The accepted local-rebuild
 records (`485b29b` archived `v1`, plus `v3` records at `82eaab9`, `c7a80b9`,
-`6d4cc61`, and `d0adc21`) each passed independent source/build/binary and complete-session
+`6d4cc61`, and `24671d9`) each passed independent source/build/binary and complete-session
 acceptance; that acceptance is not inherited by published `0.3.1-beta` release
 packages or another code/build. Do not create missing records retrospectively or
 claim measurement acceptance from synthetic tests.
@@ -188,7 +188,7 @@ rewritten. Tests use synthetic complete archives only in temporary
 directories; those values never enter the checked-in performance history.
 
 Same-session measurement and independent build qualification remain required
-for each claimed source. An accepted local-rebuild session (such as `d0adc21`,
+for each claimed source. An accepted local-rebuild session (such as `24671d9`,
 `6d4cc61`, `c7a80b9`, `82eaab9`, or `485b29b`) does not qualify another binary,
 and archive validation alone is not full release qualification.
 
@@ -439,7 +439,7 @@ responses, process ownership, rounds or budgets still fail the original gate.
 
 The published evidence-index.json maps every original file digest to its
 complete transport and measured session. Across all 5 verified records (15
-bundles), the raw records total about 12.81 GiB (13.75 GB) uncompressed, and
-the published compressed transports total about 789 MiB (827 MB). Allow at least
+bundles), the raw records total about 12.80 GiB (13.74 GB) uncompressed, and
+the published compressed transports total about 788 MiB (826 MB). Allow at least
 16 GiB of scratch space for full replay; memory/sanitizer/performance test
 budgets are not changed by this publication transport.

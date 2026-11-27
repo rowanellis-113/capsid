@@ -1,11 +1,11 @@
 # Performance: Current Measurements and Methodology
 
-Reviewed 2026-11-24. The latest accepted measurement uses a **local WSL2
-Release/LTO rebuild** of the untagged `dev/v0.3.2` snapshot (`d0adc21`,
-powered by `quickjs-turbo v0.15.1-turbo.8` native register-frame VM, HTTP/stream
-fast paths with IPC event batching, explicit density-preserving PIC defaults,
-and the `v0.3.2` elastic-pool / eviction / Config v2 Host). It measures that
-build, **not any distributed release package**. The
+Reviewed 2026-11-27. The latest accepted measurement uses a **local WSL2
+Release/LTO rebuild** of the untagged `dev/v0.3.2` snapshot (`24671d9`,
+powered by `quickjs-turbo v0.15.1-turbo.8` native register-frame VM, C ABI v8,
+HTTP/stream fast paths with IPC event batching, explicit density-preserving PIC
+defaults, and the `v0.3.2` elastic-pool / eviction / Config v2 Host). It
+measures that build, **not any distributed release package**. The
 [current status](release-status.md) and [generated data](../data/current-status.json)
 retain the published `v0.3.1-beta.1` release status separately from this
 development-branch measurement.
@@ -14,11 +14,11 @@ development-branch measurement.
 
 | Field | Recorded value |
 | --- | --- |
-| Measured source | `d0adc21fcfb5bf75770977c8f1b0ba3c3c0b07b6` (clean untagged `dev/v0.3.2` commit; `sourceTag: ""`) |
-| Measured tree | `180f6ad1d08f6bc55ab1b8e54d2915472f36c672` |
-| Session | `local-wsl-v032-dev-v3-20261124T141726Z-d0adc21` |
+| Measured source | `24671d9957eee59d93564095c8b3af830301104f` (clean untagged `dev/v0.3.2` / `verify/v0.3.2-abi8` commit; `sourceTag: ""`) |
+| Measured tree | `f34e665ad95b1ca4fd4cdfc40d023492e72aa4e2` |
+| Session | `local-wsl-v032-dev-v3-20261127T055316Z-24671d9` |
 | Contract / matrix | `capsid-perf-lane-v3` (pure-JS seven-stack across three reference tiers + `dynamic-api`) |
-| Completed measurement date | 2026-11-24 UTC |
+| Completed measurement date | 2026-11-27 UTC |
 | Machine/lane | i5-12400F; 12 logical CPUs; measured set 0–3; WSL2 Linux |
 | Runtime posture | Clean local Release/LTO (`CAPSID_USE_MIMALLOC=OFF`, `quickjs-turbo v0.15.1-turbo.8` `LINUX_X86_64` native register-frame VM, `QJS_SetTurboDefaults` PIC-only `own_bytecode_tail=OFF` + `property_ic_warmup=12` + pre-`READY` `JS_PurgePropertyIC`); strict C-ABI cold workers; managed/strict serving and density |
 | Reference binaries | workerd `v1.20261121.1`, Node.js `v26.13.1`, Bun `1.4.5`, Deno `2.9.8` |
@@ -41,13 +41,13 @@ checksum calculation (`x-bench-checksum`), and `JSON.stringify`.
 
 | Stack | Reference tier / isolation | JSON 1 KiB | JSON 16 KiB | Stream 1 KiB | Dynamic API | Trickle PSS MiB | Loaded PSS MiB | 1K QPS/MiB |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Capsid | T1 · Strict Linux OS sandbox (NS+Landlock+Seccomp) | 39802.4 | 23153.5 | 14263.6 | 20380.6 | 15.8 | 19.8 | 2010.22 |
-| workerd | T1 · V8 Isolate | 26006.4 | 19771.7 | 19673.8 | 19281.9 | 56.4 | 544.0 | 47.81 |
-| Deno | T1 · Permission sandbox (`--allow-net=127.0.0.1`) | 144741.4 | 47080.8 | 85487.8 | 56479.0 | 40.8 | 63.3 | 2286.59 |
-| Node `--jitless` | T2 · Single process (no sandbox, V8 no-JIT) | 12132.3 | 12341.7 | 10636.5 | 8857.7 | 77.6 | 86.4 | 140.42 |
-| Bun `--jitless` | T2 · Single process (no sandbox, `BUN_JSC_useJIT=0`) | 139679.8 | 44448.1 | 124094.2 | 41799.7 | 25.3 | 28.2 | 4953.18 |
-| Node.js | T3 · Single process (no sandbox, V8 JIT) | 111183.8 | 42788.7 | 89321.6 | 52798.5 | 80.9 | 153.6 | 723.85 |
-| Bun | T3 · Single process (no sandbox, JSC JIT) | 142293.8 | 44784.5 | 134532.2 | 77000.2 | 27.6 | 38.3 | 3715.24 |
+| Capsid | T1 · Strict Linux OS sandbox (NS+Landlock+Seccomp) | 41124.8 | 23202.4 | 14675.0 | 19511.5 | 16.1 | 19.3 | 2130.82 |
+| workerd | T1 · V8 Isolate | 26121.2 | 19307.6 | 18822.7 | 19074.8 | 56.4 | 555.7 | 47.01 |
+| Deno | T1 · Permission sandbox (`--allow-net=127.0.0.1`) | 143244.3 | 46036.0 | 86936.9 | 57848.7 | 41.0 | 63.4 | 2259.37 |
+| Node `--jitless` | T2 · Single process (no sandbox, V8 no-JIT) | 12280.8 | 12709.9 | 10616.4 | 9050.0 | 56.4 | 65.0 | 188.94 |
+| Bun `--jitless` | T2 · Single process (no sandbox, `BUN_JSC_useJIT=0`) | 142484.4 | 44621.9 | 127274.9 | 44037.4 | 34.3 | 37.2 | 3830.23 |
+| Node.js | T3 · Single process (no sandbox, V8 JIT) | 110011.3 | 44058.6 | 85716.0 | 54640.2 | 60.6 | 135.0 | 814.90 |
+| Bun | T3 · Single process (no sandbox, JSC JIT) | 145428.2 | 48254.3 | 141231.4 | 80534.8 | 36.5 | 47.5 | 3061.65 |
 
 Trickle is 15 seconds at 10 req/s on a fresh forest, **before** loaded traffic.
 PSS includes the complete owned service forest; rounded roles need not sum to
@@ -64,14 +64,14 @@ explicit `32 KiB` allocator page-flap tolerance while density remains exact
 
 | Runtime | 10 KiB total ms / PSS | 100 KiB total ms / PSS | 1 MiB total ms / PSS | Warm request ms |
 | --- | ---: | ---: | ---: | ---: |
-| Capsid · bytecode | 8.88 ms / 7.4 MiB | 10.15 ms / 8.0 MiB | 20.22 ms / 13.8 MiB | 0.071–0.074 |
-| Capsid · source | 9.87 ms / 7.4 MiB | 14.84 ms / 8.4 MiB | 75.20 ms / 18.5 MiB | 0.076–0.077 |
-| workerd | 17.44 ms / 58.8 MiB | 21.05 ms / 60.5 MiB | 43.41 ms / 73.9 MiB | 0.204–0.234 |
-| Deno | 71.62 ms / 39.5 MiB | 76.10 ms / 40.4 MiB | 153.56 ms / 47.9 MiB | 0.114–0.123 |
-| Bun `--jitless` | 14.44 ms / 24.1 MiB | 13.96 ms / 25.4 MiB | 60.59 ms / 34.9 MiB | 0.105–0.115 |
-| Bun | 13.79 ms / 26.2 MiB | 14.78 ms / 27.8 MiB | 60.47 ms / 36.8 MiB | 0.107–0.112 |
-| Node.js | 43.15 ms / 81.0 MiB | 48.25 ms / 81.5 MiB | 69.57 ms / 96.7 MiB | 0.177–0.187 |
-| Node `--jitless` | 77.68 ms / 85.8 MiB | 73.86 ms / 86.4 MiB | 94.78 ms / 93.1 MiB | 0.171–0.191 |
+| Capsid · bytecode | 8.89 ms / 8.2 MiB | 10.22 ms / 8.9 MiB | 21.43 ms / 14.7 MiB | 0.071–0.076 |
+| Capsid · source | 9.29 ms / 8.2 MiB | 14.23 ms / 9.3 MiB | 70.55 ms / 19.4 MiB | 0.071–0.073 |
+| workerd | 17.21 ms / 57.9 MiB | 20.68 ms / 59.9 MiB | 38.45 ms / 73.0 MiB | 0.214–0.228 |
+| Deno | 30.04 ms / 38.0 MiB | 35.99 ms / 39.0 MiB | 114.36 ms / 46.0 MiB | 0.126–0.129 |
+| Bun `--jitless` | 14.00 ms / 33.3 MiB | 14.89 ms / 34.7 MiB | 60.93 ms / 44.2 MiB | 0.106–0.112 |
+| Bun | 14.15 ms / 35.3 MiB | 13.98 ms / 36.9 MiB | 66.37 ms / 45.9 MiB | 0.110–0.114 |
+| Node.js | 48.76 ms / 60.7 MiB | 48.93 ms / 61.4 MiB | 69.66 ms / 76.4 MiB | 0.187–0.207 |
+| Node `--jitless` | 79.65 ms / 90.0 MiB | 79.55 ms / 90.6 MiB | 95.09 ms / 104.9 MiB | 0.175–0.187 |
 
 The C-ABI probe itself is excluded from cold worker PSS. Other stacks use the
 recorded HTTP client/transport rather than the IPC entry, so transport overhead
@@ -85,9 +85,9 @@ budget-limited, not arbitrary cap-limited observations.
 | Stack | Phase | 10 KiB | 100 KiB | 1 MiB |
 | --- | --- | ---: | ---: | ---: |
 | Capsid workers | Cold | 709 | 502 | 135 |
-| Capsid workers | Warm | 705 | 500 | 135 |
-| workerd cells | Cold | 947 | 809 | 251 |
-| workerd cells | Warm | 571 | 525 | 264 |
+| Capsid workers | Warm | 705 | 501 | 135 |
+| workerd cells | Cold | 948 | 808 | 254 |
+| workerd cells | Warm | 572 | 524 | 264 |
 
 These sampled windows do not prove long-duration memory retention or universal
 maximum density. Heap diagnostics, service-tree PSS, individual worker cost and
@@ -100,21 +100,21 @@ reference binaries (`workerd v1.20261121.1`, `Node v26.13.1`, `Bun 1.4.5`,
 `Deno 2.9.8`) under `capsid-perf-lane-v3`, as separate sessions (not paired
 ABBA trials; physical Windows-host exclusivity is not claimed):
 
-| Dimension | `v0.3.0-beta.5` (`c7a80b9`, QuickJS-NG) | `v0.3.1-beta.1` (`6d4cc61`, `turbo.7`) | `dev/v0.3.2` (`d0adc21`, `turbo.8`) |
+| Dimension | `v0.3.0-beta.5` (`c7a80b9`, QuickJS-NG) | `v0.3.1-beta.1` (`6d4cc61`, `turbo.7`) | `dev/v0.3.2` (`24671d9`, `turbo.8`) |
 | --- | ---: | ---: | ---: |
-| `dynamic-api` QPS (64 conn) | 9,808.1 | 14,421.9 | **20,380.6** |
-| `matrix-json-1k` QPS (64 conn) | 21,746.6 | 24,186.0 | **39,802.4** |
-| `matrix-json-16k` QPS (64 conn) | 14,194.6 | 14,441.4 | **23,153.5** |
-| `stream` QPS (64 conn) | 10,649.7 | 11,153.2 | **14,263.6** |
-| Trickle PSS (10 req/s) | 15.0 MiB | 15.7 MiB (`8.3 / 7.5`) | **15.8 MiB** (`8.3 / 7.5`) |
-| Loaded PSS (64 conn) | 18.5 MiB | 19.6 MiB (`9.8 / 9.7`) | **19.8 MiB** (`10.1 / 9.7`) |
-| 1K QPS / MiB | 1,175.5 | 1,234.0 | **2,010.2** |
-| 1 MiB Bytecode Cold Start / PSS | 20.43 ms / 14.3 MiB | 20.24 ms / 16.0 MiB | **20.22 ms / 13.8 MiB** |
+| `dynamic-api` QPS (64 conn) | 9,808.1 | 14,421.9 | **19,511.5** |
+| `matrix-json-1k` QPS (64 conn) | 21,746.6 | 24,186.0 | **41,124.8** |
+| `matrix-json-16k` QPS (64 conn) | 14,194.6 | 14,441.4 | **23,202.4** |
+| `stream` QPS (64 conn) | 10,649.7 | 11,153.2 | **14,675.0** |
+| Trickle PSS (10 req/s) | 15.0 MiB | 15.7 MiB (`8.3 / 7.5`) | **16.1 MiB** (`8.6 / 7.5`) |
+| Loaded PSS (64 conn) | 18.5 MiB | 19.6 MiB (`9.8 / 9.7`) | **19.3 MiB** (`9.5 / 9.8`) |
+| 1K QPS / MiB | 1,175.5 | 1,234.0 | **2,130.8** |
+| 1 MiB Bytecode Cold Start / PSS | 20.43 ms / 14.3 MiB | 20.24 ms / 16.0 MiB | **21.43 ms / 14.7 MiB** |
 | 2 GiB Density `10k` (cold / warm) | 735 / 729 | 721 / 715 (99.2% warm) | **709 / 705** (99.4% warm) |
-| 2 GiB Density `100k` (cold / warm) | 503 / 503 | 497 / 496 (99.8% warm) | **502 / 500** (99.6% warm) |
+| 2 GiB Density `100k` (cold / warm) | 503 / 503 | 497 / 496 (99.8% warm) | **502 / 501** (99.8% warm) |
 | 2 GiB Density `1m` (cold / warm) | 128 / 128 | 127 / 127 (100.0% warm) | **135 / 135** (100.0% warm) |
 
-Note: across the `d0adc21` `dev/v0.3.2` session (`perf(runtime,host): optimize HTTP/stream fast paths and IPC event batching`), Capsid outperformed `workerd` on three of four QPS workloads (`39,802.4` vs `26,006.4` on 1 KiB JSON, `23,153.5` vs `19,771.7` on 16 KiB JSON, and `20,380.6` vs `19,281.9` on `dynamic-api`) while preserving `15.8 / 19.8 MiB` PSS and `705 / 500 / 135` warm workers inside 2 GiB (`+6.3%` higher 1 MiB density than `v0.3.1-beta.1`).
+Note: across the `24671d9` `dev/v0.3.2` ABI v8 session, Capsid outperformed `workerd` on three of four QPS workloads (`41,124.8` vs `26,121.2` on 1 KiB JSON, `23,202.4` vs `19,307.6` on 16 KiB JSON, and `19,511.5` vs `19,074.8` on `dynamic-api`) while preserving `16.1 / 19.3 MiB` PSS (`28.8×` lower loaded PSS than `workerd`'s `555.7 MiB`) and `705 / 501 / 135` warm workers inside 2 GiB (`+6.3%` higher 1 MiB density than `v0.3.1-beta.1`).
 
 ## Evidence and Replay
 

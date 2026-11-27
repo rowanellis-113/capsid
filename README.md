@@ -4,7 +4,7 @@
 
 ### Process-isolated JavaScript at isolate density.
 
-Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in dedicated **OS-sandboxed worker processes** — using standard Web `fetch(Request)` handlers, sub-10 ms cold starts, and a zero-JIT footprint engineered for high-density multi-tenancy.
+Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in dedicated **OS-sandboxed elastic process pools** — scaling cleanly from zero to hundreds of warm workers per host with standard Web `fetch(Request)` handlers, sub-10 ms cold starts, and a zero-JIT footprint engineered for high-density multi-tenancy.
 
 <p>
   <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2"><img src="https://img.shields.io/badge/stable-v0.2.2-2563EB?style=flat-square" alt="Stable v0.2.2" /></a>
@@ -36,14 +36,14 @@ Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in
     </td>
     <td align="center" width="25%">
       <br />
-      <strong><code>8.88 ms</code></strong><br />
-      <sub><strong>Cold Start to First Response</strong><br />7.4 MiB PSS &middot; trusted bytecode</sub>
+      <strong><code>8.89 ms</code></strong><br />
+      <sub><strong>Cold Start to First Response</strong><br />8.2 MiB PSS &middot; trusted bytecode</sub>
       <br /><br />
     </td>
     <td align="center" width="25%">
       <br />
-      <strong><code>19.8 MiB</code></strong><br />
-      <sub><strong>Loaded Service PSS</strong><br />Host + worker @ 64 conn (27.5&times; vs workerd)</sub>
+      <strong><code>19.3 MiB</code></strong><br />
+      <sub><strong>Loaded Service PSS</strong><br />Host + worker @ 64 conn (28.8&times; vs workerd)</sub>
       <br /><br />
     </td>
     <td align="center" width="25%">
@@ -63,16 +63,27 @@ Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in
 
 Running untrusted tenant or AI-generated JavaScript usually forces an uncomfortable trade-off: **V8 isolates** share a process address space and balloon in memory under concurrent load, while **containers and microVMs** deliver OS isolation at tens to hundreds of megabytes per tenant.
 
-**Capsid eliminates that compromise.** Every worker is a real Linux-sandboxed OS process (`namespaces` + `Landlock` + `seccomp` + `cgroup v2`), yet hundreds of warm workers fit inside a single 2 GiB host. Ship Capsid standalone via `capsid-host`, or embed `libcapsid_runtime` directly into your C/C++ service so your control plane owns the listener, holds every credential, and enforces hard deadlines.
+**Capsid eliminates that compromise with Elastic OS Process Pools.** Every worker is a real Linux-sandboxed OS process (`namespaces` + `Landlock` + `seccomp` + `cgroup v2`), yet hundreds of warm workers fit inside a single 2 GiB host and idle apps scale all the way down to zero processes (`0 B` worker RAM). Ship Capsid standalone via `capsid-host`, or embed `libcapsid_runtime` directly into your C/C++ service so your control plane owns the listener, holds every credential, and enforces hard deadlines.
 
 | Dimension | V8 Isolates (e.g. `workerd`) | Containers / MicroVMs | **Capsid** |
 | :--- | :--- | :--- | :--- |
 | **Isolation boundary** | In-process VM heap | OS / VM kernel boundary | **Dedicated OS process** (`NS` + `Landlock` + `seccomp` + `cgroup v2`) |
-| **Memory under load** | High (`544.0 MiB` loaded PSS @ 64 conn) | Tens to hundreds of MiB per tenant | **`19.8 MiB` loaded PSS** (`Host + worker`, 27.5&times; lower) |
-| **2 GiB warm density** | `571` cells (10 KiB app) | Dozens | **`705` warm OS workers** (10 KiB app; `500` @ 100 KiB, `135` @ 1 MiB) |
-| **Cold start (10 KiB)** | `17.44 ms` / `58.8 MiB` | `100 ms – 1 s+` | **`8.88 ms` / `7.4 MiB`** (bytecode) &middot; `9.87 ms` (source) |
+| **Elasticity &amp; reclamation** | Shared process heap; retains fragmentation &amp; peak growth under load | Slow cold starts (`100 ms – 1 s+`) penalize scale-to-zero | **Elastic OS Process Pools** — scale to zero (`0 B` idle), wake in `8.89 ms`, OS reclaims 100% of private pages on eviction |
+| **Memory under load** | High (`555.7 MiB` loaded PSS @ 64 conn) | Tens to hundreds of MiB per tenant | **`19.3 MiB` loaded PSS** (`Host + worker`, 28.8&times; lower) |
+| **2 GiB warm density** | `572` cells (10 KiB app) | Dozens | **`705` warm OS workers** (10 KiB app; `501` @ 100 KiB, `135` @ 1 MiB) |
+| **Cold start (10 KiB)** | `17.21 ms` / `57.9 MiB` | `100 ms – 1 s+` | **`8.89 ms` / `8.2 MiB`** (bytecode) &middot; `9.29 ms` (source) |
 | **JIT / RWX attack surface** | Active JIT compiler | Runtime-dependent | **Zero-JIT** (`quickjs-turbo` native register-frame VM) |
 | **Deployment model** | Standalone server | Orchestrated fleet | **Standalone Linux Host** or **Embeddable C/C++ SDK (ABI v8)** |
+
+### Elastic OS Process Pools
+
+Capsid's managed Host (`dev/v0.3.2`, [Config v2 &amp; elastic pools](docs/design/config-v2.md)) pairs hard OS-process isolation with serverless-grade elasticity:
+
+- **True Scale-to-Zero &amp; Cold-Start Queueing (`minReady: 0`)** — Idle applications drop to zero resident OS processes (`0 B` worker RAM) and wake a fresh sandboxed worker in **`8.89 ms`** (10 KiB trusted bytecode), while bounded cold queues (`queueRequests` / `queueTimeout`) absorb concurrent bursts without `503` storms.
+- **OS-Level Memory Reclamation, Zero Shared Heap Bloat** — Evicting an idle worker exits a real OS process, so Linux immediately reclaims 100% of its private physical pages with zero cross-tenant heap residue, fragmentation, or GC pause spillover.
+- **Two-Stage Tenant-Fair Eviction (`GlobalEvictionCoordinator`)** — Under a host memory ceiling (`capacity.memory`, `85% / 75%` watermark hysteresis), Capsid reclaims excess idle replicas from over-share bursty tenants *before* evicting a quiet tenant's last warm worker, while strictly protecting active HTTP requests, SSE streams, and WebSocket channels.
+- **Tenant-Wide `cgroup v2` `memory.max` Governance** — Sibling apps, elastic scale-out bursts, and overlapping blue-green generations for the same tenant share one kernel-enforced `cgroup v2` parent ceiling — keeping OOMs and memory spikes sealed inside the tenant boundary.
+- **Non-Blocking Slot Handoff &amp; Drain-Safe Rollouts** — Evicted idle workers transfer capacity slots immediately and reap asynchronously off the `~9 ms` cold-spawn path; rolling deployments drain live HTTP/SSE/WebSocket traffic on the old generation before retirement.
 
 ### Built for
 
@@ -129,42 +140,42 @@ Medians of five 15-second measured rounds with 64 in-flight requests. `Dynamic A
 
 | Stack | Tier &amp; Isolation | JSON 1 KiB | JSON 16 KiB | Stream 1 KiB | Dynamic API | Trickle PSS | Loaded PSS | 1K QPS / MiB |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Capsid** | **T1 &middot; Strict Linux OS sandbox** | **39,802** | **23,154** | **14,264** | **20,381** | **15.8 MiB** | **19.8 MiB** | **2,010.2** |
-| workerd | T1 &middot; V8 Isolate | 26,006 | 19,772 | 19,674 | 19,282 | 56.4 MiB | 544.0 MiB | 47.8 |
-| Deno | T1 &middot; Permission sandbox (`--allow-net`) | 144,741 | 47,081 | 85,488 | 56,479 | 40.8 MiB | 63.3 MiB | 2,286.6 |
-| Node `--jitless` | T2 &middot; No sandbox (V8 no-JIT) | 12,132 | 12,342 | 10,637 | 8,858 | 77.6 MiB | 86.4 MiB | 140.4 |
-| Bun `--jitless` | T2 &middot; No sandbox (JSC no-JIT) | 139,680 | 44,448 | 124,094 | 41,800 | 25.3 MiB | 28.2 MiB | 4,953.2 |
-| Node.js | T3 &middot; No sandbox (V8 JIT) | 111,184 | 42,789 | 89,322 | 52,799 | 80.9 MiB | 153.6 MiB | 723.9 |
-| Bun | T3 &middot; No sandbox (JSC JIT) | 142,294 | 44,785 | 134,532 | 77,000 | 27.6 MiB | 38.3 MiB | 3,715.2 |
+| **Capsid** | **T1 &middot; Strict Linux OS sandbox** | **41,125** | **23,202** | **14,675** | **19,512** | **16.1 MiB** | **19.3 MiB** | **2,130.8** |
+| workerd | T1 &middot; V8 Isolate | 26,121 | 19,308 | 18,823 | 19,075 | 56.4 MiB | 555.7 MiB | 47.0 |
+| Deno | T1 &middot; Permission sandbox (`--allow-net`) | 143,244 | 46,036 | 86,937 | 57,849 | 41.0 MiB | 63.4 MiB | 2,259.4 |
+| Node `--jitless` | T2 &middot; No sandbox (V8 no-JIT) | 12,281 | 12,710 | 10,616 | 9,050 | 56.4 MiB | 65.0 MiB | 188.9 |
+| Bun `--jitless` | T2 &middot; No sandbox (JSC no-JIT) | 142,484 | 44,622 | 127,275 | 44,037 | 34.3 MiB | 37.2 MiB | 3,830.2 |
+| Node.js | T3 &middot; No sandbox (V8 JIT) | 110,011 | 44,059 | 85,716 | 54,640 | 60.6 MiB | 135.0 MiB | 814.9 |
+| Bun | T3 &middot; No sandbox (JSC JIT) | 145,428 | 48,254 | 141,231 | 80,535 | 36.5 MiB | 47.5 MiB | 3,061.6 |
 
-- **27.5&times; lower loaded PSS** (`19.8 MiB` vs `544.0 MiB`) and **42.0&times; higher 1K QPS/MiB** (`2,010.2` vs `47.8`) than `workerd` under the same 64-connection load, while **outperforming `workerd` on 3 of 4 workloads** (**+53.0%** on JSON 1 KiB `39,802` vs `26,006`, **+17.1%** on JSON 16 KiB `23,154` vs `19,772`, and **+5.7%** on `Dynamic API` `20,381` vs `19,282 req/s`).
-- **3.28&times; faster than `Node --jitless`** on 1 KiB JSON (`39,802` vs `12,132 req/s`) and **2.30&times; faster on `Dynamic API`** (`20,381` vs `8,858 req/s`) in **4.36&times; less memory**, while running inside a strict Linux OS sandbox.
-- **2.08&times; higher `Dynamic API` throughput** (`20,381` vs `9,808 req/s`) and **+83.0% higher JSON 1 KiB throughput** (`39,802` vs `21,747 req/s`) than the earlier `c7a80b9` QuickJS-NG session, alongside **135 warm 1 MiB workers** (`13.8 MiB` cold bytecode PSS) on `dev/v0.3.2`.
+- **28.8&times; lower loaded PSS** (`19.3 MiB` vs `555.7 MiB`) and **45.3&times; higher 1K QPS/MiB** (`2,130.8` vs `47.0`) than `workerd` under the same 64-connection load, while **outperforming `workerd` on 3 of 4 workloads** (**+57.4%** on JSON 1 KiB `41,125` vs `26,121`, **+20.2%** on JSON 16 KiB `23,202` vs `19,308`, and **+2.3%** on `Dynamic API` `19,512` vs `19,075 req/s`).
+- **3.35&times; faster than `Node --jitless`** on 1 KiB JSON (`41,125` vs `12,281 req/s`) and **2.16&times; faster on `Dynamic API`** (`19,512` vs `9,050 req/s`) in **3.37&times; less memory**, while running inside a strict Linux OS sandbox.
+- **1.99&times; higher `Dynamic API` throughput** (`19,512` vs `9,808 req/s`) and **+89.1% higher JSON 1 KiB throughput** (`41,125` vs `21,747 req/s`) than the earlier `c7a80b9` QuickJS-NG session, alongside **135 warm 1 MiB workers** (`14.7 MiB` cold bytecode PSS) on `dev/v0.3.2`.
 
 ### Cold Start Latency (Spawn to First Validated Response)
 
 | Runtime | 10 KiB (ms / PSS) | 100 KiB (ms / PSS) | 1 MiB (ms / PSS) | Warm Request |
 | :--- | ---: | ---: | ---: | ---: |
-| **Capsid &middot; bytecode** | **8.88 ms / 7.4 MiB** | **10.15 ms / 8.0 MiB** | **20.22 ms / 13.8 MiB** | **0.071–0.074 ms** |
-| **Capsid &middot; source** | **9.87 ms / 7.4 MiB** | **14.84 ms / 8.4 MiB** | **75.20 ms / 18.5 MiB** | **0.076–0.077 ms** |
-| workerd | 17.44 ms / 58.8 MiB | 21.05 ms / 60.5 MiB | 43.41 ms / 73.9 MiB | 0.204–0.234 ms |
-| Bun | 13.79 ms / 26.2 MiB | 14.78 ms / 27.8 MiB | 60.47 ms / 36.8 MiB | 0.107–0.112 ms |
-| Deno | 71.62 ms / 39.5 MiB | 76.10 ms / 40.4 MiB | 153.56 ms / 47.9 MiB | 0.114–0.123 ms |
-| Node.js | 43.15 ms / 81.0 MiB | 48.25 ms / 81.5 MiB | 69.57 ms / 96.7 MiB | 0.177–0.187 ms |
+| **Capsid &middot; bytecode** | **8.89 ms / 8.2 MiB** | **10.22 ms / 8.9 MiB** | **21.43 ms / 14.7 MiB** | **0.071–0.076 ms** |
+| **Capsid &middot; source** | **9.29 ms / 8.2 MiB** | **14.23 ms / 9.3 MiB** | **70.55 ms / 19.4 MiB** | **0.071–0.073 ms** |
+| workerd | 17.21 ms / 57.9 MiB | 20.68 ms / 59.9 MiB | 38.45 ms / 73.0 MiB | 0.214–0.228 ms |
+| Bun | 14.15 ms / 35.3 MiB | 13.98 ms / 36.9 MiB | 66.37 ms / 45.9 MiB | 0.110–0.114 ms |
+| Deno | 30.04 ms / 38.0 MiB | 35.99 ms / 39.0 MiB | 114.36 ms / 46.0 MiB | 0.126–0.129 ms |
+| Node.js | 48.76 ms / 60.7 MiB | 48.93 ms / 61.4 MiB | 69.66 ms / 76.4 MiB | 0.187–0.207 ms |
 
 ### 2 GiB Multi-Tenant Density *(Budget-Limited, Host + Entire Worker Pool)*
 
 | Stack | Phase | 10 KiB App | 100 KiB App | 1 MiB App |
 | :--- | :--- | ---: | ---: | ---: |
 | **Capsid workers** *(Linux strict OS sandbox)* | Cold (1 req) | **709** | **502** | **135** |
-| **Capsid workers** *(Linux strict OS sandbox)* | Warm (100 req) | **705** | **500** | **135** |
-| workerd cells *(V8 Isolates)* | Cold (1 req) | 947 | 809 | 251 |
-| workerd cells *(V8 Isolates)* | Warm (100 req) | 571 | 525 | 264 |
+| **Capsid workers** *(Linux strict OS sandbox)* | Warm (100 req) | **705** | **501** | **135** |
+| workerd cells *(V8 Isolates)* | Cold (1 req) | 948 | 808 | 254 |
+| workerd cells *(V8 Isolates)* | Warm (100 req) | 572 | 524 | 264 |
 
-Capsid retains **99.4%–100%** of its cold count after 100 warm requests per worker — fitting **+23.5% more warm 10 KiB workers** inside 2 GiB than `workerd`, each in its own strict Linux OS sandbox.
+Capsid retains **99.4%–100%** of its cold count after 100 warm requests per worker — fitting **+23.3% more warm 10 KiB workers** inside 2 GiB than `workerd`, each in its own strict Linux OS sandbox.
 
 > [!NOTE]
-> **Measurement provenance &amp; honest trade-offs:** These are measurements of a **local Release/LTO rebuild** of the untagged `dev/v0.3.2` commit `d0adc21` (`quickjs-turbo v0.15.1-turbo.8`, 2026-11-24 UTC), on an i5-12400F under WSL2 with logical CPUs 0–3 assigned — **not** measurements of any distributed release package. Capsid's cold-start lane measures spawn-to-first-response over the C ABI (excluding the probe), whereas reference stacks use HTTP transport, so do not read cold-start times as an engine-only comparison. On raw single-process peak throughput without memory/sandbox constraints, JIT runtimes (`Bun`, `Deno`, `Node.js`) remain faster; Capsid optimizes for **process isolation per tenant, predictable PSS, and zero-JIT density**.
+> **Measurement provenance &amp; honest trade-offs:** These are measurements of a **local Release/LTO rebuild** of the untagged `dev/v0.3.2` commit `24671d9` (`quickjs-turbo v0.15.1-turbo.8`, 2026-11-27 UTC), on an i5-12400F under WSL2 with logical CPUs 0–3 assigned — **not** measurements of any distributed release package. Capsid's cold-start lane measures spawn-to-first-response over the C ABI (excluding the probe), whereas reference stacks use HTTP transport, so do not read cold-start times as an engine-only comparison. On raw single-process peak throughput without memory/sandbox constraints, JIT runtimes (`Bun`, `Deno`, `Node.js`) remain faster; Capsid optimizes for **process isolation per tenant, predictable PSS, and zero-JIT density**.
 > [Full seven-stack results &amp; methodology](docs/reference/benchmarks.md) &middot; [Density protocol](bench/SPEC.md) &middot; [Replay the archived measurements](perf-site/README.md#restore-and-independently-check-an-existing-point)
 
 ---

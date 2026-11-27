@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Capsid — Secure, Embeddable, High-Density JavaScript Runtime for Untrusted AI Code</title>
-<meta name="description" content="A secure, embeddable, high-density JavaScript runtime for untrusted AI code. Mandatory Linux Namespaces, Landlock, and Seccomp isolation with sub-20 ms cold starts and verifiable benchmarks.">
-<meta property="og:title" content="Capsid — Run untrusted AI code at micro-container density">
-<meta property="og:description" content="A secure, embeddable, high-density JavaScript runtime for untrusted AI code.">
+<title>Capsid — Elastic OS Process Pools &amp; High-Density JavaScript Runtime for Untrusted AI Code</title>
+<meta name="description" content="A secure, embeddable, high-density JavaScript runtime powered by Elastic OS Process Pools. Mandatory Linux Namespaces, Landlock, Seccomp, and cgroup v2 isolation with sub-10 ms cold starts and verifiable benchmarks.">
+<meta property="og:title" content="Capsid — Run untrusted AI code in elastic OS process pools">
+<meta property="og:description" content="A secure, embeddable, high-density JavaScript runtime with Elastic OS Process Pools, scale-to-zero, and tenant-fair Linux sandboxing.">
 <meta property="og:image" content="logo.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g1' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2300D4FF'/%3E%3Cstop offset='1' stop-color='%232563EB'/%3E%3C/linearGradient%3E%3ClinearGradient id='g2' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23C84BFF'/%3E%3Cstop offset='1' stop-color='%232563EB'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M9 28V19L32 6L55 19V25' fill='none' stroke='url(%23g1)' stroke-width='5.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M55 36V45L32 58L9 45V39' fill='none' stroke='url(%23g2)' stroke-width='5.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpolygon points='32,16 46,24 32,32 18,24' fill='url(%23g1)'/%3E%3Cpolygon points='18,24 32,32 32,48 18,40' fill='%231D4ED8'/%3E%3Cpolygon points='46,24 32,32 32,48 46,40' fill='%230B1B4D'/%3E%3C/svg%3E">
@@ -979,13 +979,13 @@
   <!-- ================= 01. Product Hero ================= -->
   <header class="hero">
     <div>
-      <div class="hero-eyebrow"><span class="pulse"></span>OS-ISOLATED JS RUNTIME &middot; C/C++ ABI v7</div>
-      <h1>Run untrusted AI code <span class="grad">at micro-container density.</span></h1>
+      <div class="hero-eyebrow"><span class="pulse"></span>ELASTIC OS PROCESS POOLS &middot; C/C++ ABI v8</div>
+      <h1>Run untrusted AI code <span class="grad">in elastic OS process pools.</span></h1>
       <p class="hero-desc" id="hero-desc">
-        A <b>secure, embeddable, high-density JavaScript runtime</b>. Isolate untrusted
-        <span class="mono">fetch(request)</span> handlers inside mandatory Linux
-        <b>Namespaces, Landlock, and Seccomp</b> — sub-20&nbsp;ms cold starts, low-tens-of-MiB
-        PSS, and hundreds of workers per 2&nbsp;GiB.
+        A <b>secure, embeddable, high-density JavaScript runtime</b> powered by <b>Elastic OS Process Pools</b>.
+        Isolate untrusted <span class="mono">fetch(request)</span> handlers inside mandatory Linux
+        <b>Namespaces, Landlock, Seccomp, and cgroup v2</b> — scaling from zero to hundreds of warm workers
+        per 2&nbsp;GiB with sub-10&nbsp;ms cold starts and full OS memory reclamation.
       </p>
 
       <div class="hero-cta">
@@ -1033,7 +1033,7 @@
   },
 };</pre>
 
-      <pre class="stage-code is-hidden" id="code-panel-cpp"><span class="tok-c">// Embed directly in your C/C++ Host (ABI v7, non-blocking IPC)</span>
+      <pre class="stage-code is-hidden" id="code-panel-cpp"><span class="tok-c">// Embed directly in your C/C++ Host (ABI v8, non-blocking IPC)</span>
 <span class="tok-k">#include</span> <span class="tok-s">&lt;capsid/runtime.hpp&gt;</span>
 
 capsid_worker_config cfg;
@@ -1044,14 +1044,14 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
 
       <div class="capsule-flow">
         <div class="capsule-flow-title">
-          <span>ISOLATION PIPELINE</span>
+          <span>ELASTIC ISOLATION PIPELINE</span>
           <span>ZERO JIT RWX</span>
         </div>
         <div class="capsule-nodes">
           <div class="cnode">
             <div class="cn-k">Host</div>
-            <div class="cn-v">Policy &amp; Limits</div>
-            <div class="cn-s">TLS &middot; Credits</div>
+            <div class="cn-v">Elastic Pool</div>
+            <div class="cn-s">Fair LRU &middot; cgroup v2</div>
           </div>
           <div class="capsule-arrow">&rarr;</div>
           <div class="cnode is-shell">
@@ -1062,8 +1062,8 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <div class="capsule-arrow">&rarr;</div>
           <div class="cnode">
             <div class="cn-k">Worker</div>
-            <div class="cn-v" id="stage-engine-name">QuickJS-NG</div>
-            <div class="cn-s" id="stage-worker-stat">18.6 MiB &middot; 18.5 ms</div>
+            <div class="cn-v" id="stage-engine-name">quickjs-turbo</div>
+            <div class="cn-s" id="stage-worker-stat">19.3 MiB &middot; 21.4 ms</div>
           </div>
         </div>
       </div>
@@ -1088,7 +1088,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         </div>
         <div class="st-tag">01 / Hard OS Isolation</div>
         <h3>Default-deny Linux capsule</h3>
-        <p>Every tenant runs in its own worker fenced by <b>Namespaces, Landlock, and Seccomp</b>.
+        <p>Every tenant runs in its own OS process fenced by <b>Namespaces, Landlock, Seccomp, and cgroup v2</b>.
            Outbound egress fails closed by default; <span class="mono">tjs:*</span>, FFI, and raw sockets stay disabled.</p>
         <div class="story-metric"><span>JIT RWX pages</span><strong>Zero</strong></div>
       </div>
@@ -1097,22 +1097,24 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         <div class="story-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
-        <div class="st-tag">02 / Scale-to-Zero</div>
-        <h3>Sub-20 ms 1 MiB cold starts</h3>
-        <p>Precompiled <span id="story-engine-name">QuickJS-NG</span> bytecode removes parse stalls from 10&nbsp;KiB to 1&nbsp;MiB,
-           waking isolated workers faster than V8, JSC, or containers with predictable latency.</p>
-        <div class="story-metric"><span>10 KiB / 1 MiB cold</span><strong id="story-cold-val">5.5 / 18.5 ms</strong></div>
+        <div class="st-tag">02 / Elastic Process Pools</div>
+        <h3>Scale-to-zero with sub-10 ms wakeup</h3>
+        <p>Idle apps drop to <b>zero processes (0&nbsp;B RAM)</b> and wake on demand with precompiled
+           <span id="story-engine-name">quickjs-turbo</span> bytecode, while cold request queueing absorbs bursts and
+           process exit reclaims <b>100% of private pages</b> — zero shared heap bloat.</p>
+        <div class="story-metric"><span>10 KiB / 1 MiB cold</span><strong id="story-cold-val">8.9 / 21.4 ms</strong></div>
       </div>
 
       <div class="story-card">
         <div class="story-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
         </div>
-        <div class="st-tag">03 / Multi-Tenant Density</div>
-        <h3>Hundreds of tenants in 2 GiB</h3>
-        <p>Without multi-hundred-MiB JIT code caches, Capsid's host + strict worker tree stays in the
-           <b>low tens of MiB</b> and preserves 99%+ warm pool capacity.</p>
-        <div class="story-metric"><span>2 GiB warm pool</span><strong id="story-dens-val">731 workers</strong></div>
+        <div class="st-tag">03 / Tenant-Fair Density</div>
+        <h3>Hundreds of workers + fair eviction</h3>
+        <p>Host + strict worker stays in the <b>low tens of MiB</b> with 99%+ warm retention. Two-stage tenant-fair
+           eviction reclaims bursty excess before touching quiet tenants, backed by per-tenant Linux
+           <b>cgroup v2</b> <span class="mono">memory.max</span> and drain-safe rollouts.</p>
+        <div class="story-metric"><span>2 GiB warm pool</span><strong id="story-dens-val">705 workers</strong></div>
       </div>
     </div>
   </section>
@@ -1134,7 +1136,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         <p>Run LLM-generated JavaScript tools and transforms inside a fresh kernel-enforced sandbox
            with explicit egress allowlists, hard deadlines, and instant teardown.</p>
         <div class="usecase-chips">
-          <span id="uc-cold-10k">6.9 ms cold (10 KiB)</span><span>Default-deny egress</span><span>Zero ambient FS</span>
+          <span id="uc-cold-10k">8.9 ms cold (10 KiB)</span><span>Default-deny egress</span><span>Zero ambient FS</span>
         </div>
       </div>
 
@@ -1145,22 +1147,22 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         </div>
         <h3>Customer Plugins &amp; Webhooks</h3>
         <p>Give every tenant custom request hooks, auth rules, or transforms without per-tenant containers.
-           A crash or OOM in one worker never impacts neighboring tenants.</p>
+           Tenant-fair eviction and per-tenant <span class="mono">cgroup v2</span> limits contain bursts and OOMs inside each tenant.</p>
         <div class="usecase-chips">
-          <span id="uc-dens-2g">729 workers / 2 GiB</span><span>Process isolation</span><span>Binding RPC</span>
+          <span id="uc-dens-2g">705 workers / 2 GiB</span><span>Tenant cgroup v2</span><span>Binding RPC</span>
         </div>
       </div>
 
       <div class="usecase-card">
         <div class="usecase-head">
           <span class="usecase-num">03 / SERVERLESS &amp; EDGE</span>
-          <span class="usecase-pill">Scale-to-Zero</span>
+          <span class="usecase-pill">Elastic Pools</span>
         </div>
         <h3>Long-Tail FaaS &amp; Edge Routing</h3>
-        <p>Stop paying idle RAM tax to keep rarely-invoked functions warm. Pair sub-20&nbsp;ms cold starts
-           with low-MiB steady-state PSS and Web Fetch / Streams / WebSocket APIs.</p>
+        <p>Stop paying idle RAM tax to keep rarely-invoked functions warm. Scale idle apps to zero OS processes,
+           wake in sub-10&nbsp;ms on demand with cold queueing, and reclaim 100% of private pages on eviction while protecting active SSE and WebSocket streams.</p>
         <div class="usecase-chips">
-          <span id="uc-mem-tree">18.5 MiB tree</span><span id="uc-eff-qps">1,175 QPS / MiB</span><span>Fetch + WS v4</span>
+          <span id="uc-mem-tree">19.3 MiB tree</span><span id="uc-eff-qps">2,131 QPS / MiB</span><span>Scale-to-zero</span>
         </div>
       </div>
 
@@ -1170,10 +1172,10 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-pill">Embeddable</span>
         </div>
         <h3>Embeddable C11 / C++11 Engine</h3>
-        <p>Embed into gateways, proxies, or databases via <span class="mono">&lt;capsid/runtime.h&gt;</span> (ABI v7).
+        <p>Embed into gateways, proxies, or databases via <span class="mono">&lt;capsid/runtime.h&gt;</span> (ABI v8).
            Your Host owns listeners, TLS, credits, backpressure, and trusted credential Bindings.</p>
         <div class="usecase-chips">
-          <span>C11 / C++11 ABI v7</span><span>CMake SDK</span><span>Linux &middot; macOS &middot; Win</span>
+          <span>C11 / C++11 ABI v8</span><span>CMake SDK</span><span>Linux &middot; macOS &middot; Win</span>
         </div>
       </div>
     </div>
@@ -1538,11 +1540,12 @@ $sourceName = ([System.Uri]$bundle).AbsoluteUri
         <div class="qs-info">
           <div class="qs-badge"><span class="qs-idx">04</span>Optional · Production</div>
           <h3>Bundle npm deps &amp; compile trusted bytecode</h3>
-          <p>Apps with TypeScript or npm dependencies (Hono, itty-router) bundle ahead of time into one ESM file.
-             For sub-20&nbsp;ms cold starts on large bundles, precompile trusted <span id="qs-engine-name">QuickJS-NG</span> bytecode with the matching
+          <p>Apps with TypeScript or npm dependencies (Hono, itty-router, H3, Elysia) bundle ahead of time into one ESM file.
+             For sub-10&nbsp;ms (10&nbsp;KiB) and ~21&nbsp;ms (1&nbsp;MiB) cold starts, precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode with the matching
              release's <span class="mono">capsid-bytecode-compile</span> and sign <span class="mono">message.bin</span>
-             offline (see <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/host-config.md" target="_blank" rel="noopener">Host configuration</a>).</p>
-          <div class="qs-meta"><span>Sub-20 ms 1 MiB cold start</span><span>Signed attestation</span></div>
+             offline (see <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host configuration</a>).
+             Building <span class="mono">dev/v0.3.2</span> from source? Use Config v2 (<span class="mono">capsid/app-v2</span>) and <span class="mono">capsid-host --app-dir .</span> with Elastic OS Process Pools.</p>
+          <div class="qs-meta"><span>8.9 ms (10 KiB) / 21.4 ms (1 MiB)</span><span>Signed attestation</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
@@ -1573,9 +1576,10 @@ $sourceName = ([System.Uri]$bundle).AbsoluteUri
     </div>
 
     <div class="quick-links">
-      <a class="btn-primary" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/getting-started.md" target="_blank" rel="noopener">Getting Started Guide &rarr;</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/host-integration.md" target="_blank" rel="noopener">Embed C/C++ SDK</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/linux-sandbox.md" target="_blank" rel="noopener">Linux Strict Sandbox</a>
+      <a class="btn-primary" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/run-application.md" target="_blank" rel="noopener">Getting Started Guide &rarr;</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md" target="_blank" rel="noopener">Elastic Process Pools &amp; Config v2</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/embedding-api.md" target="_blank" rel="noopener">Embed C/C++ SDK (ABI v8)</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/linux-sandbox.md" target="_blank" rel="noopener">Linux Strict Sandbox</a>
       <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/releases" target="_blank" rel="noopener">All Releases &amp; SHA-256</a>
     </div>
   </section>
@@ -1616,10 +1620,10 @@ $sourceName = ([System.Uri]$bundle).AbsoluteUri
     </div>
     <div class="foot-links">
       <a href="https://github.com/rowanellis-113/capsid" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/README.md" target="_blank" rel="noopener">Docs</a>
-      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/SECURITY.md" target="_blank" rel="noopener">Security</a>
+      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/README.md" target="_blank" rel="noopener">Docs</a>
+      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/SECURITY.md" target="_blank" rel="noopener">Security</a>
       <a href="https://github.com/rowanellis-113/capsid/releases" target="_blank" rel="noopener">Releases</a>
-      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/LICENSE" target="_blank" rel="noopener">Apache-2.0</a>
+      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/LICENSE" target="_blank" rel="noopener">Apache-2.0</a>
     </div>
   </footer>
 </div>
@@ -2028,7 +2032,7 @@ function renderReleaseContext() {
       " <b>The prerelease source was rebuilt locally; the distributed binaries were not measured.</b>" :
       " <b>The measured local rebuild does not measure distributed release binaries.</b>") +
     " The archival v0.3.0 label is not a stable-release claim. " +
-    '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/docs/current-status.md">Sources and limits</a>' +
+    '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/release-status.md">Sources and limits</a>' +
     " · status captured " + esc(s.asOfUTC.slice(0, 10)) + ".";
 }
 function renderRecordSelector() {
@@ -2867,7 +2871,8 @@ function renderScenarioGuide() {
   var dwWk = d && d.workerd && d.workerd["warm@10k"];
 
   var capBullets = [
-    "<b>OS isolation:</b> Namespaces + Landlock + Seccomp + default-deny egress, zero JIT RWX pages.",
+    "<b>OS isolation:</b> Namespaces + Landlock + Seccomp + tenant cgroup v2, default-deny egress, zero JIT RWX pages.",
+    "<b>Elastic process pools:</b> Scale-to-zero (<span class=\"mono\">minReady: 0</span>), OS page reclamation on eviction, two-stage tenant-fair LRU, and drain-safe rolling generations.",
     bc10 && bc1m
       ? "<b>Cold start:</b> <b>" + fmt(bc10.totalMs, 1) + " ms</b> (10 KiB) / <b>" + fmt(bc1m.totalMs, 1) + " ms</b> (1 MiB) at <b>" + fmt(bc10.pssMb, 1) + "\u2013" + fmt(bc1m.pssMb, 1) + " MiB</b>."
       : "<b>Predictable startup:</b> compact " + esc(engineNameFor(P)) + " bytecode without multi-hundred-MiB JIT warm-up.",
@@ -3746,7 +3751,7 @@ function renderMethod() {
       ' archived files rehashed before staging. Binary identities are recorded in each lane manifest.</div>' +
       (packed ? '<p class="footnote">Complete compressed transport; restore into a new scratch root, then replay the ordinary validators. ' +
         '<a href="evidence-index.json">Full original file/digest index</a> · <a href="archive-index.json">Transport/part index</a> · ' +
-        '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.1/perf-site/README.md">Replay instructions</a></p>' : "") +
+        '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/perf-site/README.md">Replay instructions</a></p>' : "") +
       '<details style="margin-top:12px"><summary>Archive downloads and SHA-256</summary>' +
       '<ul class="archive-list">' + links + "</ul></details>" :
       '<div class="footnote" style="margin-top:20px">Historical observation: the current provenance and ' +

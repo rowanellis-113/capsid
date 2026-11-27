@@ -1,10 +1,10 @@
 {
   "checkoutClean": true,
-  "gitEntries": 5516,
+  "gitEntries": 5515,
   "schema": 1,
-  "sourceCommit": "d0adc21fcfb5bf75770977c8f1b0ba3c3c0b07b6",
+  "sourceCommit": "24671d9957eee59d93564095c8b3af830301104f",
   "sourceTag": "",
-  "sourceTree": "180f6ad1d08f6bc55ab1b8e54d2915472f36c672",
+  "sourceTree": "f34e665ad95b1ca4fd4cdfc40d023492e72aa4e2",
   "submodules": [
     {
       "commit": "8fcb4751a66986bd42b11de3012e967d77790923",
@@ -67,6 +67,6 @@
       "path": "vendor/txiki.js/deps/wamr"
     }
   ],
-  "treeListingCommand": "git ls-tree -r --full-tree d0adc21fcfb5bf75770977c8f1b0ba3c3c0b07b6",
-  "treeListingSHA256": "e0090df7a1c0c9c671aa278a7d06cb2a65d13aa80f8b45a79ed8d458c1380aba"
+  "treeListingCommand": "git ls-tree -r --full-tree 24671d9957eee59d93564095c8b3af830301104f",
+  "treeListingSHA256": "e0b80be54c0d5aa13e80635d45f3152cc2498c97f95fa78eafd64dd7a1855487"
 }

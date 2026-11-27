@@ -310,7 +310,7 @@ try {
   assert.equal(selector.value, String(acceptedIndex));
   assert.equal(acceptedPoint.version, '0.3.2-dev');
   assert.equal(acceptedPoint.git.tag, '');
-  assert.match(elements.get('nav-meta').textContent, /0\.3\.2-dev dev snapshot · d0adc21f/);
+  assert.match(elements.get('nav-meta').textContent, /0\.3\.2-dev dev snapshot · 24671d99/);
   assert.match(
     elements.get('release-context').innerHTML,
     /does not measure distributed release binaries/,

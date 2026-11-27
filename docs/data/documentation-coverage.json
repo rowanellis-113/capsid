@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "2ff117e8ab04c126b47d37a73292d4b2f93da4205f744459c99d7899e14ec82e",
+      "sha256": "3d29b0872cdb8145a0faf58cba81b5bef8f4bc40fa29b97f9d80897603f66220",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
     },
     {
@@ -56,7 +56,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "035dc5dd53805f3c7af1c26dd4538a6d9cfc98ae97d8d2dec48588d7c01d1518",
+      "sha256": "1588566a5f58f7302a3e14669460d68882dfdff51197942158c1b3beb5d2f509",
       "review": "Normative protocol constants/budgets retained; status/current acceptance/transport and same-version history caveat corrected."
     },
     {
@@ -64,7 +64,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "2af2e0bbdc6525f64c77b289167dbafe1a5119a84ed59a0d833ecc2a7166b874",
+      "sha256": "f40ba064f840151e590ff455e9567bd543f1c80a5da1b88212f24f19e4ad25fe",
       "review": "Original complete lane/point/round/response/PSS/identity controls retained; bounded hashed compression is transport only."
     },
     {
@@ -88,15 +88,15 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "ba7533f6dbd76c10bda64a1ff0688147251fec9374e9927316142aea67bb10a4",
-      "review": "Config v2 orthogonal host-v2/app-v2 schema, managed-isomorphic local CLI, and v0.3.2 elastic pools + two-phase fair-share memory LRU implemented on dev/v0.3.2; v0.3.1-beta.1 release baseline stays separate in current-status.md."
+      "sha256": "71e2095ea994ca7c20b7b8646dce45f9e57b1e8ffd97475a5effd9672d3b2e0b",
+      "review": "Config v2 orthogonal host-v2/app-v2 schema, managed-isomorphic local CLI, and v0.3.2 Elastic OS Process Pools + two-phase fair-share memory LRU implemented on dev/v0.3.2; v0.3.1-beta.1 release baseline stays separate in docs/reference/release-status.md."
     },
     {
       "path": "docs/design/host-architecture.md",
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "e87e90a97549c50a9fd72f1bd2a20719ced47498254bb6deb534b7c99756cdc3",
+      "sha256": "42aa610f05160dd24f2f069e031288391b0f879d779f276dbbc5bae1002009e0",
       "review": "Current Host architecture/ownership/authority, experimental deployment and separate build/test/performance qualification scopes.",
       "archivedSource": "docs/history/archives/2026-11-17/host-technical-design-review.md.txt"
     },
@@ -641,7 +641,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "e7ffa71d9631d03ff8eed18d6c3e828d8680192bb3236a7138ea7746320a4eca",
+      "sha256": "fc8ab8cff234fa4f443dd08cd251a638467af2b09f57f8baf8533dc62b217178",
       "review": "Version-scoped overview of three design fixes, observed regression results, remaining release gates and independent probes."
     },
     {
@@ -689,8 +689,8 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "1cfeba935cf51cbcfba93a316c0473e015f6d553f0dd6152c9c25b5adb181fe1",
-      "review": "Accepted 82eaab9 source/CPU/protocol evidence, unchanged historical records and no claim of beta.5 performance or formal paired improvement.",
+      "sha256": "4bc7c903aae148fe2f9293d377aca25fc4e7d6ad6038d991144fe85755e4fd8e",
+      "review": "Accepted dev/v0.3.2 (24671d9) formal v3 source/CPU/protocol evidence, preserved v0.3.1-beta.1/v0.3.0-beta.5/beta.4/v1 records, and no claim of distributed-binary measurement or formal paired gain.",
       "archivedSource": "docs/history/archives/2026-11-17/performance-benchmarks.md.txt"
     },
     {
@@ -803,7 +803,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "577dca612cf5a211118ed5f8cca707a8ad94fcc5a386ed5441e75cf9ab835618",
+      "sha256": "f0bf50e3716f34b78b66cec35e3274d4291c1eb12fc59efdb8760a7ab9dd742f",
       "review": "Development-branch scope and dated published-release, compatibility and benchmark records."
     },
     {
@@ -860,7 +860,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "f2fff815ca47b455e48dd3170e82f7950ae6b243efe1cbbb273066fa4a9017ee",
+      "sha256": "d65efe93125ee59a5a651ea2eb9369ac8e43c356aa7f4257efc45023513ffcb0",
       "review": "Generated files, verified archive replay, current prerelease versus measured source boundaries and deployment requirements."
     },
     {

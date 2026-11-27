@@ -18,53 +18,53 @@
   "lanes": {
     "cold-start": {
       "cells": 24,
-      "checksumSHA256": "8d3b061c5aacbc05ec2185bd6af18763c64e28c89d3c9b0277a854742e9b4815",
+      "checksumSHA256": "3af489a506f8f66745882fa4810d092c7afa8746ba619c6e56057235a85906bd",
       "evidenceFiles": 1213,
       "passed": true
     },
     "density": {
       "cells": 12,
-      "checksumSHA256": "4acea65574af74bb2b84013636cd6f15bb768c72b59eaf48c1a95886a9ead2bc",
+      "checksumSHA256": "0d7bd3bea3b0e3bcc7d3ad1e86dafc25b66de237324c4ed8e7b3299af25e5b25",
       "evidenceFiles": 2742,
       "passed": true
     },
     "qps": {
       "cells": 28,
-      "checksumSHA256": "ad50ed8081f90cf56a252b25777ba98c387d360865a7f302b9b7d80ce28fa5d1",
+      "checksumSHA256": "479b2569d1210846591433a157016b5af47c56547cacbb65e07503fd9ad41dfb",
       "evidenceFiles": 575,
       "passed": true
     }
   },
-  "measuredSourceFilesVerified": 5516,
+  "measuredSourceFilesVerified": 5515,
   "measuredSourceManifest": "docs/data/performance-source-manifest-v032.json",
   "measurementBuild": "local-rebuild",
   "physicalWindowsHostExclusivityNotClaimed": true,
   "pointRelease": "v0.3.2-dev",
   "pointVersion": "0.3.2-dev",
-  "productCheckout": "d0adc21fcfb5bf75770977c8f1b0ba3c3c0b07b6",
-  "productTree": "180f6ad1d08f6bc55ab1b8e54d2915472f36c672",
+  "productCheckout": "24671d9957eee59d93564095c8b3af830301104f",
+  "productTree": "f34e665ad95b1ca4fd4cdfc40d023492e72aa4e2",
   "publishedReleaseAssetsMeasured": false,
   "quietWindows": [
     {
-      "aggregateIdle": 1.0,
-      "attempt": 2,
+      "aggregateIdle": 0.9800099950024987,
+      "attempt": 1,
       "cpuDelta": {
         "cpu0": [
           0,
           0,
           0,
-          500,
+          499,
           0,
           0,
-          0,
+          2,
           0
         ],
         "cpu1": [
+          32,
           0,
-          0,
-          0,
-          500,
-          0,
+          4,
+          464,
+          1,
           0,
           0,
           0
@@ -73,7 +73,7 @@
           0,
           0,
           0,
-          500,
+          499,
           0,
           0,
           0,
@@ -86,21 +86,21 @@
           499,
           0,
           0,
-          0,
+          1,
           0
         ]
       },
-      "endedAt": "2026-11-24T14:20:24.453544+00:00",
+      "endedAt": "2026-11-27T05:53:21.648953+00:00",
       "idle": {
-        "cpu0": 1.0,
-        "cpu1": 1.0,
+        "cpu0": 0.9960079840319361,
+        "cpu1": 0.9261477045908184,
         "cpu2": 1.0,
-        "cpu3": 1.0
+        "cpu3": 0.998
       },
       "phase": "before-cold",
       "physicalHostExclusivityClaimed": false,
       "quiet": true,
-      "startedAt": "2026-11-24T14:20:19.452959+00:00"
+      "startedAt": "2026-11-27T05:53:16.648452+00:00"
     },
     {
       "aggregateIdle": 1.0,
@@ -147,7 +147,7 @@
           0
         ]
       },
-      "endedAt": "2026-11-24T14:26:40.407652+00:00",
+      "endedAt": "2026-11-27T05:59:29.001200+00:00",
       "idle": {
         "cpu0": 1.0,
         "cpu1": 1.0,
@@ -157,7 +157,7 @@
       "phase": "before-qps",
       "physicalHostExclusivityClaimed": false,
       "quiet": true,
-      "startedAt": "2026-11-24T14:26:35.407303+00:00"
+      "startedAt": "2026-11-27T05:59:24.000210+00:00"
     },
     {
       "aggregateIdle": 1.0,
@@ -204,7 +204,7 @@
           0
         ]
       },
-      "endedAt": "2026-11-24T15:19:13.304595+00:00",
+      "endedAt": "2026-11-27T06:52:21.887180+00:00",
       "idle": {
         "cpu0": 1.0,
         "cpu1": 1.0,
@@ -214,10 +214,10 @@
       "phase": "before-density",
       "physicalHostExclusivityClaimed": false,
       "quiet": true,
-      "startedAt": "2026-11-24T15:19:08.304230+00:00"
+      "startedAt": "2026-11-27T06:52:16.886762+00:00"
     },
     {
-      "aggregateIdle": 1.0,
+      "aggregateIdle": 0.999000999000999,
       "attempt": 1,
       "cpuDelta": {
         "cpu0": [
@@ -227,7 +227,7 @@
           500,
           0,
           0,
-          0,
+          2,
           0
         ],
         "cpu1": [
@@ -261,9 +261,9 @@
           0
         ]
       },
-      "endedAt": "2026-11-24T16:13:40.889304+00:00",
+      "endedAt": "2026-11-27T07:46:43.960159+00:00",
       "idle": {
-        "cpu0": 1.0,
+        "cpu0": 0.9960159362549801,
         "cpu1": 1.0,
         "cpu2": 1.0,
         "cpu3": 1.0
@@ -271,7 +271,7 @@
       "phase": "after-density",
       "physicalHostExclusivityClaimed": false,
       "quiet": true,
-      "startedAt": "2026-11-24T16:13:35.888835+00:00"
+      "startedAt": "2026-11-27T07:46:38.959507+00:00"
     }
   ],
   "referenceArchivesSHA256": {
@@ -280,9 +280,9 @@
     "node-v26.13.1-linux-x64.tar.xz": "5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864",
     "workerd-linux-64.gz": "4e4bf157baff80337937b09474013f7761efcb791dd923acf50c3b995a3126d0"
   },
-  "reviewedUTC": "2026-11-24T16:13:40Z",
-  "session": "local-wsl-v032-dev-v3-20261124T141726Z-d0adc21",
+  "reviewedUTC": "2026-11-27T07:46:44Z",
+  "session": "local-wsl-v032-dev-v3-20261127T055316Z-24671d9",
   "sourceTag": "",
-  "standalonePointSHA256": "db5e9ad1474129363e09db6762852f33bce405dfee0b19e1ce7790aaa5b86f70",
+  "standalonePointSHA256": "01d0072936b707310da37812f066fc0829b7c984d21b21300ba46e7d1d975f62",
   "wholeLocalSessionAccepted": true
 }
