@@ -285,15 +285,19 @@ void shared_service_budget(const char* worker) {
     require(wait_until([&] { return rb.done(3, "started") && budget->snapshot().active == 1; }),
             "other generation reuses returned service capacity");
     echo(b);
-    auto previous = pb->current_worker();
-    rb.expect_exit = true;
-    require(pb->recycle_worker(previous), "replacement exercises shared budget inheritance");
-    require(wait_until([&] {
-                auto* current = pb->current_worker();
-                return previous->exited() && pb->ready_workers() == 1 && current != nullptr &&
-                       current != previous && budget->channels() == 0;
-            }),
-            "recycle releases old service slot before replacement READY");
+    {
+        auto previous = pb->current_worker_snapshot();
+        require(previous != nullptr, "active executor before recycle");
+        rb.expect_exit = true;
+        require(pb->recycle_worker(previous.get()),
+                "replacement exercises shared budget inheritance");
+        require(wait_until([&] {
+                    auto* current = pb->current_worker();
+                    return previous->exited() && pb->ready_workers() == 1 && current != nullptr &&
+                           current != previous.get() && budget->channels() == 0;
+                }),
+                "recycle releases old service slot before replacement READY");
+    }
     rb.expect_exit = false;
     a.socket.reset();
     a.head.clear();
@@ -349,23 +353,27 @@ void replace_live(const char* worker, bool crash) {
     const auto channels = budget->channels(), dials = budget->dials(),
                bytes = budget->queued_bytes();
     auto pool = start(worker, peer, responses);
-    auto previous = pool->current_worker();
-    responses.expect_exit = true;
-    if (crash) {
-        const auto pid = child_worker();
-        require(pid > 0 && kill(pid, SIGKILL) == 0, "kill worker with live socket");
-    } else
-        require(pool->recycle_worker(previous), "health recycle with live socket accepted");
-    require(wait_until([&] { return peer.closed(); }),
-            "old executor closes actual socket on crash/recycle");
-    require(wait_until(
-                [&] {
-                    auto* current = pool->current_worker();
-                    return previous->exited() && pool->ready_workers() == 1 && current != nullptr &&
-                           current != previous;
-                },
-                std::chrono::seconds(10)),
-            "same generation replacement reaches READY");
+    {
+        auto previous = pool->current_worker_snapshot();
+        require(previous != nullptr, "active executor before replacement");
+        responses.expect_exit = true;
+        if (crash) {
+            const auto pid = child_worker();
+            require(pid > 0 && kill(pid, SIGKILL) == 0, "kill worker with live socket");
+        } else
+            require(pool->recycle_worker(previous.get()),
+                    "health recycle with live socket accepted");
+        require(wait_until([&] { return peer.closed(); }),
+                "old executor closes actual socket on crash/recycle");
+        require(wait_until(
+                    [&] {
+                        auto* current = pool->current_worker();
+                        return previous->exited() && pool->ready_workers() == 1 &&
+                               current != nullptr && current != previous.get();
+                    },
+                    std::chrono::seconds(10)),
+                "same generation replacement reaches READY");
+    }
     budget_returned(channels, dials, bytes);
     responses.expect_exit = false;
     begin(pool->pick_worker(), 2, "/hello");

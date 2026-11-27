@@ -962,15 +962,18 @@ void test_quarantine_ordering(const std::string& mode, Fixtures& fixtures) {
     const auto active_path = fixtures.state_root + "/apps/orders/active.json";
     const auto exhaust = [&](const std::shared_ptr<GenerationPool>& pool,
                              const std::function<void()>& before_quarantine = {}) {
-        auto* first = pool->current_worker();
-        require(pool->recycle_worker(first), "first actual recycle accepted");
-        require(wait_for(
-                    [&] {
-                        return first->exited() && pool->ready_workers() == 1 &&
-                               pool->current_worker() != first;
-                    },
-                    std::chrono::seconds(20 * kTestWaitScale)),
-                "quarantine fixture replacement is READY and original reaped");
+        {
+            auto first = pool->current_worker_snapshot();
+            require(first != nullptr, "active worker before first recycle");
+            require(pool->recycle_worker(first.get()), "first actual recycle accepted");
+            require(wait_for(
+                        [&] {
+                            return first->exited() && pool->ready_workers() == 1 &&
+                                   pool->current_worker() != first.get();
+                        },
+                        std::chrono::seconds(20 * kTestWaitScale)),
+                    "quarantine fixture replacement is READY and original reaped");
+        }
         generation_round_trip(*pool, 17002, prepared || aborted ? "managed-v2" : "managed-ok");
         if (before_quarantine)
             before_quarantine();
