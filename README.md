@@ -38,7 +38,7 @@ Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in
     <td align="center" width="25%">
       <br />
       <strong><code>8.89 ms</code></strong><br />
-      <sub><strong>Cold Start to First Response</strong><br />8.2 MiB PSS &middot; trusted bytecode</sub>
+      <sub><strong>C ABI Cold Start to First Response</strong><br />8.2 MiB PSS &middot; 10 KiB trusted bytecode</sub>
       <br /><br />
     </td>
     <td align="center" width="25%">
@@ -132,10 +132,10 @@ Running untrusted tenant or AI-generated JavaScript usually forces an uncomforta
 | Dimension | V8 Isolates (e.g. `workerd`) | Containers / MicroVMs | **Capsid** |
 | :--- | :--- | :--- | :--- |
 | **Isolation boundary** | In-process VM heap | OS / VM kernel boundary | **Dedicated OS process** (`NS` + `Landlock` + `seccomp` + `cgroup v2`) |
-| **Elasticity &amp; reclamation** | Shared process heap; retains fragmentation &amp; peak growth under load | Slow cold starts (`100 ms – 1 s+`) penalize scale-to-zero | **Elastic OS Process Pools** — scale to zero (`0 B` idle), wake in `8.89 ms`, OS reclaims 100% of private pages on eviction |
-| **Memory under load** | High (`555.7 MiB` loaded PSS @ 64 conn) | Tens to hundreds of MiB per tenant | **`19.3 MiB` loaded PSS** (`Host + worker`, 28.8&times; lower) |
+| **Elasticity &amp; reclamation** | Shared in-process heap across isolates; peak growth stays in the host process | Slow cold starts (`100 ms – 1 s+`) penalize scale-to-zero | **Elastic OS Process Pools** — scale to zero (`0 B` idle), `8.89 ms` C ABI cold spawn (10 KiB bytecode), OS reclaims 100% of private pages when evicted worker processes exit |
+| **Memory under load** | High (`555.7 MiB` loaded service PSS @ 64 conn) | Tens to hundreds of MiB per tenant | **`19.3 MiB` loaded PSS** (`Host + worker`, 28.8&times; lower) |
 | **2 GiB warm density** | `572` cells (10 KiB app) | Dozens | **`705` warm OS workers** (10 KiB app; `501` @ 100 KiB, `135` @ 1 MiB) |
-| **Cold start (10 KiB)** | `17.21 ms` / `57.9 MiB` | `100 ms – 1 s+` | **`8.89 ms` / `8.2 MiB`** (bytecode) &middot; `9.29 ms` (source) |
+| **Cold start (10 KiB, C ABI)** | `17.21 ms` / `57.9 MiB` | `100 ms – 1 s+` | **`8.89 ms` / `8.2 MiB`** (trusted bytecode) &middot; `9.29 ms` (source) |
 | **JIT / RWX attack surface** | Active JIT compiler | Runtime-dependent | **Zero-JIT** (`quickjs-turbo` native register-frame VM) |
 | **Deployment model** | Standalone server | Orchestrated fleet | **Standalone Linux Host** or **Embeddable C/C++ SDK (ABI v8)** |
 
@@ -143,11 +143,11 @@ Running untrusted tenant or AI-generated JavaScript usually forces an uncomforta
 
 Capsid's managed Host (`dev/v0.3.2`, [Config v2 &amp; elastic pools](docs/design/config-v2.md)) pairs hard OS-process isolation with serverless-grade elasticity:
 
-- **True Scale-to-Zero &amp; Cold-Start Queueing (`minReady: 0`)** — Idle applications drop to zero resident OS processes (`0 B` worker RAM) and wake a fresh sandboxed worker in **`8.89 ms`** (10 KiB trusted bytecode), while bounded cold queues (`queueRequests` / `queueTimeout`) absorb concurrent bursts without `503` storms.
-- **OS-Level Memory Reclamation, Zero Shared Heap Bloat** — Evicting an idle worker exits a real OS process, so Linux immediately reclaims 100% of its private physical pages with zero cross-tenant heap residue, fragmentation, or GC pause spillover.
-- **Two-Stage Tenant-Fair Eviction (`GlobalEvictionCoordinator`)** — Under a host memory ceiling (`capacity.memory`, `85% / 75%` watermark hysteresis), Capsid reclaims excess idle replicas from over-share bursty tenants *before* evicting a quiet tenant's last warm worker, while strictly protecting active HTTP requests, SSE streams, and WebSocket channels.
-- **Tenant-Wide `cgroup v2` `memory.max` Governance** — Sibling apps, elastic scale-out bursts, and overlapping blue-green generations for the same tenant share one kernel-enforced `cgroup v2` parent ceiling — keeping OOMs and memory spikes sealed inside the tenant boundary.
-- **Non-Blocking Slot Handoff &amp; Drain-Safe Rollouts** — Evicted idle workers transfer capacity slots immediately and reap asynchronously off the `~9 ms` cold-spawn path; rolling deployments drain live HTTP/SSE/WebSocket traffic on the old generation before retirement.
+- **True Scale-to-Zero &amp; Cold-Start Queueing (`minReady: 0`)** — Idle applications drop to zero resident OS processes (`0 B` worker RAM) and wake fresh sandboxed workers on demand (the C ABI strict-sandbox microbenchmark measures **`8.89 ms`** to first response for 10 KiB trusted bytecode; Managed Host cold-queue waiting and optional delegated tenant `cgroup v2` attachment are outside that C ABI timing), while bounded cold queues (`queueRequests` / `queueTimeout`) absorb concurrent bursts without `503` storms.
+- **OS-Level Memory Reclamation, Zero Shared Heap Bloat** — Evicting an idle worker terminates a dedicated OS process; once the process exits, Linux reclaims 100% of its private physical pages with zero shared cross-tenant heap residue or GC pause spillover.
+- **Two-Stage Tenant-Fair Eviction (`GlobalEvictionCoordinator`)** — Under a host memory ceiling (`capacity.memory`, `85% / 75%` watermark hysteresis), Capsid reclaims excess idle replicas from over-share bursty tenants *before* evicting a quiet tenant's last warm worker, while keeping active HTTP requests, SSE streams, and WebSocket channels exempt from idle eviction.
+- **Tenant-Wide `cgroup v2` `memory.max` Governance** — With a delegated Linux `cgroup v2` root, sibling apps, elastic scale-out bursts, and overlapping blue-green generations for the same tenant share one kernel-enforced `cgroup v2` parent ceiling — keeping OOMs and memory spikes sealed inside the tenant boundary.
+- **Non-Blocking Slot Handoff &amp; Bounded-Drain Rollouts** — Evicted idle workers transfer steady-state capacity slots immediately while process exit, reaping (`waitpid`), and kernel page reclamation finish asynchronously in a bounded `reaping` set off the spawn critical path; rolling deployments drain live HTTP/SSE/WebSocket traffic on the old generation up to the configured `drain_deadline` before forcing retirement.
 
 ### Built for
 

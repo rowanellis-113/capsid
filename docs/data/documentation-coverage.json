@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "1826dac0be08de722708fcbd0fcf6d629544738be4a7c39c12d61cb215236855",
+      "sha256": "a953e482d1797aa67e6c92a40ef31dc372e038ffe6c1b7f83b5e20009815130b",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
     },
     {
@@ -650,7 +650,7 @@
       "reviewed": true,
       "hashMode": "canonical-lf-text",
       "sha256": "15fa183d827e94ea7eacafd3fa783454e3dabd03261d611893104125d3d083a8",
-      "review": "Design milestones A\u2013C assessed against production paths, two reproducible policy counterexamples, Windows and Linux CTest, cgroup telemetry, and a same-artifact scale-to-zero run."
+      "review": "Design milestones A–C assessed against production paths, two reproducible policy counterexamples, Windows and Linux CTest, cgroup telemetry, and a same-artifact scale-to-zero run."
     },
     {
       "path": "docs/history/v0.3.2/regression-review.md",
