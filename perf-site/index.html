@@ -529,6 +529,28 @@
   .story-metric span { min-width: 0; color: var(--text-3); font-weight: 500; }
   .story-metric strong { color: var(--brand-ink); white-space: nowrap; flex-shrink: 0; }
 
+  /* ============ Elastic OS Process Pools Lifecycle Strip ============ */
+  .elastic-flow {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: 8px; align-items: stretch; margin-top: 14px;
+  }
+  .ef-step {
+    padding: 13px 14px; border-radius: 11px;
+    background: var(--bg-elev); border: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 4px; min-width: 0;
+  }
+  .ef-step.is-hl {
+    background: var(--brand-bg); border-color: var(--brand-border);
+  }
+  .ef-step .ef-k { font: 700 10px var(--mono); letter-spacing: 0.6px; text-transform: uppercase; color: var(--brand-ink); }
+  .ef-step .ef-t { font: 700 13.5px var(--font); color: var(--text); line-height: 1.3; }
+  .ef-step .ef-s { font-size: 12px; color: var(--text-3); line-height: 1.48; }
+  .ef-arr { color: var(--brand-ink); font: 700 15px var(--mono); align-self: center; text-align: center; }
+  @media (max-width: 960px) {
+    .elastic-flow { grid-template-columns: 1fr; gap: 6px; }
+    .ef-arr { transform: rotate(90deg); justify-self: center; line-height: 1; }
+  }
+
   /* ============ Use Case 2x2 Grid ============ */
   .usecase-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
@@ -951,6 +973,7 @@
 
     <div class="nav-links">
       <a href="#why-capsid">Why Capsid</a>
+      <a href="#elastic-pools">Elastic Pools</a>
       <a href="#use-cases">Use Cases</a>
       <a href="#overview">Benchmarks</a>
       <a href="#quickstart">Quick Start</a>
@@ -1115,6 +1138,116 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
            eviction reclaims bursty excess before touching quiet tenants, backed by per-tenant Linux
            <b>cgroup v2</b> <span class="mono">memory.max</span> and drain-safe rollouts.</p>
         <div class="story-metric"><span>2 GiB warm pool</span><strong id="story-dens-val">705 workers</strong></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 02b. Elastic OS Process Pools Deep Dive ================= -->
+  <section id="elastic-pools">
+    <div class="eyebrow">Elastic OS Process Pools</div>
+    <h2>Serverless elasticity with real OS-process memory reclamation</h2>
+    <p class="lede">V8 isolates share a single process heap that balloons under concurrent load and retains cross-tenant
+      fragmentation, while containers and MicroVMs pay 100&nbsp;ms–1&nbsp;s+ cold starts that punish scale-to-zero.
+      Capsid's <b>Elastic OS Process Pools</b> (<span class="mono">dev/v0.3.2</span>) pair dedicated Linux-sandboxed worker
+      processes with sub-10&nbsp;ms scale-from-zero, two-stage tenant-fair eviction, and 100% kernel page reclamation.</p>
+
+    <div class="card featured">
+      <div class="card-head">
+        <div>
+          <h3>Elastic worker lifecycle — from 0&nbsp;B idle to kernel-reclaimed exit</h3>
+          <div class="sub">Managed Host coordinates scale-from-zero, cold queueing, active-stream protection, and fair eviction without blocking the ~9&nbsp;ms spawn path</div>
+        </div>
+        <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md#section-6" target="_blank" rel="noopener">Architecture spec &rarr;</a>
+      </div>
+      <div class="elastic-flow">
+        <div class="ef-step">
+          <div class="ef-k">01 &middot; Scale-to-Zero</div>
+          <div class="ef-t">0 Processes &middot; 0 B RAM</div>
+          <div class="ef-s"><span class="mono">minReady: 0</span> keeps idle apps at zero worker processes; health probes never wake them.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step">
+          <div class="ef-k">02 &middot; Burst Absorption</div>
+          <div class="ef-t">Cold Request Queue</div>
+          <div class="ef-s">Bounded <span class="mono">queueRequests</span> &amp; <span class="mono">queueTimeout</span> hold concurrent arrivals smoothly with zero 503 storms.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step is-hl">
+          <div class="ef-k">03 &middot; Sub-10 ms Wake</div>
+          <div class="ef-t">Isolated OS Worker</div>
+          <div class="ef-s">Spawns in <b>8.89 ms</b> (10 KiB bytecode) inside Linux NS + Landlock + Seccomp + tenant <span class="mono">cgroup v2</span>.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step">
+          <div class="ef-k">04 &middot; Fair Eviction</div>
+          <div class="ef-t">Two-Stage Tenant LRU</div>
+          <div class="ef-s"><span class="mono">85% / 75%</span> watermarks reclaim over-share idle replicas first; active HTTP / SSE / WS stay protected.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step is-hl">
+          <div class="ef-k">05 &middot; Full Reclaim</div>
+          <div class="ef-t">100% Pages Returned</div>
+          <div class="ef-s">Immediate slot handoff + async reaping; OS exit returns every private page with zero shared heap bloat.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="usecase-card">
+        <div class="usecase-head">
+          <span class="usecase-num">01 / MEMORY RECLAMATION</span>
+          <span class="usecase-pill">Zero Heap Bloat</span>
+        </div>
+        <h3>True OS page reclamation vs shared V8 heaps</h3>
+        <p>In a shared V8 isolate server, peak load expands the shared heap (<span class="mono">555.7 MiB</span> loaded PSS
+           for <span class="mono">workerd</span> at 64 connections) and leaves residual fragmentation across tenants.
+           Evicting an idle Capsid worker exits a dedicated OS process so the Linux kernel immediately reclaims
+           <b>100% of its private physical pages</b>.</p>
+        <div class="usecase-chips">
+          <span>19.3 MiB loaded PSS</span><span>Zero cross-tenant residue</span><span>Zero GC pause spillover</span>
+        </div>
+      </div>
+
+      <div class="usecase-card">
+        <div class="usecase-head">
+          <span class="usecase-num">02 / MULTI-TENANT FAIRNESS</span>
+          <span class="usecase-pill">GlobalEvictionCoordinator</span>
+        </div>
+        <h3>Two-stage tenant-fair eviction</h3>
+        <p>Under a host memory ceiling (<span class="mono">capacity.memory</span>), plain global LRU lets one bursty tenant
+           evict a quiet tenant's only warm worker. Capsid's Stage&nbsp;1 reclaims excess idle replicas from over-share
+           tenants by ratio first, falling back to global LRU in Stage&nbsp;2 only when every tenant sits within fair share.</p>
+        <div class="usecase-chips">
+          <span>85% / 75% hysteresis</span><span>minResidency guard</span><span>Explainable metrics</span>
+        </div>
+      </div>
+
+      <div class="usecase-card">
+        <div class="usecase-head">
+          <span class="usecase-num">03 / KERNEL BUDGETS</span>
+          <span class="usecase-pill">cgroup v2</span>
+        </div>
+        <h3>Tenant-wide <span class="mono">memory.max</span> governance</h3>
+        <p>With a delegated Linux <span class="mono">cgroup v2</span> root, sibling apps, elastic scale-out bursts,
+           and overlapping blue-green generations for one tenant share a single kernel-enforced parent
+           <span class="mono">memory.max</span> ceiling — sealing OOMs and traffic spikes strictly inside that tenant.</p>
+        <div class="usecase-chips">
+          <span>Parent tenant cgroup</span><span>Per-worker leaf cap</span><span>Hard OOM containment</span>
+        </div>
+      </div>
+
+      <div class="usecase-card">
+        <div class="usecase-head">
+          <span class="usecase-num">04 / ZERO-DOWNTIME OPS</span>
+          <span class="usecase-pill">Drain-Safe</span>
+        </div>
+        <h3>Non-blocking slot handoff &amp; rolling generations</h3>
+        <p>When scaling up under memory pressure, evicted idle workers transfer steady-state capacity slots immediately
+           and reap asynchronously in a bounded <span class="mono">reaping</span> set — keeping <span class="mono">waitpid</span>
+           off the ~9&nbsp;ms spawn path. Active HTTP, SSE, and WebSocket sessions stay immune to idle eviction and drain cleanly during rollouts.</p>
+        <div class="usecase-chips">
+          <span>Async reaping</span><span>SSE / WS protected</span><span>Blue-green handoff</span>
+        </div>
       </div>
     </div>
   </section>
