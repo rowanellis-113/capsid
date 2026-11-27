@@ -28,13 +28,15 @@ See [testing](run-tests.md) and the
 
 ## 1. Prepare a Checkout
 
-For the published `v0.3.1-beta.1` source:
+For the current `dev/v0.3.2` branch (Config v2, Elastic OS Process Pools, C ABI v8):
 
 ```sh
-git clone --branch v0.3.1-beta.1 --recurse-submodules \
+git clone --branch dev/v0.3.2 --recurse-submodules \
   https://github.com/rowanellis-113/capsid.git
 cd capsid
 ```
+
+Use `--branch v0.3.1-beta.1` instead if you need the published prerelease source.
 
 For an existing checkout, preserve your work and select the intended revision
 before building. Do not reset or clean a working tree merely to satisfy the

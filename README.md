@@ -7,6 +7,7 @@
 Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in dedicated **OS-sandboxed elastic process pools** — scaling cleanly from zero to hundreds of warm workers per host with standard Web `fetch(Request)` handlers, sub-10 ms cold starts, and a zero-JIT footprint engineered for high-density multi-tenancy.
 
 <p>
+  <a href="docs/design/config-v2.md"><img src="https://img.shields.io/badge/branch-dev%2Fv0.3.2-0284C7?style=flat-square" alt="Development Branch dev/v0.3.2" /></a>
   <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2"><img src="https://img.shields.io/badge/stable-v0.2.2-2563EB?style=flat-square" alt="Stable v0.2.2" /></a>
   <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1"><img src="https://img.shields.io/badge/prerelease-v0.3.1--beta.1-7C3AED?style=flat-square" alt="Prerelease v0.3.1-beta.1" /></a>
   <a href="docs/reference/embedding-api.md"><img src="https://img.shields.io/badge/C_ABI-v8-0F766E?style=flat-square" alt="Public C ABI v8" /></a>
@@ -16,10 +17,11 @@ Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in
 </p>
 
 <p>
-  <a href="#60-second-quick-start"><strong>Quick Start</strong></a> &nbsp;&middot;&nbsp;
+  <a href="#install-and-60-second-quick-start"><strong>Install &amp; Quick Start</strong></a> &nbsp;&middot;&nbsp;
+  <a href="#why-capsid"><strong>Why Capsid</strong></a> &nbsp;&middot;&nbsp;
   <a href="#benchmarks-and-replayable-evidence"><strong>Benchmarks</strong></a> &nbsp;&middot;&nbsp;
   <a href="#architecture"><strong>Architecture</strong></a> &nbsp;&middot;&nbsp;
-  <a href="#install-and-embed-the-sdk"><strong>Install &amp; SDK</strong></a> &nbsp;&middot;&nbsp;
+  <a href="#embed-the-cc-sdk-abi-v8"><strong>Embed SDK</strong></a> &nbsp;&middot;&nbsp;
   <a href="#security-defaults-and-module-grants"><strong>Security</strong></a> &nbsp;&middot;&nbsp;
   <a href="docs/README.md"><strong>Docs</strong></a>
 </p>
@@ -59,6 +61,69 @@ Run untrusted customer extensions, webhook rules, and AI-generated JavaScript in
 
 ---
 
+## Install and 60-Second Quick Start
+
+### Install `dev/v0.3.2` (Config v2, Elastic OS Process Pools &amp; C ABI v8)
+
+Build and install `capsid-host`, `capsid-worker`, `capsid-bytecode-compile`, and the C/C++ ABI v8 SDK from the current `dev/v0.3.2` branch ([Linux / macOS build guide](docs/guides/build-from-source.md) &middot; [Windows MSVC build guide](docs/guides/build-on-windows.md)):
+
+```sh
+git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git
+cd capsid
+npm ci --ignore-scripts --prefix vendor/txiki.js
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF
+cmake --build build-release --parallel
+cmake --install build-release --prefix "$HOME/opt/capsid-sdk"
+export PATH="$HOME/opt/capsid-sdk/bin:$PATH"
+```
+
+### Prebuilt Release Binaries
+
+> **Stable**: [`v0.2.2`](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2)
+>
+> **Prerelease**: [`v0.3.1-beta.1`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) *(latest published binary release; ships the earlier `single-worker` local CLI &amp; C ABI v7 — [Run the published beta](docs/guides/run-application.md#run-the-published-beta) &middot; [Windows packages and checksums](docs/guides/install-packages.md#install-on-windows))*
+
+```sh
+curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1
+```
+
+### Run a `dev/v0.3.2` Handler in 60 Seconds
+
+Write standard Web `fetch(Request)` JavaScript — no proprietary handler wrapper required. With `capsid-host` and `capsid-worker` from `dev/v0.3.2` on your `PATH`, save this webhook rule as `bundle.mjs` in an empty directory:
+
+```js
+export default {
+  async fetch(request) {
+    const event = await request.json();
+    const queue = event.type === "incident.opened" ? "on-call" : "inbox";
+    return Response.json({ queue });
+  },
+};
+```
+
+Create a minimal Config v2 manifest (`capsid/app-v2`) and start the local Host on loopback:
+
+```sh
+printf '%s\n' '{"apiVersion":"capsid/app-v2"}' > capsid.json
+capsid-host --app-dir . --listen 127.0.0.1:8080 --ready-fd 1
+```
+
+Once the Host emits its `capsid-host-ready-v1` readiness line, send an event from a second terminal:
+
+```sh
+curl -sS http://127.0.0.1:8080/ \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"incident.opened"}'
+# {"queue":"on-call"}
+```
+
+> [!TIP]
+> **Elastic pools &amp; Web frameworks.** In Linux managed mode, add `"pool":{"minReady":0,"maxWorkers":8,"idleTimeout":"60s"}` to `capsid.json` for scale-to-zero Elastic OS Process Pools. **Hono**, **itty-router**, **H3**, and **Elysia** all run against pinned compatibility suites on Capsid's `CAPSID-MIN-2025-subset-v0` Web API profile.
+> [Config v2 &amp; elastic pools](docs/design/config-v2.md) &middot; [Framework compatibility matrix](docs/reference/frameworks/README.md) &middot; [Web API conformance](docs/reference/web-conformance.md) &middot; [Native Windows quick start](docs/guides/run-application.md#run-the-development-branch)
+
+---
+
 ## Why Capsid
 
 Running untrusted tenant or AI-generated JavaScript usually forces an uncomfortable trade-off: **V8 isolates** share a process address space and balloon in memory under concurrent load, while **containers and microVMs** deliver OS isolation at tens to hundreds of megabytes per tenant.
@@ -91,42 +156,6 @@ Capsid's managed Host (`dev/v0.3.2`, [Config v2 &amp; elastic pools](docs/design
 - **Customer Webhooks & SaaS Extensibility** — Let tenants deploy standard Web `fetch(Request)` rules without risking cross-tenant memory leaks or credential exposure.
 - **High-Density Multi-Tenant Functions** — Pack hundreds of warm apps per GiB with scale-to-zero and tenant-wide Linux `cgroup v2` `memory.max` enforcement.
 - **Embeddable C/C++ Gateways & Control Planes** — Drop `libcapsid_runtime` straight into an existing POSIX event loop (`epoll`/`kqueue`) with a frozen C11 / C++11 RAII ABI.
-
----
-
-## 60-Second Quick Start
-
-Write standard Web `fetch(Request)` JavaScript — no proprietary handler wrapper required. With `capsid-host` and `capsid-worker` from a `dev/v0.3.2` build on your `PATH`, save this webhook rule as `bundle.mjs` in an empty directory:
-
-```js
-export default {
-  async fetch(request) {
-    const event = await request.json();
-    const queue = event.type === "incident.opened" ? "on-call" : "inbox";
-    return Response.json({ queue });
-  },
-};
-```
-
-Create a minimal Config v2 manifest and start the local Host on loopback:
-
-```sh
-printf '%s\n' '{"apiVersion":"capsid/app-v2"}' > capsid.json
-capsid-host --app-dir . --listen 127.0.0.1:8080 --ready-fd 1
-```
-
-Once the Host emits its `capsid-host-ready-v1` readiness line, send an event from a second terminal:
-
-```sh
-curl -sS http://127.0.0.1:8080/ \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"incident.opened"}'
-# {"queue":"on-call"}
-```
-
-> [!TIP]
-> **Bring your favorite Web framework.** **Hono**, **itty-router**, **H3**, and **Elysia** all run against pinned compatibility suites on Capsid's `CAPSID-MIN-2025-subset-v0` Web API profile.
-> [Framework compatibility matrix](docs/reference/frameworks/README.md) &middot; [Web API conformance](docs/reference/web-conformance.md) &middot; [Native Windows quick start](docs/guides/run-application.md#run-the-development-branch) &middot; [Run the published `v0.3.1-beta.1` CLI](docs/guides/run-application.md#run-the-published-beta)
 
 ---
 
@@ -209,22 +238,7 @@ flowchart LR
 
 ---
 
-## Install and Embed the SDK
-
-> **Stable**: [`v0.2.2`](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2)
->
-> **Prerelease**: [`v0.3.1-beta.1`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1)
-
-### Install the Published Beta (Linux / macOS)
-
-That release ships the `single-worker` local CLI. [Run the published beta](docs/guides/run-application.md#run-the-published-beta) &middot; [Windows packages and checksums](docs/guides/install-packages.md#install-on-windows) &middot; [Build `dev/v0.3.2` from source](docs/guides/build-from-source.md)
-
-```sh
-curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1
-```
-
-### Embed `libcapsid_runtime` in C or C++
+## Embed the C/C++ SDK (ABI v8)
 
 The v0.3.2 development SDK uses C ABI v8. Embed `libcapsid_runtime` through `<capsid/runtime.h>` (C11) or `<capsid/runtime.hpp>` (C++11 RAII). On POSIX, register `capsid_worker_fd()` with your event loop and drain `capsid_worker_next_event()` as events arrive.
 
@@ -246,7 +260,7 @@ capsid::Worker worker(config);
 // and verify CAPSID_EVENT_READY.flags before dispatching requests.
 ```
 
-Install the SDK headers, library, and binaries from a prepared Release build:
+Install the SDK headers, CMake package (`Capsid::capsid_runtime`), library, and binaries from a prepared Release build:
 
 ```sh
 cmake --install build-release --prefix "$HOME/opt/capsid-sdk"

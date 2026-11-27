@@ -979,7 +979,7 @@
   <!-- ================= 01. Product Hero ================= -->
   <header class="hero">
     <div>
-      <div class="hero-eyebrow"><span class="pulse"></span>ELASTIC OS PROCESS POOLS &middot; C/C++ ABI v8</div>
+      <div class="hero-eyebrow"><span class="pulse"></span>DEV/v0.3.2 &middot; ELASTIC OS PROCESS POOLS &middot; C/C++ ABI v8</div>
       <h1>Run untrusted AI code <span class="grad">in elastic OS process pools.</span></h1>
       <p class="hero-desc" id="hero-desc">
         A <b>secure, embeddable, high-density JavaScript runtime</b> powered by <b>Elastic OS Process Pools</b>.
@@ -997,14 +997,14 @@
       <div class="install-box" aria-label="Quick install command">
         <div class="install-head">
           <div class="install-tabs" role="tablist" aria-label="Hero install method">
-            <button type="button" class="install-tab active" role="tab" aria-selected="true" id="hero-inst-unix">Linux / macOS</button>
-            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-win">Windows</button>
-            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-manual">Tarball</button>
+            <button type="button" class="install-tab active" role="tab" aria-selected="true" id="hero-inst-unix">dev/v0.3.2 (Linux/macOS)</button>
+            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-win">dev/v0.3.2 (Windows)</button>
+            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-manual">v0.3.1-beta.1 (Prebuilt)</button>
           </div>
-          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1 assets &rarr;</a>
+          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">dev/v0.3.2 build guide &rarr;</a>
         </div>
         <div class="install-bar">
-          <code><span class="prompt" id="install-prompt">$</span><span id="install-cmd">curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1</span></code>
+          <code><span class="prompt" id="install-prompt">$</span><span id="install-cmd">git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git &amp;&amp; cd capsid &amp;&amp; npm ci --ignore-scripts --prefix vendor/txiki.js &amp;&amp; cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF &amp;&amp; cmake --build build-release --parallel</span></code>
           <button type="button" class="copy-btn" id="copy-install-btn">Copy</button>
         </div>
       </div>
@@ -1372,73 +1372,84 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
     </div>
   </section>
 
-  <!-- ================= 06. Quick Start (30s Developer Onboarding) ================= -->
+  <!-- ================= 06. Quick Start (60s dev/v0.3.2 Onboarding) ================= -->
   <section id="quickstart">
-    <div class="eyebrow">Quick Start</div>
-    <h2>Ship your first isolated worker in 30 seconds</h2>
-    <p class="lede">Native prebuilt archives ship for <b>Linux musl</b> (<span class="mono">x86_64</span>, <span class="mono">arm64</span>),
-      <b>macOS</b> (<span class="mono">arm64</span>, <span class="mono">x86_64</span>), and <b>Windows</b> (<span class="mono">x86_64</span>) —
-      including <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>,
-      <span class="mono">capsid-bytecode-compile</span>, and the C/C++ SDK.</p>
+    <div class="eyebrow">Quick Start &middot; dev/v0.3.2</div>
+    <h2>Ship your first dev/v0.3.2 worker in 60 seconds</h2>
+    <p class="lede">Build and install the <b>dev/v0.3.2</b> Host, Worker, bytecode compiler, and C/C++ ABI v8 SDK on
+      <b>Linux</b>, <b>macOS</b>, or <b>Windows</b> — featuring unified Config v2 (<span class="mono">capsid/app-v2</span>),
+      one-command <span class="mono">--app-dir</span> local dev, and Linux managed <b>Elastic OS Process Pools</b>.
+      Need prebuilt binaries instead? The latest published release archive is
+      <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1</a>
+      (earlier <span class="mono">single-worker</span> CLI &amp; ABI v7).</p>
 
     <div class="qs-os-bar">
       <div class="pills" role="tablist" aria-label="Quick Start operating system">
         <button type="button" class="pill active" role="tab" aria-selected="true" id="qs-os-unix">Linux &amp; macOS</button>
         <button type="button" class="pill" role="tab" aria-selected="false" id="qs-os-win">Windows (PS)</button>
       </div>
-      <span class="qs-os-note" id="qs-os-note">Strict sandboxing is <b>Linux-only</b>; macOS &amp; Windows builds are for dev &amp; SDK integration.</span>
+      <span class="qs-os-note" id="qs-os-note">Strict sandboxing &amp; managed elastic pools are <b>Linux-only</b>; macOS &amp; Windows builds share the same <span class="mono">--app-dir</span> Config v2 local CLI and C ABI v8 SDK.</span>
     </div>
 
     <div class="qs-timeline">
       <!-- Step 01 -->
       <div class="qs-row">
         <div class="qs-info">
-          <div class="qs-badge"><span class="qs-idx">01</span>Install binaries</div>
-          <h3>Download &amp; verify the native release</h3>
-          <p>Downloads the prebuilt <span class="mono">v0.3.1-beta.1</span> archive for your OS/CPU, verifies its SHA-256
-             sidecar, and unpacks <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>, and
-             <span class="mono">capsid-bytecode-compile</span>. Prefer manual/offline download? Grab any <span class="mono">.tar.gz</span> /
-             <span class="mono">.zip</span> + <span class="mono">.sha256</span> directly from
-             <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">Releases</a>.</p>
-          <div class="qs-meta"><span>SHA-256 verified</span><span>Linux · macOS · Windows</span></div>
+          <div class="qs-badge"><span class="qs-idx">01</span>Install dev/v0.3.2</div>
+          <h3>Build &amp; install the dev/v0.3.2 toolchain</h3>
+          <p>Checks out <span class="mono">dev/v0.3.2</span> recursively (including <span class="mono">quickjs-turbo</span>
+             and <span class="mono">txiki.js</span>), builds Release binaries with Ninja, and installs
+             <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>,
+             <span class="mono">capsid-bytecode-compile</span>, and the ABI v8 CMake SDK.
+             See <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">Build from source</a>
+             or grab published <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1 Releases</a>.</p>
+          <div class="qs-meta"><span>dev/v0.3.2 &middot; ABI v8</span><span>Linux &middot; macOS &middot; Windows</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
-            <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t1-label">bash · Linux &amp; macOS</span></span>
+            <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t1-label">bash &middot; Linux &amp; macOS</span></span>
             <button type="button" class="step-copy" id="copy-step-1">Copy</button>
           </div>
-          <pre class="qs-code" id="step-code-1-unix">curl -fsSL \
-  https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1</pre>
-          <pre class="qs-code is-hidden" id="step-code-1-win">$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1'
-$zip  = '.\capsid-0.3.1-windows-x86_64.zip'
-Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip" -OutFile $zip
-Invoke-WebRequest "$base/capsid-0.3.1-windows-x86_64.zip.sha256" -OutFile "$zip.sha256"
-$exp = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
-$got = (Get-FileHash $zip -Algorithm SHA256).Hash
-if ($got -ine $exp) { throw 'SHA-256 mismatch' }
-Expand-Archive -LiteralPath $zip -DestinationPath "$HOME\capsid-beta" -Force</pre>
+          <pre class="qs-code" id="step-code-1-unix">git clone --branch dev/v0.3.2 --recurse-submodules \
+  https://github.com/rowanellis-113/capsid.git
+cd capsid &amp;&amp; npm ci --ignore-scripts --prefix vendor/txiki.js
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF
+cmake --build build-release --parallel
+cmake --install build-release --prefix "$HOME/opt/capsid-sdk"
+export PATH="$HOME/opt/capsid-sdk/bin:$PATH"</pre>
+          <pre class="qs-code is-hidden" id="step-code-1-win">git clone --branch dev/v0.3.2 --recurse-submodules `
+  https://github.com/rowanellis-113/capsid.git
+Set-Location capsid
+npm.cmd ci --ignore-scripts --prefix vendor/txiki.js
+cmake -S . -B build-release -G Ninja `
+  -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+  -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF `
+  "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build-release --parallel
+$env:PATH = "$PWD\build-release;$env:PATH"</pre>
         </div>
       </div>
 
       <!-- Step 02 -->
       <div class="qs-row">
         <div class="qs-info">
-          <div class="qs-badge"><span class="qs-idx">02</span>Create app &amp; policy</div>
-          <h3>Write the ESM handler &amp; capsid.json</h3>
-          <p>Create a user-owned working directory (required by Capsid's ownership checks), save a UTF-8 self-contained
-             <span class="mono">fetch(req)</span> handler, and declare a default-deny <span class="mono">capsid.json</span>
-             with zero capability modules and zero outbound egress.</p>
-          <div class="qs-meta"><span>Zero bundler required</span><span>Default-deny policy</span></div>
+          <div class="qs-badge"><span class="qs-idx">02</span>Create app &amp; Config v2</div>
+          <h3>Write the ESM handler &amp; capsid/app-v2 manifest</h3>
+          <p>Create a user-owned package directory (identical to the Linux managed deployment layout), save a
+             self-contained <span class="mono">bundle.mjs</span> handler, and add a minimal default-deny
+             <span class="mono">capsid/app-v2</span> manifest with zero ambient modules or outbound egress.</p>
+          <div class="qs-meta"><span>capsid/app-v2</span><span>Default-deny policy</span><span>Zero bundler</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
-            <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t2-label">~/capsid-hello · app.bundle.js + capsid.json</span></span>
+            <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t2-label">~/capsid-hello &middot; bundle.mjs + capsid.json</span></span>
             <button type="button" class="step-copy" id="copy-step-2">Copy</button>
           </div>
           <pre class="qs-code" id="step-code-2-unix">mkdir -p ~/capsid-hello &amp;&amp; cd ~/capsid-hello
 
-cat &gt; app.bundle.js &lt;&lt;'EOF'
+cat &gt; bundle.mjs &lt;&lt;'EOF'
 export default {
   fetch(req) {
     return Response.json({
@@ -1449,18 +1460,12 @@ export default {
 };
 EOF
 
-cat &gt; capsid.json &lt;&lt;'EOF'
-{
-  "apiVersion": "capsid/app-v1",
-  "permissions": { "modules": [], "fetch": { "allow": [] } },
-  "pool": { "minReady": 1, "maxWorkers": 1 }
-}
-EOF</pre>
+printf '%s\n' '{"apiVersion":"capsid/app-v2"}' &gt; capsid.json</pre>
           <pre class="qs-code is-hidden" id="step-code-2-win">New-Item -ItemType Directory -Force "$HOME\capsid-hello" | Out-Null
 Set-Location "$HOME\capsid-hello"
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
-[IO.File]::WriteAllText("$PWD\app.bundle.js", @'
+[IO.File]::WriteAllText("$PWD\bundle.mjs", @'
 export default {
   fetch(req) {
     return Response.json({
@@ -1471,13 +1476,7 @@ export default {
 };
 '@, $utf8)
 
-[IO.File]::WriteAllText("$PWD\capsid.json", @'
-{
-  "apiVersion": "capsid/app-v1",
-  "permissions": { "modules": [], "fetch": { "allow": [] } },
-  "pool": { "minReady": 1, "maxWorkers": 1 }
-}
-'@, $utf8)</pre>
+[IO.File]::WriteAllText("$PWD\capsid.json", '{"apiVersion":"capsid/app-v2"}', $utf8)</pre>
         </div>
       </div>
 
@@ -1485,51 +1484,31 @@ export default {
       <div class="qs-row">
         <div class="qs-info">
           <div class="qs-badge"><span class="qs-idx">03</span>Run &amp; verify</div>
-          <h3>Launch the Host &amp; hit your endpoint</h3>
-          <p>Start <span class="mono">capsid-host</span> in Terminal 1 (using <span class="mono">--strict-sandbox off</span>
-             for local dev across Linux/macOS/Windows). Once stdout prints the <span class="mono">capsid-host-ready-v1</span>
-             JSON line, send a live HTTP request from Terminal 2.</p>
-          <div class="qs-meta"><span>Ready JSON on fd 1</span><span>Path routing</span></div>
+          <h3>Launch the unified Config v2 Host</h3>
+          <p>One command replaces the old 12-flag invocation: <span class="mono">capsid-host --app-dir .</span>
+             auto-discovers the sibling <span class="mono">capsid-worker</span>, validates
+             <span class="mono">capsid.json</span>, and mounts your app directly at <span class="mono">/</span>.
+             Once stdout prints <span class="mono">capsid-host-ready-v1</span>, send a request from Terminal 2.</p>
+          <div class="qs-meta"><span>Unified --app-dir CLI</span><span>Mounted at /</span></div>
         </div>
         <div class="qs-term-stack">
           <div class="qs-term">
             <div class="qs-term-bar">
-              <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t3-label">Terminal 1 · Start Host</span></span>
+              <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t3-label">Terminal 1 &middot; Start Host</span></span>
               <button type="button" class="step-copy" id="copy-step-3">Copy</button>
             </div>
-            <pre class="qs-code" id="step-code-3-unix">~/.local/bin/capsid-host --mode single-worker \
-  --worker ~/.local/bin/capsid-worker \
-  --source-bundle ./app.bundle.js \
-  --source-name "file://$PWD/app.bundle.js" \
-  --application hello --listen 127.0.0.1:8080 \
-  --routing path --public-scheme http \
-  --public-authority 127.0.0.1:8080 \
-  --request-timeout-ms 5000 --strict-sandbox off \
-  --ready-fd 1 --capsid-json ./capsid.json</pre>
-            <pre class="qs-code is-hidden" id="step-code-3-win">$hostExe = Get-ChildItem "$HOME\capsid-beta" -Recurse -Filter capsid-host.exe |
-  Select-Object -First 1
-$capsidBin = $hostExe.DirectoryName
-$bundle = (Resolve-Path -LiteralPath '.\app.bundle.js').Path
-$sourceName = ([System.Uri]$bundle).AbsoluteUri
-
-&amp; "$capsidBin\capsid-host.exe" --mode single-worker `
-  --worker "$capsidBin\capsid-worker.exe" `
-  --source-bundle $bundle --source-name $sourceName `
-  --application hello --listen 127.0.0.1:8080 `
-  --routing path --public-scheme http `
-  --public-authority 127.0.0.1:8080 `
-  --request-timeout-ms 5000 --strict-sandbox off `
-  --ready-fd 1 --capsid-json .\capsid.json</pre>
+            <pre class="qs-code" id="step-code-3-unix">capsid-host --app-dir . --listen 127.0.0.1:8080 --ready-fd 1</pre>
+            <pre class="qs-code is-hidden" id="step-code-3-win">capsid-host.exe --app-dir . --listen 127.0.0.1:8080 --ready-fd 1</pre>
           </div>
 
           <div class="qs-term">
             <div class="qs-term-bar">
-              <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t4-label">Terminal 2 · Send Request</span></span>
+              <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t4-label">Terminal 2 &middot; Send Request</span></span>
               <button type="button" class="step-copy" id="copy-step-curl">Copy</button>
             </div>
-            <pre class="qs-code" id="step-code-curl-unix">curl http://127.0.0.1:8080/@capsid/hello/ping
+            <pre class="qs-code" id="step-code-curl-unix">curl http://127.0.0.1:8080/ping
 <span class="tok-c"># =&gt; {"hello":"from Capsid","path":"/ping"}</span></pre>
-            <pre class="qs-code is-hidden" id="step-code-curl-win">curl.exe http://127.0.0.1:8080/@capsid/hello/ping
+            <pre class="qs-code is-hidden" id="step-code-curl-win">curl.exe http://127.0.0.1:8080/ping
 <span class="tok-c"># =&gt; {"hello":"from Capsid","path":"/ping"}</span></pre>
           </div>
         </div>
@@ -1538,39 +1517,55 @@ $sourceName = ([System.Uri]$bundle).AbsoluteUri
       <!-- Step 04 (Optional Production Extras) -->
       <div class="qs-row is-optional">
         <div class="qs-info">
-          <div class="qs-badge"><span class="qs-idx">04</span>Optional · Production</div>
-          <h3>Bundle npm deps &amp; compile trusted bytecode</h3>
-          <p>Apps with TypeScript or npm dependencies (Hono, itty-router, H3, Elysia) bundle ahead of time into one ESM file.
-             For sub-10&nbsp;ms (10&nbsp;KiB) and ~21&nbsp;ms (1&nbsp;MiB) cold starts, precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode with the matching
-             release's <span class="mono">capsid-bytecode-compile</span> and sign <span class="mono">message.bin</span>
-             offline (see <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host configuration</a>).
-             Building <span class="mono">dev/v0.3.2</span> from source? Use Config v2 (<span class="mono">capsid/app-v2</span>) and <span class="mono">capsid-host --app-dir .</span> with Elastic OS Process Pools.</p>
-          <div class="qs-meta"><span>8.9 ms (10 KiB) / 21.4 ms (1 MiB)</span><span>Signed attestation</span></div>
+          <div class="qs-badge"><span class="qs-idx">04</span>Optional &middot; Production</div>
+          <h3>Elastic Process Pools, npm bundles &amp; trusted bytecode</h3>
+          <p>In Linux managed mode, configure <span class="mono">pool.minReady: 0</span> for scale-to-zero
+             <b>Elastic OS Process Pools</b> with tenant-fair eviction and <span class="mono">cgroup v2</span>
+             <span class="mono">memory.max</span>. Apps with npm dependencies (Hono, itty-router, H3, Elysia)
+             bundle into one ESM file; for 8.9&nbsp;ms (10&nbsp;KiB) / 21.4&nbsp;ms (1&nbsp;MiB) cold starts,
+             precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode with
+             <span class="mono">capsid-bytecode-compile</span>
+             (see <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host configuration</a>).</p>
+          <div class="qs-meta"><span>Scale-to-zero pools</span><span>8.9 ms (10 KiB) / 21.4 ms (1 MiB)</span><span>Signed attestation</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
             <div class="qs-term-tabs">
-              <button type="button" class="qs-term-tab active" id="qs-tab-bc">capsid-bytecode-compile</button>
+              <button type="button" class="qs-term-tab active" id="qs-tab-elastic">Elastic pool (app-v2)</button>
+              <button type="button" class="qs-term-tab" id="qs-tab-bc">capsid-bytecode-compile</button>
               <button type="button" class="qs-term-tab" id="qs-tab-esbuild">esbuild (npm / TS)</button>
             </div>
             <button type="button" class="step-copy" id="copy-step-bc">Copy</button>
           </div>
-          <pre class="qs-code" id="step-code-bc-unix">~/.local/bin/capsid-bytecode-compile \
-  --source ./app.bundle.js \
-  --source-name "file://$PWD/app.bundle.js" \
+          <pre class="qs-code" id="step-code-elastic">{
+  "apiVersion": "capsid/app-v2",
+  "entry": "bundle.mjs",
+  "worker": { "memoryMax": "256MiB", "jsHeap": "64MiB" },
+  "pool": {
+    "minReady": 0,
+    "maxWorkers": 8,
+    "idleTimeout": "60s",
+    "queueRequests": 64,
+    "queueTimeout": "5s"
+  }
+}</pre>
+          <pre class="qs-code is-hidden" id="step-code-bc-unix">capsid-bytecode-compile \
+  --source ./bundle.mjs \
+  --source-name "file://$PWD/bundle.mjs" \
   --application hello --version v1 --key-id release-key-1 \
   --bytecode-out ./bundle.qjsb \
   --attestation-out ./bytecode.json \
   --signing-message-out ./message.bin</pre>
-          <pre class="qs-code is-hidden" id="step-code-bc-win">&amp; "$capsidBin\capsid-bytecode-compile.exe" `
-  --source $bundle --source-name $sourceName `
+          <pre class="qs-code is-hidden" id="step-code-bc-win">$bundle = (Resolve-Path -LiteralPath '.\bundle.mjs').Path
+capsid-bytecode-compile.exe `
+  --source $bundle --source-name ([System.Uri]$bundle).AbsoluteUri `
   --application hello --version v1 --key-id release-key-1 `
   --bytecode-out .\bundle.qjsb `
   --attestation-out .\bytecode.json `
   --signing-message-out .\message.bin</pre>
           <pre class="qs-code is-hidden" id="step-code-esbuild">npx esbuild src/index.ts \
   --bundle --format=esm --target=es2022 \
-  --outfile=app.bundle.js</pre>
+  --outfile=bundle.mjs</pre>
         </div>
       </div>
     </div>
@@ -1891,15 +1886,15 @@ function initInteractiveChrome() {
   var HERO_INST_CMDS = {
     unix: {
       prompt: "$",
-      cmd: "curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1"
+      cmd: "git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git && cd capsid && npm ci --ignore-scripts --prefix vendor/txiki.js && cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF && cmake --build build-release --parallel"
     },
     win: {
       prompt: "PS>",
-      cmd: "$u='https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-windows-x86_64.zip'; Invoke-WebRequest $u -OutFile capsid.zip; Invoke-WebRequest \"$u.sha256\" -OutFile capsid.zip.sha256; if ((Get-FileHash capsid.zip -Algorithm SHA256).Hash -ine ((Get-Content capsid.zip.sha256 -Raw).Trim() -split '\\s+')[0]) { throw 'SHA-256 mismatch' }; Expand-Archive capsid.zip \"$HOME\\capsid-beta\" -Force"
+      cmd: "git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git; cd capsid; npm.cmd ci --ignore-scripts --prefix vendor/txiki.js; cmake -S . -B build-release -G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF \"-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake\" -DVCPKG_TARGET_TRIPLET=x64-windows-static; cmake --build build-release --parallel"
     },
     manual: {
       prompt: "$",
-      cmd: "wget -q https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-x86_64.tar.gz{,.sha256} && sha256sum -c capsid-0.3.1-linux-musl-x86_64.tar.gz.sha256 && tar -xzf capsid-0.3.1-linux-musl-x86_64.tar.gz"
+      cmd: "curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1"
     }
   };
   function syncHeroInstall() {
@@ -1916,7 +1911,7 @@ function initInteractiveChrome() {
   if ($("hero-inst-manual")) $("hero-inst-manual").onclick = function () { HERO_INST_MODE = "manual"; syncHeroInstall(); };
 
   var QS_OS = "unix";
-  var QS_EXTRA_TAB = "bc";
+  var QS_EXTRA_TAB = "elastic";
   function syncQuickStartUi() {
     var isWin = QS_OS === "win";
     var uBtn = $("qs-os-unix"), wBtn = $("qs-os-win");
@@ -1933,21 +1928,24 @@ function initInteractiveChrome() {
       if (eu) eu.className = "qs-code" + (isWin ? " is-hidden" : "");
       if (ew) ew.className = "qs-code" + (isWin ? "" : " is-hidden");
     });
-    if ($("qs-t1-label")) $("qs-t1-label").textContent = isWin ? "PowerShell · Windows x86_64" : "bash · Linux & macOS";
-    if ($("qs-t2-label")) $("qs-t2-label").textContent = isWin ? "$HOME\\capsid-hello · UTF-8 app.bundle.js + capsid.json" : "~/capsid-hello · app.bundle.js + capsid.json";
+    if ($("qs-t1-label")) $("qs-t1-label").textContent = isWin ? "PowerShell · Windows MSVC + Ninja" : "bash · Linux & macOS";
+    if ($("qs-t2-label")) $("qs-t2-label").textContent = isWin ? "$HOME\\capsid-hello · UTF-8 bundle.mjs + capsid.json" : "~/capsid-hello · bundle.mjs + capsid.json";
     if ($("qs-t3-label")) $("qs-t3-label").textContent = isWin ? "Terminal 1 · PowerShell (Start Host)" : "Terminal 1 · Start Host";
     if ($("qs-t4-label")) $("qs-t4-label").textContent = isWin ? "Terminal 2 · PowerShell (curl.exe)" : "Terminal 2 · Send Request";
 
-    var bcTab = $("qs-tab-bc"), esTab = $("qs-tab-esbuild");
-    var bcU = $("step-code-bc-unix"), bcW = $("step-code-bc-win"), esEl = $("step-code-esbuild");
+    var elTab = $("qs-tab-elastic"), bcTab = $("qs-tab-bc"), esTab = $("qs-tab-esbuild");
+    var elCode = $("step-code-elastic"), bcU = $("step-code-bc-unix"), bcW = $("step-code-bc-win"), esEl = $("step-code-esbuild");
+    if (elTab) elTab.className = "qs-term-tab" + (QS_EXTRA_TAB === "elastic" ? " active" : "");
     if (bcTab) bcTab.className = "qs-term-tab" + (QS_EXTRA_TAB === "bc" ? " active" : "");
     if (esTab) esTab.className = "qs-term-tab" + (QS_EXTRA_TAB === "esbuild" ? " active" : "");
+    if (elCode) elCode.className = "qs-code" + (QS_EXTRA_TAB === "elastic" ? "" : " is-hidden");
     if (bcU) bcU.className = "qs-code" + (QS_EXTRA_TAB === "bc" && !isWin ? "" : " is-hidden");
     if (bcW) bcW.className = "qs-code" + (QS_EXTRA_TAB === "bc" && isWin ? "" : " is-hidden");
     if (esEl) esEl.className = "qs-code" + (QS_EXTRA_TAB === "esbuild" ? "" : " is-hidden");
   }
   if ($("qs-os-unix")) $("qs-os-unix").onclick = function () { QS_OS = "unix"; HERO_INST_MODE = "unix"; syncHeroInstall(); syncQuickStartUi(); };
   if ($("qs-os-win")) $("qs-os-win").onclick = function () { QS_OS = "win"; HERO_INST_MODE = "win"; syncHeroInstall(); syncQuickStartUi(); };
+  if ($("qs-tab-elastic")) $("qs-tab-elastic").onclick = function () { QS_EXTRA_TAB = "elastic"; syncQuickStartUi(); };
   if ($("qs-tab-bc")) $("qs-tab-bc").onclick = function () { QS_EXTRA_TAB = "bc"; syncQuickStartUi(); };
   if ($("qs-tab-esbuild")) $("qs-tab-esbuild").onclick = function () { QS_EXTRA_TAB = "esbuild"; syncQuickStartUi(); };
   syncHeroInstall();
@@ -1979,6 +1977,7 @@ function initInteractiveChrome() {
   wireDynamicCopy("copy-step-3", function () { return QS_OS === "win" ? "step-code-3-win" : "step-code-3-unix"; });
   wireDynamicCopy("copy-step-curl", function () { return QS_OS === "win" ? "step-code-curl-win" : "step-code-curl-unix"; });
   wireDynamicCopy("copy-step-bc", function () {
+    if (QS_EXTRA_TAB === "elastic") return "step-code-elastic";
     if (QS_EXTRA_TAB === "esbuild") return "step-code-esbuild";
     return QS_OS === "win" ? "step-code-bc-win" : "step-code-bc-unix";
   });

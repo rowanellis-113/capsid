@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "3d29b0872cdb8145a0faf58cba81b5bef8f4bc40fa29b97f9d80897603f66220",
+      "sha256": "a1b13c198d1d4003be1b9e47ee0f740aebbbb36b21ba8acab7abd6f1ddf18f16",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
     },
     {
@@ -410,7 +410,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "831a391839f08a85d6782ebfe04944302c659fbd7714821e8ce7fed6259161ef",
+      "sha256": "81ca7905513e6be47b392719f71c170f14cf2178c2f9b7d2d1f4ea90a5227dd2",
       "review": "Pinned beta.5 source checkout, native toolchains, development versus clean Release builds, package CPU distinctions and installed SDK targets."
     },
     {
