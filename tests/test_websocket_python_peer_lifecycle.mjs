@@ -432,9 +432,15 @@ try {
     }
     console.log(JSON.stringify({ stage: 'tcp-reset-after-close', sessions: 32 }));
   }
-  peer.send({ op: 'snapshot' });
-  const snapshot = await peer.next('peer snapshot');
-  assert.equal(snapshot.type, 'snapshot');
+  const snapshotDeadline = Date.now() + 5000;
+  let snapshot;
+  while (true) {
+    peer.send({ op: 'snapshot' });
+    snapshot = await peer.next('peer snapshot');
+    assert.equal(snapshot.type, 'snapshot');
+    if (snapshot.active === 0 || Date.now() >= snapshotDeadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.equal(snapshot.active, 0);
   assert.equal(snapshot.records.length, expected.length);
   for (const [i, record] of snapshot.records.entries()) {
