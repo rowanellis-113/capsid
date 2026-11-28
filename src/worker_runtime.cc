@@ -813,8 +813,9 @@ class WorkerRuntime {
 
     struct PendingBindingCall {
         PendingBindingCall()
-            : handle_id(0), request_id(0), deadline_ns(0), has_custom_timeout(false),
-              user_resolve(JS_UNDEFINED), user_reject(JS_UNDEFINED), user_signal(JS_UNDEFINED),
+            : handle_id(0), input_accounted_bytes(0), input_frame_reserved(false), request_id(0),
+              deadline_ns(0), has_custom_timeout(false), user_resolve(JS_UNDEFINED),
+              user_reject(JS_UNDEFINED), user_signal(JS_UNDEFINED),
               user_abort_listener(JS_UNDEFINED), abort_controller(JS_UNDEFINED),
               binding_result(JS_UNDEFINED), has_binding_error(false),
               state(BindingCallState::kQueued), owner_scope(NULL) {}
@@ -823,6 +824,8 @@ class WorkerRuntime {
         uint64_t handle_id; // 0 = Binding facade call; >0 = RpcTarget handle method call
         std::string method;
         capsid::NeutralValue input;
+        size_t input_accounted_bytes;
+        bool input_frame_reserved;
         uint64_t request_id;
         uint64_t deadline_ns;
         bool has_custom_timeout;
@@ -853,8 +856,20 @@ class WorkerRuntime {
         JSValue reject = JS_UNDEFINED;
         bool is_bytes = false;
         std::vector<std::uint8_t> bytes;
+        std::size_t offset = 0;
         capsid::NeutralValue value;
         std::size_t accounted_bytes = 0;
+        std::size_t staged_frames_remaining = 0;
+    };
+
+    struct PendingStreamRead {
+        bool active = false;
+        bool is_bytes = false;
+        std::vector<std::uint8_t> bytes;
+        std::size_t offset = 0;
+        capsid::NeutralValue value;
+        std::size_t accounted_bytes = 0;
+        std::size_t staged_frames_remaining = 0;
     };
 
     struct ActiveBindingStream {
@@ -864,6 +879,7 @@ class WorkerRuntime {
         JSValue on_chunk_cb = JS_UNDEFINED;
         JSValue on_end_cb = JS_UNDEFINED;
         JSValue on_error_cb = JS_UNDEFINED;
+        PendingStreamRead staged_read;
         std::deque<PendingStreamWrite> pending_writes;
         bool close_waiting = false;
         JSValue close_resolve = JS_UNDEFINED;
@@ -924,6 +940,8 @@ class WorkerRuntime {
         std::string owner_binding_id;
         size_t table_index = 0;
         JSValue target_obj = JS_UNDEFINED; // owned in binding_ctx
+        std::map<std::string, JSValue>
+            method_fns; // F7: snapshotted validated methods (binding_ctx)
     };
 
     capsid::BindingRpcIntrinsics user_binding_intrinsics_;
@@ -931,6 +949,7 @@ class WorkerRuntime {
     BindingJsBridge pending_binding_bridge_;
     capsid::BindingRpcLedger binding_ledger_;
     capsid::BindingScheduler binding_scheduler_;
+    size_t control_pump_cursor_ = 0;
     capsid::BindingStreamTable binding_streams_;
     capsid::BindingHandleTable binding_handles_;
     std::map<uint64_t, ActiveBindingStream> active_binding_streams_;
@@ -2548,7 +2567,8 @@ class WorkerRuntime {
     bool is_timer_idle() const {
         return responses_.empty() && retained_refs_ == 0 && !reclaim_pending_ && !poisoned_ &&
                pending_memory_metrics_ == 0 && pending_binding_calls_.empty() &&
-               binding_streams_.empty() && stream_work_queue_.empty() && binding_handles_.empty() &&
+               binding_streams_.empty() && stream_work_queue_.empty() &&
+               signal_work_queue_.empty() && binding_handles_.empty() &&
                pending_handle_disposals_.empty() && !binding_scheduler_.has_pending_work() &&
                connections_.empty() && pending_connections_.empty() && channel_controls_.empty() &&
                (!channels_ || channels_->idle());
@@ -2582,12 +2602,17 @@ class WorkerRuntime {
         }
         self->expire_connection_events();
         self->pump_channels();
-        // Binding RPC v2 (M4A): expire per-call timeouts and advance the fair
-        // scheduler as a timer safety net in case a timeout or deferred work
-        // arrives while the shared loop was otherwise idle.
+        // Binding RPC v2 (M4A/F10): expire per-call timeouts and advance the
+        // fair scheduler as a timer safety net. Handle lease expirations run
+        // through the scheduler's shared per-turn control budget.
         self->expire_binding_calls();
-        self->expire_binding_handles();
-        self->binding_scheduler_.run_turn();
+        if (!self->binding_tables_.empty()) {
+            if (!self->binding_handles_.empty() &&
+                !self->binding_handles_.collect_expired(uv_hrtime()).empty()) {
+                self->binding_scheduler_.wake();
+            }
+            self->binding_scheduler_.run_turn();
+        }
         // §7.4: settle leaves no drain on the normal path, so the tick
         // performs the post-settle reclaim (may poison), then checks the
         // poison deadline before expiring requests.
@@ -2721,6 +2746,7 @@ class WorkerRuntime {
             }
             return 0;
         }
+        const bool has_bindings = !self->bindings_.empty();
         if (capsid_tjs_set_cookie_jar_path(runtime, "") != 0 ||
             capsid_tjs_set_egress_policy(runtime, egress_check, self) != 0 ||
             (!self->config_.tls_ca_bundle_path.empty() &&
@@ -2745,8 +2771,10 @@ class WorkerRuntime {
             !self->define_native(ctx, core, "capsidFixedResponseBodyLimit",
                                  js_fixed_response_body_limit, 0) ||
             !self->define_native(ctx, core, "capsidInstallBridge", js_install_bridge, 4) ||
-            !self->define_native(ctx, core, "capsidInstallBindingBridge", js_install_binding_bridge,
-                                 1)) {
+            (has_bindings && (!self->define_native(ctx, core, "capsidInstallBindingBridge",
+                                                   js_install_binding_bridge, 1) ||
+                              JS_DefinePropertyValueStr(ctx, core, "capsidEnableStreamFencing",
+                                                        JS_TRUE, JS_PROP_CONFIGURABLE) < 0))) {
             if (!JS_HasException(ctx)) {
                 JS_ThrowInternalError(ctx, "failed to install Capsid native bridge");
             }
@@ -2754,10 +2782,13 @@ class WorkerRuntime {
         }
         const int user_bootstrap_result =
             TJS_EvalBytecode(ctx, capsid__bootstrap, capsid__bootstrap_size, true);
-        {
+        if (has_bindings) {
             JSAtom hook_atom = JS_NewAtom(ctx, "capsidInstallBindingBridge");
             JS_DeleteProperty(ctx, core, hook_atom, 0);
             JS_FreeAtom(ctx, hook_atom);
+            JSAtom fence_atom = JS_NewAtom(ctx, "capsidEnableStreamFencing");
+            JS_DeleteProperty(ctx, core, fence_atom, 0);
+            JS_FreeAtom(ctx, fence_atom);
         }
         return user_bootstrap_result;
     }
@@ -7814,7 +7845,15 @@ class WorkerRuntime {
         }
 
         // Optional second argument: `{ signal?, timeoutMs? }`.
+        // F1: `call_options.signal` holds an owned strong reference in `ctx`
+        // across input cloning and listener registration; RAII frees it on
+        // every exit path.
         capsid::BindingCallOptions call_options;
+        struct CallOptionsGuard {
+            JSContext* ctx;
+            capsid::BindingCallOptions* opts;
+            ~CallOptionsGuard() { capsid::free_binding_call_options(ctx, opts); }
+        } call_options_guard{ctx, &call_options};
         std::string options_error;
         JSValueConst options_value = argc > 1 ? argv[1] : JS_UNDEFINED;
         if (!capsid::parse_binding_call_options(ctx, options_value, &user_binding_intrinsics_,
@@ -7826,6 +7865,20 @@ class WorkerRuntime {
             return rejected_promise(ctx, error);
         }
 
+        auto reject_with_aborted_signal = [&]() -> JSValue {
+            JSValue reason = JS_UNDEFINED;
+            capsid::binding_signal_read_reason(ctx, call_options.signal, &user_binding_intrinsics_,
+                                               &reason);
+            if (JS_IsUndefined(reason)) {
+                reason =
+                    capsid::materialize_remote_error(ctx,
+                                                     capsid::RemoteErrorInfo::make_dom_exception(
+                                                         "AbortError", "The operation was aborted"),
+                                                     &user_binding_intrinsics_);
+            }
+            return rejected_promise(ctx, reason);
+        };
+
         // Pre-aborted signal fails immediately without cloning input or
         // entering the Binding Runtime.
         if (call_options.has_signal) {
@@ -7834,17 +7887,7 @@ class WorkerRuntime {
                                                   &user_binding_intrinsics_, &already_aborted) &&
                 already_aborted) {
                 binding_ledger_.release_call(token->request_id, table.id);
-                JSValue reason = JS_UNDEFINED;
-                capsid::binding_signal_read_reason(ctx, call_options.signal,
-                                                   &user_binding_intrinsics_, &reason);
-                if (JS_IsUndefined(reason)) {
-                    reason = capsid::materialize_remote_error(
-                        ctx,
-                        capsid::RemoteErrorInfo::make_dom_exception("AbortError",
-                                                                    "The operation was aborted"),
-                        &user_binding_intrinsics_);
-                }
-                return rejected_promise(ctx, reason);
+                return reject_with_aborted_signal();
             }
         }
 
@@ -7867,9 +7910,9 @@ class WorkerRuntime {
             }
             const uint64_t now_ns = uv_hrtime();
             const uint64_t delta_ns = call_options.timeout_ms * UINT64_C(1000000);
-            const uint64_t tightened = (std::numeric_limits<uint64_t>::max() - now_ns >= delta_ns)
+            const uint64_t tightened = ((std::numeric_limits<uint64_t>::max)() - now_ns >= delta_ns)
                                            ? (now_ns + delta_ns)
-                                           : std::numeric_limits<uint64_t>::max();
+                                           : (std::numeric_limits<uint64_t>::max)();
             if (call_deadline_ns == 0 || tightened < call_deadline_ns) {
                 call_deadline_ns = tightened;
                 has_custom_timeout = true;
@@ -7907,9 +7950,39 @@ class WorkerRuntime {
                                       JS_PROP_C_W_E);
             return rejected_promise(ctx, error);
         }
+
+        // F1: Re-check abort state after input cloning (which may invoke JS
+        // bridge helpers) so an abort occurring during clone is never lost.
+        if (call_options.has_signal) {
+            bool aborted_during_clone = false;
+            if (capsid::binding_signal_is_aborted(
+                    ctx, call_options.signal, &user_binding_intrinsics_, &aborted_during_clone) &&
+                aborted_during_clone) {
+                rollback_opened_proxies(clone_ctx);
+                binding_ledger_.release_call(token->request_id, table.id);
+                return reject_with_aborted_signal();
+            }
+        }
+
+        // F3: Account queued RPC input payload bytes and frame slot in the
+        // 3-tier ledger immediately upon native retention (released on dispatch
+        // materialization or pre-dispatch cancellation).
+        const size_t input_bytes = capsid::estimate_neutral_value_bytes(input);
+        if (!binding_ledger_.reserve_frame(token->request_id, table.id, input_bytes,
+                                           &quota_error)) {
+            rollback_opened_proxies(clone_ctx);
+            binding_ledger_.release_call(token->request_id, table.id);
+            JSValue error = JS_NewError(ctx);
+            JS_DefinePropertyValueStr(
+                ctx, error, "message",
+                JS_NewString(ctx, capsid::binding_quota_error_message(quota_error)), JS_PROP_C_W_E);
+            return rejected_promise(ctx, error);
+        }
+
         if (!token->promise_creation_scope) {
             token->promise_creation_scope = new (std::nothrow) PromiseCreationScope(token);
             if (!token->promise_creation_scope) {
+                binding_ledger_.release_frame(token->request_id, table.id, input_bytes);
                 rollback_opened_proxies(clone_ctx);
                 binding_ledger_.release_call(token->request_id, table.id);
                 return JS_ThrowOutOfMemory(ctx);
@@ -7919,6 +7992,7 @@ class WorkerRuntime {
         JSValue resolving[2];
         JSValue promise = JS_NewPromiseCapability(ctx, resolving);
         if (JS_IsException(promise)) {
+            binding_ledger_.release_frame(token->request_id, table.id, input_bytes);
             rollback_opened_proxies(clone_ctx);
             binding_ledger_.release_call(token->request_id, table.id);
             return promise;
@@ -7926,6 +8000,7 @@ class WorkerRuntime {
 
         const uint64_t call_id = allocate_binding_call_id();
         if (call_id == 0) {
+            binding_ledger_.release_frame(token->request_id, table.id, input_bytes);
             rollback_opened_proxies(clone_ctx);
             JS_FreeValue(ctx, resolving[0]);
             JS_FreeValue(ctx, resolving[1]);
@@ -7940,6 +8015,8 @@ class WorkerRuntime {
         call.handle_id = handle_id;
         call.method = method_name;
         call.input = std::move(input);
+        call.input_accounted_bytes = input_bytes;
+        call.input_frame_reserved = true;
         call.request_id = token->request_id;
         call.deadline_ns = call_deadline_ns;
         call.has_custom_timeout = has_custom_timeout;
@@ -7970,6 +8047,17 @@ class WorkerRuntime {
             }
             call.user_signal = JS_DupValue(ctx, call_options.signal);
             call.user_abort_listener = listener;
+            // F1: Final abort re-check after listener registration so no race
+            // window exists before the call enters the scheduler queue.
+            bool aborted_after_attach = false;
+            if (capsid::binding_signal_is_aborted(
+                    ctx, call_options.signal, &user_binding_intrinsics_, &aborted_after_attach) &&
+                aborted_after_attach) {
+                self_finish_binding_call(call);
+                JS_FreeValue(ctx, promise);
+                binding_ledger_.release_call(token->request_id, table.id);
+                return reject_with_aborted_signal();
+            }
         }
 
         pending_binding_calls_.emplace(call_id, std::move(call));
@@ -8014,6 +8102,45 @@ class WorkerRuntime {
         binding_scheduler_.wake();
     }
 
+    // F2: Single bounded (100 ms interrupt-enforced) entry point shared by
+    // explicit handle disposal, lease expiry, GC disposal, and late-result
+    // cleanup so runaway Binding cleanup can never monopolize the worker.
+    void run_bounded_binding_disposal(size_t table_index, uint64_t owner_request_id,
+                                      JSValueConst dispose_fn, JSValueConst arg_val,
+                                      const char* poison_msg) {
+        if (shutting_down_ || destroying_runtimes_ || poisoned_ ||
+            table_index >= binding_tables_.size()) {
+            return;
+        }
+        const BindingRuntimeMethodTable& table = binding_tables_[table_index];
+        if (table.ctx == NULL || !JS_IsFunction(table.ctx, dispose_fn) || !JS_IsObject(arg_val)) {
+            return;
+        }
+        BindingWindowGuard binding_window(current_binding_id_, current_binding_request_id_,
+                                          table.id, owner_request_id);
+        const uint64_t prev_deadline = current_binding_disposal_deadline_ns_;
+        const bool prev_interrupted = binding_disposal_interrupted_;
+        const uint64_t new_deadline = uv_hrtime() + UINT64_C(100000000);
+        current_binding_disposal_deadline_ns_ =
+            (prev_deadline != 0 && prev_deadline < new_deadline) ? prev_deadline : new_deadline;
+        binding_disposal_interrupted_ = false;
+        JSValue arg = JS_DupValue(table.ctx, arg_val);
+        JSValue ret = JS_Call(table.ctx, dispose_fn, JS_UNDEFINED, 1, &arg);
+        const bool interrupted = binding_disposal_interrupted_;
+        current_binding_disposal_deadline_ns_ = prev_deadline;
+        binding_disposal_interrupted_ = prev_interrupted || interrupted;
+        JS_FreeValue(table.ctx, arg);
+        if (JS_IsException(ret)) {
+            JSValue exc = JS_GetException(table.ctx);
+            JS_FreeValue(table.ctx, exc);
+        } else {
+            JS_FreeValue(table.ctx, ret);
+        }
+        if (interrupted) {
+            enter_poison(poison_msg);
+        }
+    }
+
     void dispose_binding_handle_now(uint64_t handle_id, bool invoke_js_dispose) {
         pending_handle_disposal_set_.erase(handle_id);
         binding_handles_.close_and_erase(handle_id);
@@ -8030,48 +8157,40 @@ class WorkerRuntime {
         if (table.ctx == NULL) {
             return;
         }
-        if (invoke_js_dispose && !shutting_down_ && !destroying_runtimes_ && !poisoned_ &&
-            JS_IsObject(handle.target_obj) &&
-            JS_IsFunction(table.ctx, table.js_bridge.dispose_rpc_target)) {
-            BindingWindowGuard binding_window(current_binding_id_, current_binding_request_id_,
-                                              handle.owner_binding_id, handle.owner_request_id);
-            current_binding_disposal_deadline_ns_ = uv_hrtime() + UINT64_C(100000000);
-            binding_disposal_interrupted_ = false;
-            JSValue arg = JS_DupValue(table.ctx, handle.target_obj);
-            JSValue ret =
-                JS_Call(table.ctx, table.js_bridge.dispose_rpc_target, JS_UNDEFINED, 1, &arg);
-            const bool interrupted = binding_disposal_interrupted_;
-            current_binding_disposal_deadline_ns_ = 0;
-            binding_disposal_interrupted_ = false;
-            JS_FreeValue(table.ctx, arg);
-            if (JS_IsException(ret)) {
-                JSValue exc = JS_GetException(table.ctx);
-                JS_FreeValue(table.ctx, exc);
-            } else {
-                JS_FreeValue(table.ctx, ret);
-            }
-            if (interrupted) {
-                enter_poison("binding handle disposal interrupted");
-            }
+        if (invoke_js_dispose) {
+            run_bounded_binding_disposal(handle.table_index, handle.owner_request_id,
+                                         table.js_bridge.dispose_rpc_target, handle.target_obj,
+                                         "binding handle disposal interrupted");
         }
+        for (auto mit = handle.method_fns.begin(); mit != handle.method_fns.end(); ++mit) {
+            JS_FreeValue(table.ctx, mit->second);
+        }
+        handle.method_fns.clear();
         JS_FreeValue(table.ctx, handle.target_obj);
     }
 
-    void expire_binding_handles() {
-        if (binding_handles_.empty()) {
+    void expire_binding_handles(size_t* control_budget) {
+        if (binding_handles_.empty() || control_budget == NULL) {
             return;
         }
         const std::vector<uint64_t> expired = binding_handles_.collect_expired(uv_hrtime());
-        for (size_t i = 0; i < expired.size(); ++i) {
-            binding_handles_.mark_disposed(expired[i]);
-            dispose_binding_handle_now(expired[i], true);
+        size_t processed = 0;
+        for (; processed < expired.size() && *control_budget > 0 && !shutting_down_; ++processed) {
+            --(*control_budget);
+            binding_handles_.mark_disposed(expired[processed]);
+            dispose_binding_handle_now(expired[processed], true);
+        }
+        if (processed < expired.size() && !shutting_down_) {
+            binding_scheduler_.wake();
         }
     }
 
-    void pump_binding_handle_disposals() {
-        const size_t budget = binding_scheduler_.config().max_control_frames_per_turn;
-        for (size_t count = 0;
-             count < budget && !pending_handle_disposals_.empty() && !shutting_down_; ++count) {
+    void pump_binding_handle_disposals(size_t* control_budget) {
+        if (control_budget == NULL) {
+            return;
+        }
+        while (*control_budget > 0 && !pending_handle_disposals_.empty() && !shutting_down_) {
+            --(*control_budget);
             const uint64_t handle_id = pending_handle_disposals_.front();
             pending_handle_disposals_.pop_front();
             pending_handle_disposal_set_.erase(handle_id);
@@ -8104,13 +8223,22 @@ class WorkerRuntime {
     static bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target,
                                            JSValueConst rpc_target_proto, JSValueConst object_proto,
                                            std::vector<std::string>* out_methods,
+                                           std::map<std::string, JSValue>* out_method_fns,
                                            std::string* error) {
         out_methods->clear();
+        auto cleanup = [&]() {
+            for (auto mit = out_method_fns->begin(); mit != out_method_fns->end(); ++mit) {
+                JS_FreeValue(ctx, mit->second);
+            }
+            out_method_fns->clear();
+            out_methods->clear();
+        };
         std::unordered_set<std::string> seen;
         JSValue cur = JS_DupValue(ctx, target);
         for (int depth = 0; depth < 16 && JS_IsObject(cur); ++depth) {
             if (JS_IsProxy(cur)) {
                 JS_FreeValue(ctx, cur);
+                cleanup();
                 if (error != NULL)
                     *error = "RpcTarget prototype chain contains a Proxy";
                 return false;
@@ -8128,6 +8256,7 @@ class WorkerRuntime {
                 JSValue exc = JS_GetException(ctx);
                 JS_FreeValue(ctx, exc);
                 JS_FreeValue(ctx, cur);
+                cleanup();
                 if (error != NULL)
                     *error = "RpcTarget method enumeration failed";
                 return false;
@@ -8137,6 +8266,7 @@ class WorkerRuntime {
                 if (raw_name == NULL) {
                     JS_FreePropertyEnum(ctx, tab, count);
                     JS_FreeValue(ctx, cur);
+                    cleanup();
                     if (error != NULL)
                         *error = "RpcTarget property name is unreadable";
                     return false;
@@ -8149,6 +8279,7 @@ class WorkerRuntime {
                 if (present <= 0) {
                     JS_FreePropertyEnum(ctx, tab, count);
                     JS_FreeValue(ctx, cur);
+                    cleanup();
                     if (error != NULL)
                         *error = "RpcTarget property descriptor is unreadable";
                     return false;
@@ -8158,44 +8289,53 @@ class WorkerRuntime {
                 const bool is_func = JS_IsFunction(ctx, desc.value);
                 JS_FreeValue(ctx, desc.getter);
                 JS_FreeValue(ctx, desc.setter);
-                JS_FreeValue(ctx, desc.value);
 
                 if (prop_name == "constructor") {
+                    JS_FreeValue(ctx, desc.value);
                     continue;
                 }
                 if (is_accessor) {
+                    JS_FreeValue(ctx, desc.value);
                     JS_FreePropertyEnum(ctx, tab, count);
                     JS_FreeValue(ctx, cur);
+                    cleanup();
                     if (error != NULL) {
                         *error = "RpcTarget cannot expose accessor property: " + prop_name;
                     }
                     return false;
                 }
-                if (!is_func) {
+                if (!seen.insert(prop_name).second) {
+                    JS_FreeValue(ctx, desc.value);
                     continue;
                 }
-                if (prop_name == "dispose") {
-                    // Reserved for explicit disposal hook on Binding side.
+                if (!is_func || prop_name == "dispose") {
+                    JS_FreeValue(ctx, desc.value);
                     continue;
                 }
                 if (!valid_binding_method_name(prop_name)) {
+                    JS_FreeValue(ctx, desc.value);
                     JS_FreePropertyEnum(ctx, tab, count);
                     JS_FreeValue(ctx, cur);
+                    cleanup();
                     if (error != NULL) {
                         *error = "RpcTarget exposes invalid method name: " + prop_name;
                     }
                     return false;
                 }
-                if (seen.insert(prop_name).second) {
-                    if (out_methods->size() >= capsid::kBindingHandleMaxMethods) {
-                        JS_FreePropertyEnum(ctx, tab, count);
-                        JS_FreeValue(ctx, cur);
-                        if (error != NULL)
-                            *error = "RpcTarget exceeds 128 method limit";
-                        return false;
-                    }
-                    out_methods->push_back(prop_name);
+                if (out_methods->size() >= capsid::kBindingHandleMaxMethods) {
+                    JS_FreeValue(ctx, desc.value);
+                    JS_FreePropertyEnum(ctx, tab, count);
+                    JS_FreeValue(ctx, cur);
+                    cleanup();
+                    if (error != NULL)
+                        *error = "RpcTarget exceeds 128 method limit";
+                    return false;
                 }
+                // F7: Snapshot the validated callable reference at export time
+                // so post-export mutation or getter injection cannot bypass
+                // validation at dispatch time.
+                out_methods->push_back(prop_name);
+                out_method_fns->emplace(prop_name, desc.value);
             }
             JS_FreePropertyEnum(ctx, tab, count);
             JSValue next = JS_GetPrototype(ctx, cur);
@@ -8203,6 +8343,7 @@ class WorkerRuntime {
             if (JS_IsException(next)) {
                 JSValue exc = JS_GetException(ctx);
                 JS_FreeValue(ctx, exc);
+                cleanup();
                 if (error != NULL)
                     *error = "RpcTarget prototype walk failed";
                 return false;
@@ -8211,6 +8352,7 @@ class WorkerRuntime {
         }
         JS_FreeValue(ctx, cur);
         if (out_methods->empty()) {
+            cleanup();
             if (error != NULL)
                 *error = "RpcTarget must expose at least 1 method";
             return false;
@@ -8393,25 +8535,17 @@ class WorkerRuntime {
     }
 
     // Invoked inside the Binding Runtime when a Promise for an already
-    // canceled/expired call fulfills late. Deterministically cancels/aborts/
-    // disposes ReadableStream, WritableStream, Response, or disposable values.
+    // canceled/expired call fulfills late. Runs under the same 100 ms bounded
+    // disposal interrupt window as explicit handle disposal (F2).
     void dispose_late_binding_result(JSContext* binding_ctx, JSValueConst value) {
         if (binding_ctx == NULL || !JS_IsObject(value)) {
             return;
         }
         for (size_t i = 0; i < binding_tables_.size(); ++i) {
-            if (binding_tables_[i].ctx == binding_ctx &&
-                JS_IsFunction(binding_ctx, binding_tables_[i].js_bridge.dispose_late_value)) {
-                JSValue arg = JS_DupValue(binding_ctx, value);
-                JSValue ret = JS_Call(binding_ctx, binding_tables_[i].js_bridge.dispose_late_value,
-                                      JS_UNDEFINED, 1, &arg);
-                JS_FreeValue(binding_ctx, arg);
-                if (JS_IsException(ret)) {
-                    JSValue exc = JS_GetException(binding_ctx);
-                    JS_FreeValue(binding_ctx, exc);
-                } else {
-                    JS_FreeValue(binding_ctx, ret);
-                }
+            if (binding_tables_[i].ctx == binding_ctx) {
+                run_bounded_binding_disposal(i, current_binding_request_id_,
+                                             binding_tables_[i].js_bridge.dispose_late_value, value,
+                                             "binding late-result disposal interrupted");
                 return;
             }
         }
@@ -8624,14 +8758,18 @@ class WorkerRuntime {
         }
     }
 
-    void pump_binding_signal_bridges() {
-        while (!signal_work_queue_.empty() && !shutting_down_) {
+    void pump_binding_signal_bridges(size_t* control_budget) {
+        if (control_budget == NULL) {
+            return;
+        }
+        while (*control_budget > 0 && !signal_work_queue_.empty() && !shutting_down_) {
             const uint64_t bridge_id = signal_work_queue_.front();
             signal_work_queue_.pop_front();
             auto it = active_signal_bridges_.find(bridge_id);
             if (it == active_signal_bridges_.end() || !it->second.abort_pending) {
                 continue;
             }
+            --(*control_budget);
             ActiveBindingSignalBridge& sb = it->second;
             sb.abort_pending = false;
             const capsid::BindingStreamSide dst_side =
@@ -8669,8 +8807,38 @@ class WorkerRuntime {
                     UserRequestTokenGuard guard(this, sb.owner_request_id);
                     fire();
                 }
+                teardown_signal_bridge(bridge_id);
+            } else {
+                // F6: Target proxy controller has not materialized yet (call is
+                // still queued). Detach source listener now, but retain
+                // `sb.aborted == true` and `sb.reason` until target
+                // materialization delivers the abort once (or request/call
+                // teardown cleans it up).
+                JSContext* src_ctx = (sb.source_side == capsid::BindingStreamSide::kUser)
+                                         ? ctx_
+                                         : (sb.table_index < binding_tables_.size()
+                                                ? binding_tables_[sb.table_index].ctx
+                                                : NULL);
+                const capsid::BindingRpcIntrinsics* src_intr =
+                    (sb.source_side == capsid::BindingStreamSide::kUser)
+                        ? &user_binding_intrinsics_
+                        : (sb.table_index < binding_tables_.size()
+                               ? &binding_tables_[sb.table_index].intrinsics
+                               : NULL);
+                if (src_ctx != NULL) {
+                    if (!JS_IsUndefined(sb.source_signal) && !JS_IsUndefined(sb.source_listener)) {
+                        capsid::binding_signal_remove_abort_listener(src_ctx, sb.source_signal,
+                                                                     sb.source_listener, src_intr);
+                    }
+                    JS_FreeValue(src_ctx, sb.source_listener);
+                    sb.source_listener = JS_UNDEFINED;
+                    JS_FreeValue(src_ctx, sb.source_signal);
+                    sb.source_signal = JS_UNDEFINED;
+                }
             }
-            teardown_signal_bridge(bridge_id);
+        }
+        if (!signal_work_queue_.empty() && !shutting_down_) {
+            binding_scheduler_.wake();
         }
     }
 
@@ -8775,6 +8943,29 @@ class WorkerRuntime {
         JS_FreeValue(ctx, fn);
     }
 
+    // F4: Synchronous native owner predicate invoked by User-side stream proxy
+    // guards BEFORE js/streams.js mutates stream, reader, writer, or controller
+    // state.
+    static JSValue js_binding_stream_check_owner(JSContext* ctx, JSValueConst, int, JSValueConst*,
+                                                 int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t owner_request_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &owner_request_id)) {
+            return JS_FALSE;
+        }
+        if (ctx != self->ctx_) {
+            return JS_TRUE;
+        }
+        RequestToken* token = self->require_active_request(ctx, 0, false, true);
+        if (JS_HasException(ctx)) {
+            JSValue exc = JS_GetException(ctx);
+            JS_FreeValue(ctx, exc);
+            return JS_FALSE;
+        }
+        return (token != NULL && token->request_id == owner_request_id) ? JS_TRUE : JS_FALSE;
+    }
+
     bool verify_user_stream_owner(JSContext* ctx, const capsid::BindingStreamRecord& rec,
                                   JSValue* out_rejection) {
         if (ctx != ctx_) {
@@ -8830,7 +9021,13 @@ class WorkerRuntime {
                 }
                 if (status == 2) {
                     if (error != NULL)
-                        *error = "ReadableStream is disturbed or closed";
+                        *error = "ReadableStream is disturbed or errored";
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                if (status == 3) {
+                    if (error != NULL)
+                        *error = "InvalidStateError: Cannot transfer Binding stream proxy outside "
+                                 "its owning request";
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 if (status == 0) {
@@ -8914,6 +9111,12 @@ class WorkerRuntime {
                 if (status == 2) {
                     if (error != NULL)
                         *error = "WritableStream is closed or errored";
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                if (status == 3) {
+                    if (error != NULL)
+                        *error = "InvalidStateError: Cannot transfer Binding stream proxy outside "
+                                 "its owning request";
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 if (status == 0) {
@@ -9233,10 +9436,18 @@ class WorkerRuntime {
             if (matched) {
                 const BindingRuntimeMethodTable& table = self->binding_tables_[cctx->table_index];
                 std::vector<std::string> methods;
+                std::map<std::string, JSValue> method_fns;
                 if (!inspect_rpc_target_methods(ctx, value, table.rpc_target_proto,
-                                                table.intrinsics.object_proto, &methods, error)) {
+                                                table.intrinsics.object_proto, &methods,
+                                                &method_fns, error)) {
                     return capsid::BindingCloneHookResult::kFailed;
                 }
+                auto free_method_fns = [&]() {
+                    for (auto mit = method_fns.begin(); mit != method_fns.end(); ++mit) {
+                        JS_FreeValue(ctx, mit->second);
+                    }
+                    method_fns.clear();
+                };
                 // Lease deadline is strictly clamped <= request_deadline_ns.
                 uint64_t lease_deadline_ns = 0;
                 const auto resp_it = self->responses_.find(cctx->request_id);
@@ -9253,15 +9464,15 @@ class WorkerRuntime {
                         if (JS_ToFloat64(ctx, &lms, lval) == 0 && std::isfinite(lms) && lms > 0.0) {
                             const uint64_t now_ns = uv_hrtime();
                             const uint64_t max_ms =
-                                std::numeric_limits<uint64_t>::max() / UINT64_C(1000000);
+                                (std::numeric_limits<uint64_t>::max)() / UINT64_C(1000000);
                             const uint64_t clamped_ms = (lms >= static_cast<double>(max_ms))
                                                             ? max_ms
                                                             : static_cast<uint64_t>(lms);
                             const uint64_t delta_ns = clamped_ms * UINT64_C(1000000);
                             const uint64_t requested_deadline =
-                                (std::numeric_limits<uint64_t>::max() - now_ns >= delta_ns)
+                                ((std::numeric_limits<uint64_t>::max)() - now_ns >= delta_ns)
                                     ? (now_ns + delta_ns)
-                                    : std::numeric_limits<uint64_t>::max();
+                                    : (std::numeric_limits<uint64_t>::max)();
                             if (lease_deadline_ns == 0 || requested_deadline < lease_deadline_ns) {
                                 lease_deadline_ns = requested_deadline;
                             }
@@ -9278,6 +9489,7 @@ class WorkerRuntime {
                 if (!self->binding_handles_.open_handle(cctx->request_id, cctx->binding_id,
                                                         cctx->table_index, lease_deadline_ns,
                                                         methods, &handle_id, &qerr)) {
+                    free_method_fns();
                     if (error != NULL) {
                         *error = (qerr != capsid::BindingQuotaError::kOk)
                                      ? capsid::binding_quota_error_message(qerr)
@@ -9291,6 +9503,7 @@ class WorkerRuntime {
                 active.owner_binding_id = cctx->binding_id;
                 active.table_index = cctx->table_index;
                 active.target_obj = JS_DupValue(ctx, value);
+                active.method_fns = std::move(method_fns);
                 self->active_binding_handles_.emplace(handle_id, std::move(active));
                 cctx->opened_handles.push_back(handle_id);
                 out->kind = capsid::NeutralValue::Kind::kRpcHandleProxy;
@@ -9331,15 +9544,25 @@ class WorkerRuntime {
             JSValue on_cancel = JS_NewCFunctionData2(ctx, js_binding_readable_cancel,
                                                      "onProxyCancel", 1, 0, 1, &id_js);
             JS_FreeValue(ctx, id_js);
-            if (JS_IsException(on_pull) || JS_IsException(on_cancel)) {
+            JSValue check_owner = JS_NULL;
+            if (mctx->side == capsid::BindingStreamSide::kUser) {
+                JSValue owner_js = capsid::binding_call_id_to_js(ctx, rec->owner_request_id);
+                check_owner = JS_NewCFunctionData2(ctx, js_binding_stream_check_owner,
+                                                   "checkStreamOwner", 0, 0, 1, &owner_js);
+                JS_FreeValue(ctx, owner_js);
+            }
+            if (JS_IsException(on_pull) || JS_IsException(on_cancel) ||
+                JS_IsException(check_owner)) {
                 JS_FreeValue(ctx, on_pull);
                 JS_FreeValue(ctx, on_cancel);
+                JS_FreeValue(ctx, check_owner);
                 return JS_EXCEPTION;
             }
-            JSValue args[2] = {on_pull, on_cancel};
-            JSValue created = JS_Call(ctx, bridge->create_readable_proxy, JS_UNDEFINED, 2, args);
+            JSValue args[3] = {on_pull, on_cancel, check_owner};
+            JSValue created = JS_Call(ctx, bridge->create_readable_proxy, JS_UNDEFINED, 3, args);
             JS_FreeValue(ctx, on_pull);
             JS_FreeValue(ctx, on_cancel);
+            JS_FreeValue(ctx, check_owner);
             if (JS_IsException(created) || !JS_IsObject(created)) {
                 JS_FreeValue(ctx, created);
                 return JS_EXCEPTION;
@@ -9368,17 +9591,27 @@ class WorkerRuntime {
             JSValue on_abort = JS_NewCFunctionData2(ctx, js_binding_writable_abort, "onProxyAbort",
                                                     1, 0, 1, &id_js);
             JS_FreeValue(ctx, id_js);
-            if (JS_IsException(on_write) || JS_IsException(on_close) || JS_IsException(on_abort)) {
+            JSValue check_owner = JS_NULL;
+            if (mctx->side == capsid::BindingStreamSide::kUser) {
+                JSValue owner_js = capsid::binding_call_id_to_js(ctx, rec->owner_request_id);
+                check_owner = JS_NewCFunctionData2(ctx, js_binding_stream_check_owner,
+                                                   "checkStreamOwner", 0, 0, 1, &owner_js);
+                JS_FreeValue(ctx, owner_js);
+            }
+            if (JS_IsException(on_write) || JS_IsException(on_close) || JS_IsException(on_abort) ||
+                JS_IsException(check_owner)) {
                 JS_FreeValue(ctx, on_write);
                 JS_FreeValue(ctx, on_close);
                 JS_FreeValue(ctx, on_abort);
+                JS_FreeValue(ctx, check_owner);
                 return JS_EXCEPTION;
             }
-            JSValue args[3] = {on_write, on_close, on_abort};
-            JSValue created = JS_Call(ctx, bridge->create_writable_proxy, JS_UNDEFINED, 3, args);
+            JSValue args[4] = {on_write, on_close, on_abort, check_owner};
+            JSValue created = JS_Call(ctx, bridge->create_writable_proxy, JS_UNDEFINED, 4, args);
             JS_FreeValue(ctx, on_write);
             JS_FreeValue(ctx, on_close);
             JS_FreeValue(ctx, on_abort);
+            JS_FreeValue(ctx, check_owner);
             if (JS_IsException(created) || !JS_IsObject(created)) {
                 JS_FreeValue(ctx, created);
                 return JS_EXCEPTION;
@@ -9696,6 +9929,14 @@ class WorkerRuntime {
         }
     }
 
+    static size_t binding_stream_frames_for_bytes(size_t bytes) {
+        if (bytes == 0) {
+            return 1;
+        }
+        return (bytes + capsid::kBindingStreamMaxChunkBytes - 1) /
+               capsid::kBindingStreamMaxChunkBytes;
+    }
+
     // ReadableStream producer callbacks
     static JSValue on_binding_readable_chunk(JSContext* ctx, JSValueConst, int argc,
                                              JSValueConst* argv, int, JSValueConst* func_data) {
@@ -9706,7 +9947,8 @@ class WorkerRuntime {
             return JS_UNDEFINED;
         }
         capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
-        if (rec == NULL) {
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
             return JS_UNDEFINED;
         }
         rec->producer_pull_inflight = false;
@@ -9730,21 +9972,32 @@ class WorkerRuntime {
                 size_t len = 0;
                 uint8_t* ptr = JS_GetUint8Array(ctx, &len, bytes_val);
                 if (ptr != NULL || len == 0) {
-                    enqueued_ok = true;
                     if (len == 0) {
                         enqueued_ok =
                             self->binding_streams_.enqueue_bytes(stream_id, NULL, 0, &err_msg);
-                    } else {
-                        for (size_t off = 0; off < len;
-                             off += capsid::kBindingStreamMaxChunkBytes) {
-                            const size_t piece =
-                                std::min(capsid::kBindingStreamMaxChunkBytes, len - off);
-                            if (!self->binding_streams_.enqueue_bytes(stream_id, ptr + off, piece,
-                                                                      &err_msg)) {
-                                enqueued_ok = false;
-                                break;
-                            }
+                    } else if (!ep_it->second.staged_read.active && len <= rec->credit_bytes &&
+                               len <= capsid::kBindingStreamMaxChunkBytes) {
+                        enqueued_ok =
+                            self->binding_streams_.enqueue_bytes(stream_id, ptr, len, &err_msg);
+                    } else if (!ep_it->second.staged_read.active) {
+                        // F3 + F5: Stage oversized/over-credit chunks against
+                        // the stream ceiling and 3-tier ledger BEFORE copying
+                        // bytes natively; `advance_binding_stream` will slice
+                        // strictly within `rec->credit_bytes`.
+                        const size_t frames_needed = binding_stream_frames_for_bytes(len);
+                        if (self->binding_streams_.stage_pending(stream_id, len, frames_needed,
+                                                                 &err_msg)) {
+                            PendingStreamRead& sr = ep_it->second.staged_read;
+                            sr.active = true;
+                            sr.is_bytes = true;
+                            sr.bytes.assign(ptr, ptr + len);
+                            sr.offset = 0;
+                            sr.accounted_bytes = len;
+                            sr.staged_frames_remaining = frames_needed;
+                            enqueued_ok = true;
                         }
+                    } else {
+                        err_msg = "readable stream producer already has staged bytes";
                     }
                 }
                 JS_FreeValue(ctx, bytes_val);
@@ -9769,10 +10022,34 @@ class WorkerRuntime {
                 stream_id, capsid::RemoteErrorInfo::make_type_error(
                                "stream chunk is not cloneable: " + err_msg));
         } else {
-            const size_t weight = capsid::estimate_neutral_value_bytes(nv);
-            if (!self->binding_streams_.enqueue_value(stream_id, std::move(nv), weight, &err_msg)) {
+            const size_t raw_weight = capsid::estimate_neutral_value_bytes(nv);
+            const size_t weight = raw_weight > 0 ? raw_weight : 1;
+            if (weight > capsid::kBindingStreamMaxChunkBytes) {
                 self->binding_streams_.fail_from_producer(
-                    stream_id, capsid::RemoteErrorInfo::make_error(err_msg));
+                    stream_id, capsid::RemoteErrorInfo::make_error(
+                                   "binding stream chunk exceeds maximum frame size"));
+            } else if (!ep_it->second.staged_read.active && weight <= rec->credit_bytes) {
+                if (!self->binding_streams_.enqueue_value(stream_id, std::move(nv), weight,
+                                                          &err_msg)) {
+                    self->binding_streams_.fail_from_producer(
+                        stream_id, capsid::RemoteErrorInfo::make_error(err_msg));
+                }
+            } else if (!ep_it->second.staged_read.active) {
+                if (!self->binding_streams_.stage_pending(stream_id, weight, 1, &err_msg)) {
+                    self->binding_streams_.fail_from_producer(
+                        stream_id, capsid::RemoteErrorInfo::make_error(err_msg));
+                } else {
+                    PendingStreamRead& sr = ep_it->second.staged_read;
+                    sr.active = true;
+                    sr.is_bytes = false;
+                    sr.value = std::move(nv);
+                    sr.accounted_bytes = weight;
+                    sr.staged_frames_remaining = 1;
+                }
+            } else {
+                self->binding_streams_.fail_from_producer(
+                    stream_id, capsid::RemoteErrorInfo::make_error(
+                                   "readable stream producer already has staged chunk"));
             }
         }
         self->schedule_stream_work(stream_id);
@@ -9923,6 +10200,7 @@ class WorkerRuntime {
         JSValueConst chunk = argc > 0 ? argv[0] : JS_UNDEFINED;
         const BindingJsBridge* bridge = self->stream_side_bridge(*rec, rec->producer_side);
         bool parsed_bytes = false;
+        std::string stage_err;
         if (bridge != NULL && JS_IsFunction(ctx, bridge->extract_bytes)) {
             JSValue arg = JS_DupValue(ctx, chunk);
             JSValue bytes_val = JS_Call(ctx, bridge->extract_bytes, JS_UNDEFINED, 1, &arg);
@@ -9934,11 +10212,23 @@ class WorkerRuntime {
                 size_t len = 0;
                 uint8_t* ptr = JS_GetUint8Array(ctx, &len, bytes_val);
                 if (ptr != NULL || len == 0) {
+                    // F3: Reserve staged bytes & frames against the 2 MiB
+                    // per-stream cap and 3-tier ledger BEFORE allocating the
+                    // native byte copy.
+                    const size_t frames_needed = binding_stream_frames_for_bytes(len);
+                    if (!self->binding_streams_.stage_pending(stream_id, len, frames_needed,
+                                                              &stage_err)) {
+                        JS_FreeValue(ctx, bytes_val);
+                        return rejected_promise(
+                            ctx, capsid::materialize_remote_error(
+                                     ctx, capsid::RemoteErrorInfo::make_error(stage_err), intr));
+                    }
                     pw.is_bytes = true;
                     if (len > 0 && ptr != NULL) {
                         pw.bytes.assign(ptr, ptr + len);
                     }
                     pw.accounted_bytes = len;
+                    pw.staged_frames_remaining = frames_needed;
                     parsed_bytes = true;
                 }
                 JS_FreeValue(ctx, bytes_val);
@@ -9956,12 +10246,30 @@ class WorkerRuntime {
                                  "writable stream chunk is not cloneable: " + clone_err),
                              intr));
             }
-            pw.accounted_bytes = capsid::estimate_neutral_value_bytes(pw.value);
+            const size_t raw_weight = capsid::estimate_neutral_value_bytes(pw.value);
+            const size_t weight = raw_weight > 0 ? raw_weight : 1;
+            if (weight > capsid::kBindingStreamMaxChunkBytes) {
+                return rejected_promise(ctx,
+                                        capsid::materialize_remote_error(
+                                            ctx,
+                                            capsid::RemoteErrorInfo::make_error(
+                                                "binding stream chunk exceeds maximum frame size"),
+                                            intr));
+            }
+            if (!self->binding_streams_.stage_pending(stream_id, weight, 1, &stage_err)) {
+                return rejected_promise(
+                    ctx, capsid::materialize_remote_error(
+                             ctx, capsid::RemoteErrorInfo::make_error(stage_err), intr));
+            }
+            pw.accounted_bytes = weight;
+            pw.staged_frames_remaining = 1;
         }
 
         JSValue resolving[2];
         JSValue promise = JS_NewPromiseCapability(ctx, resolving);
         if (JS_IsException(promise)) {
+            self->binding_streams_.release_staged(stream_id, pw.accounted_bytes,
+                                                  pw.staged_frames_remaining);
             return promise;
         }
         pw.resolve = resolving[0];
@@ -10043,7 +10351,9 @@ class WorkerRuntime {
         ep_it->second.sink_write_inflight = false;
         const size_t drained = ep_it->second.last_sink_write_bytes;
         ep_it->second.last_sink_write_bytes = 0;
-        self->binding_streams_.grant_credit(stream_id, drained > 0 ? drained : 1);
+        if (drained > 0) {
+            self->binding_streams_.grant_credit(stream_id, drained);
+        }
         self->schedule_stream_work(stream_id);
         return JS_UNDEFINED;
     }
@@ -10142,11 +10452,12 @@ class WorkerRuntime {
         return JS_UNDEFINED;
     }
 
-    void pump_binding_streams() {
-        pump_binding_signal_bridges();
-        const size_t budget = binding_scheduler_.config().max_control_frames_per_turn;
-        for (size_t step = 0; step < budget && !stream_work_queue_.empty() && !shutting_down_;
-             ++step) {
+    void pump_binding_streams(size_t* control_budget) {
+        if (control_budget == NULL) {
+            return;
+        }
+        while (*control_budget > 0 && !stream_work_queue_.empty() && !shutting_down_) {
+            --(*control_budget);
             const uint64_t stream_id = stream_work_queue_.front();
             stream_work_queue_.pop_front();
             stream_work_set_.erase(stream_id);
@@ -10176,6 +10487,57 @@ class WorkerRuntime {
                 teardown_binding_stream(stream_id, true);
                 return;
             }
+            auto admit_staged_read = [&]() {
+                if (rec == NULL || ep_it == active_binding_streams_.end()) {
+                    return;
+                }
+                PendingStreamRead& sr = ep_it->second.staged_read;
+                while (sr.active && rec->state == capsid::BindingStreamState::kOpen) {
+                    std::string err_msg;
+                    if (sr.is_bytes) {
+                        if (rec->credit_bytes == 0) {
+                            break;
+                        }
+                        const size_t remaining = sr.bytes.size() - sr.offset;
+                        const size_t piece =
+                            (std::min)(remaining, (std::min)(rec->credit_bytes,
+                                                             capsid::kBindingStreamMaxChunkBytes));
+                        const size_t consume_frames =
+                            (remaining == piece) ? sr.staged_frames_remaining
+                                                 : (sr.staged_frames_remaining > 1 ? 1 : 0);
+                        if (!binding_streams_.admit_staged_bytes(stream_id,
+                                                                 sr.bytes.data() + sr.offset, piece,
+                                                                 piece, consume_frames, &err_msg)) {
+                            sr = PendingStreamRead();
+                            binding_streams_.fail_from_producer(
+                                stream_id, capsid::RemoteErrorInfo::make_error(err_msg));
+                            break;
+                        }
+                        sr.offset += piece;
+                        sr.staged_frames_remaining -= consume_frames;
+                        if (sr.offset >= sr.bytes.size()) {
+                            sr = PendingStreamRead();
+                        }
+                    } else {
+                        const size_t weight = sr.accounted_bytes > 0 ? sr.accounted_bytes : 1;
+                        if (rec->credit_bytes < weight) {
+                            break;
+                        }
+                        if (!binding_streams_.admit_staged_value(stream_id, std::move(sr.value),
+                                                                 weight, &err_msg)) {
+                            sr = PendingStreamRead();
+                            binding_streams_.fail_from_producer(
+                                stream_id, capsid::RemoteErrorInfo::make_error(err_msg));
+                            break;
+                        }
+                        sr = PendingStreamRead();
+                    }
+                }
+            };
+
+            // 0. Admit staged readable slices strictly within available credit.
+            admit_staged_read();
+
             // 1. Deliver 1 frame to waiting consumer.
             if (rec->consumer_waiting && !rec->queue.empty() &&
                 JS_IsObject(ep.readable_proxy_ctrl)) {
@@ -10191,8 +10553,9 @@ class WorkerRuntime {
                             call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl, "enqueue",
                                                   1, &chunk);
                             JS_FreeValue(consumer_ctx, chunk);
-                            binding_streams_.grant_credit(
-                                stream_id, frame.accounted_bytes > 0 ? frame.accounted_bytes : 1);
+                            if (frame.accounted_bytes > 0) {
+                                binding_streams_.grant_credit(stream_id, frame.accounted_bytes);
+                            }
                             settle_and_clear_promise(consumer_ctx, &ep.pull_resolve,
                                                      &ep.pull_reject, false, JS_UNDEFINED);
                         } else if (frame.type == capsid::BindingStreamFrame::Type::kValue) {
@@ -10207,8 +10570,9 @@ class WorkerRuntime {
                                                       "enqueue", 1, &chunk);
                                 JS_FreeValue(consumer_ctx, chunk);
                             }
-                            binding_streams_.grant_credit(
-                                stream_id, frame.accounted_bytes > 0 ? frame.accounted_bytes : 1);
+                            if (frame.accounted_bytes > 0) {
+                                binding_streams_.grant_credit(stream_id, frame.accounted_bytes);
+                            }
                             settle_and_clear_promise(consumer_ctx, &ep.pull_resolve,
                                                      &ep.pull_reject, false, JS_UNDEFINED);
                         } else if (frame.type == capsid::BindingStreamFrame::Type::kEnd) {
@@ -10248,10 +10612,19 @@ class WorkerRuntime {
             if (rec == NULL || ep_it == active_binding_streams_.end()) {
                 return;
             }
-            // 2. Pull next chunk from producer if credit > 0.
-            if (rec->state == capsid::BindingStreamState::kOpen && rec->credit_bytes > 0 &&
+            // Admit next slice immediately if delivery replenished credit.
+            admit_staged_read();
+            if (rec->state == capsid::BindingStreamState::kErrored && !rec->queue.empty() &&
+                rec->consumer_waiting) {
+                schedule_stream_work(stream_id);
+                return;
+            }
+            // 2. Pull next chunk from producer ONLY when no staged read remains
+            // and credit > 0.
+            if (rec->state == capsid::BindingStreamState::kOpen &&
+                !ep_it->second.staged_read.active && rec->credit_bytes > 0 &&
                 !rec->producer_pull_inflight &&
-                rec->queued_frames < capsid::kBindingStreamMaxQueuedFrames &&
+                (rec->queued_frames + rec->staged_frames) < capsid::kBindingStreamMaxQueuedFrames &&
                 JS_IsObject(ep_it->second.readable_source)) {
                 rec->producer_pull_inflight = true;
                 if (rec->producer_side == capsid::BindingStreamSide::kBinding) {
@@ -10275,41 +10648,66 @@ class WorkerRuntime {
             return;
         }
 
-        // 1. Admit backpressured producer writes while credit > 0.
-        while (!ep.pending_writes.empty() && rec->state == capsid::BindingStreamState::kOpen &&
-               rec->credit_bytes > 0) {
-            PendingStreamWrite pw = std::move(ep.pending_writes.front());
-            ep.pending_writes.pop_front();
+        // 1. Admit backpressured staged producer writes strictly within
+        // `rec->credit_bytes` (F3 + F5). Large chunks slice progressively
+        // across credit refills without double-charging the 3-tier ledger.
+        while (!ep_it->second.pending_writes.empty() &&
+               rec->state == capsid::BindingStreamState::kOpen && rec->credit_bytes > 0) {
+            PendingStreamWrite& pw = ep_it->second.pending_writes.front();
             bool ok = true;
+            bool finished = false;
             std::string err_msg;
             if (pw.is_bytes) {
                 if (pw.bytes.empty()) {
-                    ok = binding_streams_.enqueue_bytes(stream_id, NULL, 0, &err_msg);
+                    ok = binding_streams_.admit_staged_bytes(stream_id, NULL, 0, 0,
+                                                             pw.staged_frames_remaining, &err_msg);
+                    pw.staged_frames_remaining = 0;
+                    finished = true;
                 } else {
-                    for (size_t off = 0; off < pw.bytes.size();
-                         off += capsid::kBindingStreamMaxChunkBytes) {
+                    while (pw.offset < pw.bytes.size() && rec->credit_bytes > 0) {
+                        const size_t remaining = pw.bytes.size() - pw.offset;
                         const size_t piece =
-                            std::min(capsid::kBindingStreamMaxChunkBytes, pw.bytes.size() - off);
-                        if (!binding_streams_.enqueue_bytes(stream_id, pw.bytes.data() + off, piece,
-                                                            &err_msg)) {
+                            (std::min)(remaining, (std::min)(rec->credit_bytes,
+                                                             capsid::kBindingStreamMaxChunkBytes));
+                        const size_t consume_frames =
+                            (remaining == piece) ? pw.staged_frames_remaining
+                                                 : (pw.staged_frames_remaining > 1 ? 1 : 0);
+                        if (!binding_streams_.admit_staged_bytes(stream_id,
+                                                                 pw.bytes.data() + pw.offset, piece,
+                                                                 piece, consume_frames, &err_msg)) {
                             ok = false;
                             break;
                         }
+                        pw.offset += piece;
+                        pw.staged_frames_remaining -= consume_frames;
                     }
+                    finished = !ok || pw.offset >= pw.bytes.size();
                 }
             } else {
-                ok = binding_streams_.enqueue_value(stream_id, std::move(pw.value),
-                                                    pw.accounted_bytes, &err_msg);
+                const size_t weight = pw.accounted_bytes > 0 ? pw.accounted_bytes : 1;
+                if (rec->credit_bytes < weight) {
+                    break;
+                }
+                ok = binding_streams_.admit_staged_value(stream_id, std::move(pw.value), weight,
+                                                         &err_msg);
+                pw.staged_frames_remaining = 0;
+                finished = true;
             }
+            if (!finished) {
+                break;
+            }
+            PendingStreamWrite done_pw = std::move(ep_it->second.pending_writes.front());
+            ep_it->second.pending_writes.pop_front();
             auto settle_pw = [&]() {
                 if (ok) {
-                    settle_and_clear_promise(producer_ctx, &pw.resolve, &pw.reject, false,
+                    settle_and_clear_promise(producer_ctx, &done_pw.resolve, &done_pw.reject, false,
                                              JS_UNDEFINED);
                 } else {
                     JSValue err = capsid::materialize_remote_error(
                         producer_ctx, capsid::RemoteErrorInfo::make_error(err_msg),
                         stream_side_intrinsics(*rec, rec->producer_side));
-                    settle_and_clear_promise(producer_ctx, &pw.resolve, &pw.reject, true, err);
+                    settle_and_clear_promise(producer_ctx, &done_pw.resolve, &done_pw.reject, true,
+                                             err);
                     JS_FreeValue(producer_ctx, err);
                 }
             };
@@ -10327,39 +10725,51 @@ class WorkerRuntime {
                 teardown_binding_stream(stream_id, true);
                 return;
             }
+            rec = binding_streams_.find(stream_id);
+            ep_it = active_binding_streams_.find(stream_id);
+            if (rec == NULL || ep_it == active_binding_streams_.end()) {
+                return;
+            }
         }
 
         // 2. If producer called close() and all pending writes are admitted, enqueue END.
-        if (ep.close_waiting && ep.pending_writes.empty() &&
+        if (ep_it->second.close_waiting && ep_it->second.pending_writes.empty() &&
             rec->state == capsid::BindingStreamState::kOpen) {
             binding_streams_.enqueue_end(stream_id);
         }
 
         // 3. Drive consumer sink write/close one frame at a time.
-        if (!ep.sink_write_inflight && !ep.sink_close_inflight && !rec->queue.empty() &&
-            JS_IsObject(ep.writable_sink)) {
+        if (!ep_it->second.sink_write_inflight && !ep_it->second.sink_close_inflight &&
+            !rec->queue.empty() && JS_IsObject(ep_it->second.writable_sink)) {
+            ActiveBindingStream& writable_ep = ep_it->second;
             capsid::BindingStreamFrame frame;
             if (binding_streams_.pop_frame(stream_id, &frame)) {
                 auto drive_sink = [&]() {
                     if (frame.type == capsid::BindingStreamFrame::Type::kBytes) {
-                        ep.sink_write_inflight = true;
-                        ep.last_sink_write_bytes = frame.accounted_bytes;
+                        writable_ep.sink_write_inflight = true;
+                        writable_ep.last_sink_write_bytes = frame.accounted_bytes;
                         JSValue chunk = JS_NewUint8ArrayCopy(consumer_ctx, frame.bytes.data(),
                                                              frame.bytes.size());
-                        JSValue args[3] = {chunk, ep.on_write_done_cb, ep.on_write_err_cb};
-                        call_js_method_ignore(consumer_ctx, ep.writable_sink, "write", 3, args);
+                        JSValue args[3] = {chunk, writable_ep.on_write_done_cb,
+                                           writable_ep.on_write_err_cb};
+                        call_js_method_ignore(consumer_ctx, writable_ep.writable_sink, "write", 3,
+                                              args);
                         JS_FreeValue(consumer_ctx, chunk);
                     } else if (frame.type == capsid::BindingStreamFrame::Type::kValue) {
-                        ep.sink_write_inflight = true;
-                        ep.last_sink_write_bytes = frame.accounted_bytes;
+                        writable_ep.sink_write_inflight = true;
+                        writable_ep.last_sink_write_bytes = frame.accounted_bytes;
                         JSValue chunk = capsid::neutral_to_js(consumer_ctx, frame.value);
-                        JSValue args[3] = {chunk, ep.on_write_done_cb, ep.on_write_err_cb};
-                        call_js_method_ignore(consumer_ctx, ep.writable_sink, "write", 3, args);
+                        JSValue args[3] = {chunk, writable_ep.on_write_done_cb,
+                                           writable_ep.on_write_err_cb};
+                        call_js_method_ignore(consumer_ctx, writable_ep.writable_sink, "write", 3,
+                                              args);
                         JS_FreeValue(consumer_ctx, chunk);
                     } else if (frame.type == capsid::BindingStreamFrame::Type::kEnd) {
-                        ep.sink_close_inflight = true;
-                        JSValue args[2] = {ep.on_close_done_cb, ep.on_close_err_cb};
-                        call_js_method_ignore(consumer_ctx, ep.writable_sink, "close", 2, args);
+                        writable_ep.sink_close_inflight = true;
+                        JSValue args[2] = {writable_ep.on_close_done_cb,
+                                           writable_ep.on_close_err_cb};
+                        call_js_method_ignore(consumer_ctx, writable_ep.writable_sink, "close", 2,
+                                              args);
                     }
                 };
                 if (rec->consumer_side == capsid::BindingStreamSide::kBinding) {
@@ -10694,18 +11104,39 @@ class WorkerRuntime {
         return error;
     }
 
-    // Binding RPC v2 (M4A): fair single-turn scheduler entry point invoked by
-    // BindingScheduler::on_check (immediate wake) or deadline_timer_callback.
+    // Binding RPC v2 (M4A/F10): fair single-turn scheduler entry point invoked
+    // by BindingScheduler::on_check (immediate wake) or deadline_timer_callback.
+    // All control-plane stages share one bounded per-turn `control_budget`
+    // (32) with a rotating start cursor so no control category can starve
+    // another or monopolize a turn before ordinary RPC calls/results advance.
     static void binding_scheduler_turn(void* opaque) {
         WorkerRuntime* self = static_cast<WorkerRuntime*>(opaque);
         if (self == NULL || self->shutting_down_ || self->binding_tables_.empty()) {
             return;
         }
         self->expire_binding_calls();
-        self->expire_binding_handles();
-        self->pump_binding_control_frames();
-        self->pump_binding_handle_disposals();
-        self->pump_binding_streams();
+        size_t control_budget = self->binding_scheduler_.config().max_control_frames_per_turn;
+        const size_t start_stage = self->control_pump_cursor_;
+        self->control_pump_cursor_ = (self->control_pump_cursor_ + 1) % 5;
+        for (size_t i = 0; i < 5 && !self->shutting_down_; ++i) {
+            switch ((start_stage + i) % 5) {
+            case 0:
+                self->expire_binding_handles(&control_budget);
+                break;
+            case 1:
+                self->pump_binding_control_frames(&control_budget);
+                break;
+            case 2:
+                self->pump_binding_signal_bridges(&control_budget);
+                break;
+            case 3:
+                self->pump_binding_handle_disposals(&control_budget);
+                break;
+            case 4:
+                self->pump_binding_streams(&control_budget);
+                break;
+            }
+        }
         self->pump_binding_calls();
         self->pump_binding_results();
     }
@@ -10751,9 +11182,11 @@ class WorkerRuntime {
         }
     }
 
-    void pump_binding_control_frames() {
-        const size_t budget = binding_scheduler_.config().max_control_frames_per_turn;
-        for (size_t count = 0; count < budget; ++count) {
+    void pump_binding_control_frames(size_t* control_budget) {
+        if (control_budget == NULL) {
+            return;
+        }
+        while (*control_budget > 0 && !shutting_down_) {
             uint64_t item_id = 0;
             if (!binding_scheduler_.pop_next_control(&item_id)) {
                 break;
@@ -10764,8 +11197,12 @@ class WorkerRuntime {
                 found->second.state != BindingCallState::kCanceling) {
                 continue;
             }
+            --(*control_budget);
             abort_binding_controller(found->second, true);
             finish_binding_call(found);
+        }
+        if (binding_scheduler_.pending_controls() > 0 && !shutting_down_) {
+            binding_scheduler_.wake();
         }
     }
 
@@ -10799,6 +11236,7 @@ class WorkerRuntime {
             const BindingRuntimeMethodTable& table = binding_tables_[call.table_index];
             JSContext* ctx = table.ctx;
             JSValueConst receiver = table.factory_object;
+            JSValue method = JS_UNDEFINED;
             if (call.handle_id != 0) {
                 const capsid::BindingHandleRecord* hrec = binding_handles_.find(call.handle_id);
                 auto hit = active_binding_handles_.find(call.handle_id);
@@ -10814,22 +11252,36 @@ class WorkerRuntime {
                     continue;
                 }
                 receiver = hit->second.target_obj;
-            }
-            JSValue method = JS_GetPropertyStr(ctx, receiver, call.method.c_str());
-            if (JS_IsException(method)) {
-                JS_FreeValue(ctx, method);
-                settle_binding_call_error(
-                    call_id, table, take_binding_exception(table, "binding method lookup failed"));
-                continue;
-            }
-            if (!JS_IsFunction(ctx, method)) {
-                JS_FreeValue(ctx, method);
-                JSValue error = JS_NewError(ctx);
-                JS_DefinePropertyValueStr(ctx, error, "message",
-                                          JS_NewString(ctx, "binding method is unavailable"),
-                                          JS_PROP_C_W_E);
-                settle_binding_call_error(call_id, table, error);
-                continue;
+                // F7: Dispatch strictly through the callable snapshotted at
+                // export time without touching mutable properties/getters.
+                auto mit = hit->second.method_fns.find(call.method);
+                if (mit == hit->second.method_fns.end() || !JS_IsFunction(ctx, mit->second)) {
+                    JSValue error = JS_NewError(ctx);
+                    JS_DefinePropertyValueStr(ctx, error, "message",
+                                              JS_NewString(ctx, "binding method is unavailable"),
+                                              JS_PROP_C_W_E);
+                    settle_binding_call_error(call_id, table, error);
+                    continue;
+                }
+                method = JS_DupValue(ctx, mit->second);
+            } else {
+                method = JS_GetPropertyStr(ctx, receiver, call.method.c_str());
+                if (JS_IsException(method)) {
+                    JS_FreeValue(ctx, method);
+                    settle_binding_call_error(
+                        call_id, table,
+                        take_binding_exception(table, "binding method lookup failed"));
+                    continue;
+                }
+                if (!JS_IsFunction(ctx, method)) {
+                    JS_FreeValue(ctx, method);
+                    JSValue error = JS_NewError(ctx);
+                    JS_DefinePropertyValueStr(ctx, error, "message",
+                                              JS_NewString(ctx, "binding method is unavailable"),
+                                              JS_PROP_C_W_E);
+                    settle_binding_call_error(call_id, table, error);
+                    continue;
+                }
             }
             BindingCloneContext mat_ctx;
             mat_ctx.self = this;
@@ -10841,6 +11293,18 @@ class WorkerRuntime {
             mat_hooks.materialize = materialize_binding_object;
             mat_hooks.opaque = &mat_ctx;
             JSValue input = capsid::neutral_to_js_ex(ctx, call.input, &mat_hooks);
+            if (JS_IsException(input)) {
+                teardown_unmaterialized_streams_in_value(call.input);
+            }
+            // F3: Release the queued input neutral payload and its 3-tier
+            // ledger reservation immediately upon materialization.
+            call.input = capsid::NeutralValue();
+            if (call.input_frame_reserved) {
+                binding_ledger_.release_frame(call.request_id, call.binding_id,
+                                              call.input_accounted_bytes);
+                call.input_frame_reserved = false;
+                call.input_accounted_bytes = 0;
+            }
             JSValue call_object = JS_NewObjectProto(ctx, JS_NULL);
             if (JS_IsException(input) || JS_IsException(call_object)) {
                 JS_FreeValue(ctx, input);
@@ -11021,8 +11485,13 @@ class WorkerRuntime {
     // Frees every cross-runtime JSValue a pending call owns and detaches any
     // User AbortSignal listener so long-lived signals never retain settled calls.
     void self_finish_binding_call(PendingBindingCall& call) {
-        if (call.state == BindingCallState::kQueued) {
-            teardown_unmaterialized_streams_in_value(call.input);
+        teardown_unmaterialized_streams_in_value(call.input);
+        call.input = capsid::NeutralValue();
+        if (call.input_frame_reserved) {
+            binding_ledger_.release_frame(call.request_id, call.binding_id,
+                                          call.input_accounted_bytes);
+            call.input_frame_reserved = false;
+            call.input_accounted_bytes = 0;
         }
         if (call.table_index < binding_tables_.size()) {
             JSContext* ctx = binding_tables_[call.table_index].ctx;

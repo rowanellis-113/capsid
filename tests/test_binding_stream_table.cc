@@ -39,16 +39,23 @@ void test_open_credit_flow_and_close() {
     require(ledger.worker_counts().frames == 1 && ledger.worker_counts().bytes == 600,
             "ledger accounted 1 frame / 600 bytes");
 
-    // Enqueue another 600B -> credit clamps to 0 (producer now paused).
-    require(table.enqueue_bytes(id, chunk.data(), chunk.size(), &err), "enqueue second 600B");
-    require(table.find(id)->credit_bytes == 0, "credit clamped at 0");
+    // Strict credit conservation (F5): 600B must be rejected when only 424B
+    // credit remains; exact 424B succeeds and reduces credit to 0.
+    require(!table.enqueue_bytes(id, chunk.data(), chunk.size(), &err) &&
+                err == "insufficient stream credit",
+            "over-credit enqueue must be rejected");
+    require(table.find(id)->credit_bytes == 424 && ledger.worker_counts().bytes == 600,
+            "rejected enqueue must not mutate credit or ledger");
+    require(table.enqueue_bytes(id, chunk.data(), 424, &err), "enqueue exact remaining 424B");
+    require(table.find(id)->credit_bytes == 0, "credit exactly 0");
+    require(!table.enqueue_bytes(id, chunk.data(), 1, &err), "cannot enqueue at 0 credit");
 
     // Pop first frame and grant credit -> producer resumes!
     capsid::BindingStreamFrame frame;
     require(table.pop_frame(id, &frame) && frame.type == capsid::BindingStreamFrame::Type::kBytes &&
                 frame.bytes.size() == 600,
             "pop first frame");
-    require(ledger.worker_counts().frames == 1 && ledger.worker_counts().bytes == 600,
+    require(ledger.worker_counts().frames == 1 && ledger.worker_counts().bytes == 424,
             "ledger released popped frame");
     require(table.grant_credit(id, 600), "grant_credit woke starved producer");
     require(table.find(id)->credit_bytes == 600, "credit refilled to 600");
@@ -60,7 +67,8 @@ void test_open_credit_flow_and_close() {
     require(table.enqueue_end(id), "enqueue_end");
     require(table.find(id)->state == capsid::BindingStreamState::kHalfClosed, "half-closed");
     require(!table.enqueue_bytes(id, chunk.data(), 10, &err), "cannot enqueue after end");
-    require(table.pop_frame(id, &frame) && frame.type == capsid::BindingStreamFrame::Type::kBytes,
+    require(table.pop_frame(id, &frame) && frame.type == capsid::BindingStreamFrame::Type::kBytes &&
+                frame.bytes.size() == 424,
             "pop second data frame");
     require(table.pop_frame(id, &frame) && frame.type == capsid::BindingStreamFrame::Type::kEnd,
             "pop end frame");
@@ -68,6 +76,59 @@ void test_open_credit_flow_and_close() {
 
     require(table.close_and_erase(id), "close_and_erase");
     require(table.empty() && ledger.empty(), "table and ledger completely empty");
+}
+
+void test_staged_native_accounting_and_credit_slicing() {
+    capsid::BindingRpcLedger ledger;
+    capsid::BindingStreamTable table(&ledger);
+
+    std::uint64_t id = 0;
+    capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
+    require(table.open_stream(capsid::BindingStreamKind::kWritable,
+                              capsid::BindingStreamSide::kUser, 99, "svc", 0, &id, &qerr,
+                              capsid::kBindingStreamInitialCreditBytes),
+            "open writable stream");
+
+    // Stage a 150 KiB native write immediately into the ledger (3 frames).
+    const std::size_t total_len = 150U * 1024U;
+    std::vector<std::uint8_t> payload(total_len, 0x7A);
+    std::string err;
+    require(table.stage_pending(id, total_len, 3, &err), "stage 150 KiB");
+    require(ledger.worker_counts().bytes == total_len && ledger.worker_counts().frames == 3,
+            "ledger immediately accounted full staged 150 KiB / 3 frames");
+    require(table.find(id)->staged_bytes == total_len && table.find(id)->queued_bytes == 0,
+            "stream record tracks staged bytes");
+
+    // Attempting to stage > 2 MiB total fails closed without mutating ledger.
+    require(!table.stage_pending(id, capsid::kBindingStreamMaxBufferedBytes, 1, &err),
+            "per-stream 2 MiB cap includes staged bytes");
+    require(ledger.worker_counts().bytes == total_len && ledger.worker_counts().frames == 3,
+            "rejected stage did not mutate ledger");
+
+    // Admit slice 1 (64 KiB) -> credit becomes 0, NO double-charging in ledger!
+    const std::size_t s1 = 64U * 1024U;
+    require(table.admit_staged_bytes(id, payload.data(), s1, s1, 1, &err), "admit 64 KiB slice 1");
+    require(table.find(id)->credit_bytes == 0, "credit exhausted after 64 KiB");
+    require(ledger.worker_counts().bytes == total_len && ledger.worker_counts().frames == 3,
+            "admitting staged slice did not double-charge ledger");
+    require(!table.admit_staged_bytes(id, payload.data() + s1, s1, s1, 1, &err),
+            "slice 2 blocked at 0 credit");
+
+    // Consumer pops slice 1 and grants 64 KiB credit -> ledger drops by 64 KiB / 1 frame.
+    capsid::BindingStreamFrame frame;
+    require(table.pop_frame(id, &frame) && frame.bytes.size() == s1, "pop slice 1");
+    require(ledger.worker_counts().bytes == total_len - s1 && ledger.worker_counts().frames == 2,
+            "pop released slice 1 bytes");
+    require(table.grant_credit(id, s1), "grant 64 KiB credit");
+
+    // Cancel remaining staged bytes -> ledger returns cleanly to 0!
+    require(table.cancel_from_consumer(
+                id, capsid::RemoteErrorInfo::make_dom_exception("AbortError", "cancel")),
+            "cancel with staged bytes");
+    require(ledger.worker_counts().bytes == 0 && ledger.worker_counts().frames == 0,
+            "cancel released remaining staged bytes and frames");
+    require(table.close_and_erase(id) && table.empty() && ledger.empty(),
+            "staged cleanup zero leak");
 }
 
 void test_limits_error_cancel_and_request_teardown() {
@@ -133,7 +194,8 @@ void test_limits_error_cancel_and_request_teardown() {
 
 int main() {
     test_open_credit_flow_and_close();
+    test_staged_native_accounting_and_credit_slicing();
     test_limits_error_cancel_and_request_teardown();
-    std::cout << "test-binding-stream-table: PASS (2 suites)" << std::endl;
+    std::cout << "test-binding-stream-table: PASS (3 suites)" << std::endl;
     return 0;
 }

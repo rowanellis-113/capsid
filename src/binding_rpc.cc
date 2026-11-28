@@ -1207,13 +1207,26 @@ void binding_signal_remove_abort_listener(JSContext* ctx, JSValueConst signal,
     }
 }
 
+void free_binding_call_options(JSContext* ctx, BindingCallOptions* options) {
+    if (options == NULL) {
+        return;
+    }
+    if (ctx != NULL && !JS_IsUndefined(options->signal)) {
+        JS_FreeValue(ctx, options->signal);
+    }
+    options->signal = JS_UNDEFINED;
+    options->has_signal = false;
+    options->has_timeout_ms = false;
+    options->timeout_ms = 0;
+}
+
 bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
                                 const BindingRpcIntrinsics* intrinsics, BindingCallOptions* out,
                                 std::string* error) {
     if (ctx == NULL || out == NULL) {
         return fail_closed(error, "binding call options arguments are invalid");
     }
-    *out = BindingCallOptions();
+    free_binding_call_options(ctx, out);
     if (error != NULL) {
         error->clear();
     }
@@ -1272,6 +1285,7 @@ bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
     for (uint32_t index = 0; index < count; ++index) {
         const char* key = JS_AtomToCString(ctx, tab[index].atom);
         if (key == NULL) {
+            free_binding_call_options(ctx, &parsed);
             JS_FreePropertyEnum(ctx, tab, count);
             return fail_closed(error, "binding call option key is unreadable");
         }
@@ -1281,6 +1295,7 @@ bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
         JSPropertyDescriptor desc;
         if (JS_GetOwnProperty(ctx, &desc, value, tab[index].atom) < 0) {
             clear_pending_exception(ctx);
+            free_binding_call_options(ctx, &parsed);
             JS_FreePropertyEnum(ctx, tab, count);
             return fail_closed(error, "binding call option property is unreadable");
         }
@@ -1290,6 +1305,7 @@ bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
         JS_FreeValue(ctx, desc.setter);
         if (is_accessor) {
             JS_FreeValue(ctx, prop);
+            free_binding_call_options(ctx, &parsed);
             JS_FreePropertyEnum(ctx, tab, count);
             return fail_closed(error, "binding call options do not allow accessor properties");
         }
@@ -1300,6 +1316,7 @@ bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
                 if (!JS_IsNumber(prop) || JS_ToFloat64(ctx, &ms, prop) != 0 || !std::isfinite(ms) ||
                     ms < 0.0 || ms > kMaxBindingTimeoutMs) {
                     JS_FreeValue(ctx, prop);
+                    free_binding_call_options(ctx, &parsed);
                     JS_FreePropertyEnum(ctx, tab, count);
                     return fail_closed(
                         error,
@@ -1314,18 +1331,24 @@ bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
                 bool aborted = false;
                 if (!binding_signal_is_aborted(ctx, prop, intrinsics, &aborted)) {
                     JS_FreeValue(ctx, prop);
+                    free_binding_call_options(ctx, &parsed);
                     JS_FreePropertyEnum(ctx, tab, count);
                     return fail_closed(error,
                                        "binding call option 'signal' must be an AbortSignal");
                 }
+                if (!JS_IsUndefined(parsed.signal)) {
+                    JS_FreeValue(ctx, parsed.signal);
+                }
                 parsed.has_signal = true;
-                // `prop` is owned by the options object (still rooted on the
-                // caller stack), so drop the extra descriptor ref and borrow.
+                // Transfer the descriptor's strong reference directly into
+                // `parsed.signal` so subsequent JS execution cannot collect it.
                 parsed.signal = prop;
+            } else {
+                JS_FreeValue(ctx, prop);
             }
-            JS_FreeValue(ctx, prop);
         } else {
             JS_FreeValue(ctx, prop);
+            free_binding_call_options(ctx, &parsed);
             JS_FreePropertyEnum(ctx, tab, count);
             if (error != NULL) {
                 *error = "unknown binding call option: " + key_str;

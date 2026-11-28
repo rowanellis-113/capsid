@@ -203,13 +203,17 @@ struct BindingCallOptions {
     bool has_timeout_ms = false;
     std::uint64_t timeout_ms = 0;
     bool has_signal = false;
-    JSValueConst signal = JS_UNDEFINED; // borrowed from options argument
+    JSValue signal = JS_UNDEFINED; // owned in caller ctx; release via free_binding_call_options
 };
+
+// Releases owned JSValues held by `BindingCallOptions` (idempotent).
+void free_binding_call_options(JSContext* ctx, BindingCallOptions* options);
 
 // Strict parser for optional `binding.method(input, options)` second argument.
 // Rejects non-plain objects, proxies, accessors, unknown keys, non-finite or
 // negative timeoutMs, and non-AbortSignal `signal` values without invoking any
-// attacker-controlled getters or traps.
+// attacker-controlled getters or traps. On success, `out->signal` holds an
+// owned reference that remains valid across subsequent JS execution.
 bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
                                 const BindingRpcIntrinsics* intrinsics, BindingCallOptions* out,
                                 std::string* error);

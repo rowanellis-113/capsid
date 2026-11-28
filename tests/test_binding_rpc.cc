@@ -434,7 +434,7 @@ void test_remote_error_structured_and_tamper_proof() {
     require(huge_info.message.size() == capsid::kMaxRemoteErrorMessageBytes,
             "oversized remote error message was not truncated to limit");
 
-    // BindingCallOptions strict validation.
+    // BindingCallOptions strict validation + owned signal survival across GC.
     capsid::BindingCallOptions opts;
     std::string opt_err;
     JSValue valid_opts = source.eval("({ timeoutMs: 250, signal: new AbortSignal() })");
@@ -443,7 +443,16 @@ void test_remote_error_structured_and_tamper_proof() {
             ("valid options rejected: " + opt_err).c_str());
     require(opts.has_timeout_ms && opts.timeout_ms == 250 && opts.has_signal,
             "valid options did not decode fields");
+    // Drop the options object completely and run GC; owned `opts.signal` must
+    // remain valid until explicitly released by free_binding_call_options.
     JS_FreeValue(source.ctx(), valid_opts);
+    JS_RunGC(JS_GetRuntime(source.ctx()));
+    bool signal_aborted = true;
+    require(capsid::binding_signal_is_aborted(source.ctx(), opts.signal, &src_intrinsics,
+                                              &signal_aborted) &&
+                !signal_aborted,
+            "owned options.signal did not survive container collection");
+    capsid::free_binding_call_options(source.ctx(), &opts);
 
     const char* bad_opts[] = {
         "123",
@@ -455,6 +464,8 @@ void test_remote_error_structured_and_tamper_proof() {
         "({ timeoutMs: Infinity })",
         "({ timeoutMs: '100' })",
         "({ signal: { aborted: false } })",
+        "({ signal: new AbortSignal(), timeoutMs: -1 })",
+        "({ signal: new AbortSignal(), extraBadKey: 1 })",
         "Object.defineProperty({}, 'timeoutMs', { get() { globalThis.__optGetter = true; return 10; }, enumerable: true })",
     };
     JS_FreeValue(source.ctx(), source.eval("globalThis.__optGetter = false;"));
@@ -465,6 +476,8 @@ void test_remote_error_structured_and_tamper_proof() {
                                                     &opt_err) &&
                     !opt_err.empty(),
                 (std::string("bad options accepted: ") + bad_opts[i]).c_str());
+        require(!opts.has_signal && JS_IsUndefined(opts.signal),
+                "failed parse leaked signal ownership");
         JS_FreeValue(source.ctx(), bad);
     }
     JSValue opt_ran = source.eval("globalThis.__optGetter");

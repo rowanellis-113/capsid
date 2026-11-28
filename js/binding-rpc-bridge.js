@@ -7,27 +7,44 @@
 // `capsidInstallBindingBridge` and never exposed on globalThis.
 
 import {
-  bridgeHeaderPairs,
   createHeadersFromIncomingPairs,
   markResponseHeadersImmutable,
   consumeFastResponseBody,
   getFastStreamResponseBody,
   isNullFastResponseBody,
+  isGenuineRequest,
+  isGenuineResponse,
+  tryBridgeOwnedHeaderPairs,
 } from './fetch.js';
 import { getResponseWebSocket } from './websocket.js';
 
 const ownDesc = Object.getOwnPropertyDescriptor;
 const getProto = Object.getPrototypeOf;
-const objectHasOwn = Object.hasOwn;
+const objectDefineProperty = Object.defineProperty;
+const objectGetOwnPropertyNames = Object.getOwnPropertyNames;
+const ObjectProto = Object.prototype;
+const arrayIsArray = Array.isArray;
+const numberIsInteger = Number.isInteger;
+const reflectApply = Reflect.apply;
+const reflectConstruct = Reflect.construct;
+const IntrinsicProxy = Proxy;
 const IntrinsicPromise = Promise;
 const promiseThen = IntrinsicPromise.prototype.then;
 const promiseResolve = IntrinsicPromise.resolve.bind(IntrinsicPromise);
+const promiseReject = IntrinsicPromise.reject.bind(IntrinsicPromise);
+const IntrinsicSet = Set;
+const setHas = IntrinsicSet.prototype.has;
+const setAdd = IntrinsicSet.prototype.add;
+const IntrinsicWeakMap = WeakMap;
+const weakMapGet = IntrinsicWeakMap.prototype.get;
+const weakMapSet = IntrinsicWeakMap.prototype.set;
 
 const IntrinsicReadableStream = ReadableStream;
 const IntrinsicWritableStream = WritableStream;
+const IntrinsicReadableStreamDefaultReader = ReadableStreamDefaultReader;
+const IntrinsicWritableStreamDefaultWriter = WritableStreamDefaultWriter;
 const IntrinsicRequest = Request;
 const IntrinsicResponse = Response;
-const IntrinsicHeaders = Headers;
 const IntrinsicAbortController = AbortController;
 const abortControllerAbort = IntrinsicAbortController.prototype.abort;
 const IntrinsicDOMException = DOMException;
@@ -45,30 +62,363 @@ const dataViewByteLength = ownDesc(dataViewProto, 'byteLength').get;
 const arrayBufferByteLength = ownDesc(IntrinsicArrayBuffer.prototype, 'byteLength').get;
 
 const readableLockedGetter = ownDesc(IntrinsicReadableStream.prototype, 'locked').get;
+const readableCancel = IntrinsicReadableStream.prototype.cancel;
 const readableGetReader = IntrinsicReadableStream.prototype.getReader;
-const readerRead = ReadableStreamDefaultReader.prototype.read;
-const readerCancel = ReadableStreamDefaultReader.prototype.cancel;
+const readableTee = IntrinsicReadableStream.prototype.tee;
+const readablePipeTo = IntrinsicReadableStream.prototype.pipeTo;
+const readablePipeThrough = IntrinsicReadableStream.prototype.pipeThrough;
+const readableValues = IntrinsicReadableStream.prototype.values;
+const readableAsyncIterator = IntrinsicReadableStream.prototype[Symbol.asyncIterator];
+const readerRead = IntrinsicReadableStreamDefaultReader.prototype.read;
+const readerCancel = IntrinsicReadableStreamDefaultReader.prototype.cancel;
+const readerReleaseLock = IntrinsicReadableStreamDefaultReader.prototype.releaseLock;
 const readableCtrlProto = ReadableStreamDefaultController.prototype;
 const readableCtrlEnqueue = readableCtrlProto.enqueue;
 const readableCtrlClose = readableCtrlProto.close;
 const readableCtrlError = readableCtrlProto.error;
 
 const writableLockedGetter = ownDesc(IntrinsicWritableStream.prototype, 'locked').get;
+const writableAbort = IntrinsicWritableStream.prototype.abort;
+const writableClose = IntrinsicWritableStream.prototype.close;
 const writableGetWriter = IntrinsicWritableStream.prototype.getWriter;
-const writerWrite = WritableStreamDefaultWriter.prototype.write;
-const writerClose = WritableStreamDefaultWriter.prototype.close;
-const writerAbort = WritableStreamDefaultWriter.prototype.abort;
+const writerWrite = IntrinsicWritableStreamDefaultWriter.prototype.write;
+const writerClose = IntrinsicWritableStreamDefaultWriter.prototype.close;
+const writerAbort = IntrinsicWritableStreamDefaultWriter.prototype.abort;
+const writerReleaseLock = IntrinsicWritableStreamDefaultWriter.prototype.releaseLock;
 
 const requestProto = IntrinsicRequest.prototype;
 const responseProto = IntrinsicResponse.prototype;
-const requestBodyUsedGetter = ownDesc(requestProto, 'bodyUsed').get;
+const requestBodyGetter = ownDesc(requestProto, 'body').get;
 const requestHeadersGetter = ownDesc(requestProto, 'headers').get;
 const requestSignalGetter = ownDesc(requestProto, 'signal').get;
-const responseBodyUsedGetter = ownDesc(responseProto, 'bodyUsed').get;
+const responseBodyGetter = ownDesc(responseProto, 'body').get;
 const responseHeadersGetter = ownDesc(responseProto, 'headers').get;
 
 const sharedTextEncoder = new TextEncoder();
 const textEncoderEncode = TextEncoder.prototype.encode;
+
+// F4: Private ownership-fence registries for User-side Binding stream proxies.
+// Checked BEFORE js/streams.js mutates stream/reader/writer/controller state so
+// a rejected cross-request call can never close, lock, disturb, or abort the
+// owning request's stream.
+const fencedReadableStreams = new IntrinsicWeakMap();
+const fencedReadableReaders = new IntrinsicWeakMap();
+const fencedWritableStreams = new IntrinsicWeakMap();
+const fencedWritableWriters = new IntrinsicWeakMap();
+let streamFenceGuardsInstalled = false;
+
+function makeStreamFenceError() {
+  return new IntrinsicDOMException(
+    'Cannot use Binding stream proxy outside its owning request',
+    'InvalidStateError',
+  );
+}
+
+function isObjectOrFunc(value) {
+  return value !== null && (typeof value === 'object' || typeof value === 'function');
+}
+
+function checkStreamFence(map, target) {
+  if (!isObjectOrFunc(target)) {
+    return true;
+  }
+  const checkOwner = weakMapGet.call(map, target);
+  return checkOwner === undefined || Boolean(checkOwner());
+}
+
+function getStreamFence(map, target) {
+  if (!isObjectOrFunc(target)) {
+    return undefined;
+  }
+  return weakMapGet.call(map, target);
+}
+
+function defineGuardedMethod(proto, key, wrapper) {
+  const desc = ownDesc(proto, key);
+  if (!desc || typeof desc.value !== 'function') {
+    return;
+  }
+  const origName = ownDesc(desc.value, 'name');
+  if (origName && typeof origName.value === 'string') {
+    objectDefineProperty(wrapper, 'name', { value: origName.value, configurable: true });
+  }
+  objectDefineProperty(proto, key, {
+    value: wrapper,
+    writable: desc.writable,
+    enumerable: desc.enumerable,
+    configurable: desc.configurable,
+  });
+}
+
+function wrapFencedAsyncIterator(iterator, checkOwner) {
+  if (!isObjectOrFunc(iterator)) {
+    return iterator;
+  }
+  const nextFn = iterator.next;
+  if (typeof nextFn === 'function') {
+    objectDefineProperty(iterator, 'next', {
+      value: function next() {
+        if (!checkOwner()) {
+          return promiseReject(makeStreamFenceError());
+        }
+        return reflectApply(nextFn, this, arguments);
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+  const returnFn = iterator.return;
+  if (typeof returnFn === 'function') {
+    objectDefineProperty(iterator, 'return', {
+      value: function () {
+        if (!checkOwner()) {
+          return promiseReject(makeStreamFenceError());
+        }
+        return reflectApply(returnFn, this, arguments);
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+  return iterator;
+}
+
+// Installed during User bootstrap ONLY when the worker loads at least one
+// Binding (never on zero-Binding workers or Binding runtimes). Runs before any
+// application module evaluates so saved prototype references are also guarded.
+function installStreamFenceGuards() {
+  if (streamFenceGuardsInstalled) {
+    return;
+  }
+  streamFenceGuardsInstalled = true;
+
+  defineGuardedMethod(IntrinsicReadableStream.prototype, 'cancel', function cancel() {
+    if (!checkStreamFence(fencedReadableStreams, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(readableCancel, this, arguments);
+  });
+
+  defineGuardedMethod(IntrinsicReadableStream.prototype, 'getReader', function getReader() {
+    const checkOwner = getStreamFence(fencedReadableStreams, this);
+    if (checkOwner !== undefined && !checkOwner()) {
+      throw makeStreamFenceError();
+    }
+    const reader = reflectApply(readableGetReader, this, arguments);
+    if (checkOwner !== undefined && isObjectOrFunc(reader)) {
+      weakMapSet.call(fencedReadableReaders, reader, checkOwner);
+    }
+    return reader;
+  });
+
+  defineGuardedMethod(IntrinsicReadableStream.prototype, 'tee', function tee() {
+    const checkOwner = getStreamFence(fencedReadableStreams, this);
+    if (checkOwner !== undefined && !checkOwner()) {
+      throw makeStreamFenceError();
+    }
+    const branches = reflectApply(readableTee, this, arguments);
+    if (checkOwner !== undefined && arrayIsArray(branches)) {
+      for (let i = 0; i < branches.length; i++) {
+        if (isObjectOrFunc(branches[i])) {
+          weakMapSet.call(fencedReadableStreams, branches[i], checkOwner);
+        }
+      }
+    }
+    return branches;
+  });
+
+  defineGuardedMethod(IntrinsicReadableStream.prototype, 'pipeTo', function pipeTo(dest) {
+    if (
+      !checkStreamFence(fencedReadableStreams, this) ||
+      !checkStreamFence(fencedWritableStreams, dest)
+    ) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(readablePipeTo, this, arguments);
+  });
+
+  defineGuardedMethod(
+    IntrinsicReadableStream.prototype,
+    'pipeThrough',
+    function pipeThrough(transform) {
+      if (!checkStreamFence(fencedReadableStreams, this)) {
+        throw makeStreamFenceError();
+      }
+      if (isObjectOrFunc(transform)) {
+        const w = ownDesc(transform, 'writable')?.value ?? ownDesc(transform, '_writable')?.value;
+        if (!checkStreamFence(fencedWritableStreams, w)) {
+          throw makeStreamFenceError();
+        }
+      }
+      return reflectApply(readablePipeThrough, this, arguments);
+    },
+  );
+
+  defineGuardedMethod(IntrinsicReadableStream.prototype, 'values', function values() {
+    const checkOwner = getStreamFence(fencedReadableStreams, this);
+    if (checkOwner !== undefined && !checkOwner()) {
+      throw makeStreamFenceError();
+    }
+    const iter = reflectApply(readableValues, this, arguments);
+    return checkOwner !== undefined ? wrapFencedAsyncIterator(iter, checkOwner) : iter;
+  });
+
+  if (typeof readableAsyncIterator === 'function') {
+    defineGuardedMethod(
+      IntrinsicReadableStream.prototype,
+      Symbol.asyncIterator,
+      function asyncIterator() {
+        const checkOwner = getStreamFence(fencedReadableStreams, this);
+        if (checkOwner !== undefined && !checkOwner()) {
+          throw makeStreamFenceError();
+        }
+        const iter = reflectApply(readableAsyncIterator, this, arguments);
+        return checkOwner !== undefined ? wrapFencedAsyncIterator(iter, checkOwner) : iter;
+      },
+    );
+  }
+
+  defineGuardedMethod(IntrinsicReadableStreamDefaultReader.prototype, 'read', function read() {
+    if (!checkStreamFence(fencedReadableReaders, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(readerRead, this, arguments);
+  });
+
+  defineGuardedMethod(IntrinsicReadableStreamDefaultReader.prototype, 'cancel', function cancel() {
+    if (!checkStreamFence(fencedReadableReaders, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(readerCancel, this, arguments);
+  });
+
+  defineGuardedMethod(
+    IntrinsicReadableStreamDefaultReader.prototype,
+    'releaseLock',
+    function releaseLock() {
+      if (!checkStreamFence(fencedReadableReaders, this)) {
+        throw makeStreamFenceError();
+      }
+      return reflectApply(readerReleaseLock, this, arguments);
+    },
+  );
+
+  defineGuardedMethod(IntrinsicWritableStream.prototype, 'abort', function abort() {
+    if (!checkStreamFence(fencedWritableStreams, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(writableAbort, this, arguments);
+  });
+
+  defineGuardedMethod(IntrinsicWritableStream.prototype, 'close', function close() {
+    if (!checkStreamFence(fencedWritableStreams, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(writableClose, this, arguments);
+  });
+
+  defineGuardedMethod(IntrinsicWritableStream.prototype, 'getWriter', function getWriter() {
+    const checkOwner = getStreamFence(fencedWritableStreams, this);
+    if (checkOwner !== undefined && !checkOwner()) {
+      throw makeStreamFenceError();
+    }
+    const writer = reflectApply(writableGetWriter, this, arguments);
+    if (checkOwner !== undefined && isObjectOrFunc(writer)) {
+      weakMapSet.call(fencedWritableWriters, writer, checkOwner);
+    }
+    return writer;
+  });
+
+  defineGuardedMethod(IntrinsicWritableStreamDefaultWriter.prototype, 'write', function write() {
+    if (!checkStreamFence(fencedWritableWriters, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(writerWrite, this, arguments);
+  });
+
+  defineGuardedMethod(IntrinsicWritableStreamDefaultWriter.prototype, 'close', function close() {
+    if (!checkStreamFence(fencedWritableWriters, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(writerClose, this, arguments);
+  });
+
+  defineGuardedMethod(IntrinsicWritableStreamDefaultWriter.prototype, 'abort', function abort() {
+    if (!checkStreamFence(fencedWritableWriters, this)) {
+      return promiseReject(makeStreamFenceError());
+    }
+    return reflectApply(writerAbort, this, arguments);
+  });
+
+  defineGuardedMethod(
+    IntrinsicWritableStreamDefaultWriter.prototype,
+    'releaseLock',
+    function releaseLock() {
+      if (!checkStreamFence(fencedWritableWriters, this)) {
+        throw makeStreamFenceError();
+      }
+      return reflectApply(writerReleaseLock, this, arguments);
+    },
+  );
+
+  // Guard direct `new ReadableStreamDefaultReader(stream)` and
+  // `new WritableStreamDefaultWriter(stream)` construction as well.
+  const guardedReaderCtor = new IntrinsicProxy(IntrinsicReadableStreamDefaultReader, {
+    construct(target, args, newTarget) {
+      const stream = args.length > 0 ? args[0] : undefined;
+      const checkOwner = getStreamFence(fencedReadableStreams, stream);
+      if (checkOwner !== undefined && !checkOwner()) {
+        throw makeStreamFenceError();
+      }
+      const reader = reflectConstruct(
+        target,
+        args,
+        newTarget === guardedReaderCtor ? target : newTarget,
+      );
+      if (checkOwner !== undefined && isObjectOrFunc(reader)) {
+        weakMapSet.call(fencedReadableReaders, reader, checkOwner);
+      }
+      return reader;
+    },
+  });
+  const readerGlobalDesc = ownDesc(globalThis, 'ReadableStreamDefaultReader');
+  if (readerGlobalDesc && readerGlobalDesc.configurable) {
+    objectDefineProperty(globalThis, 'ReadableStreamDefaultReader', {
+      value: guardedReaderCtor,
+      writable: readerGlobalDesc.writable,
+      enumerable: readerGlobalDesc.enumerable,
+      configurable: readerGlobalDesc.configurable,
+    });
+  }
+
+  const guardedWriterCtor = new IntrinsicProxy(IntrinsicWritableStreamDefaultWriter, {
+    construct(target, args, newTarget) {
+      const stream = args.length > 0 ? args[0] : undefined;
+      const checkOwner = getStreamFence(fencedWritableStreams, stream);
+      if (checkOwner !== undefined && !checkOwner()) {
+        throw makeStreamFenceError();
+      }
+      const writer = reflectConstruct(
+        target,
+        args,
+        newTarget === guardedWriterCtor ? target : newTarget,
+      );
+      if (checkOwner !== undefined && isObjectOrFunc(writer)) {
+        weakMapSet.call(fencedWritableWriters, writer, checkOwner);
+      }
+      return writer;
+    },
+  });
+  const writerGlobalDesc = ownDesc(globalThis, 'WritableStreamDefaultWriter');
+  if (writerGlobalDesc && writerGlobalDesc.configurable) {
+    objectDefineProperty(globalThis, 'WritableStreamDefaultWriter', {
+      value: guardedWriterCtor,
+      writable: writerGlobalDesc.writable,
+      enumerable: writerGlobalDesc.enumerable,
+      configurable: writerGlobalDesc.configurable,
+    });
+  }
+}
 
 function isReadableStream(value) {
   if (value === null || typeof value !== 'object') {
@@ -92,10 +442,15 @@ function isWritableStream(value) {
   }
 }
 
-// Returns 0 = transferable, 1 = locked, 2 = disturbed/unusable.
+// Returns 0 = transferable, 1 = locked, 2 = disturbed/errored, 3 = foreign request.
+// F8: An unlocked, undisturbed, already-closed empty ReadableStream (`_state === 'closed'`)
+// is transferable and preserves EOF semantics across the boundary.
 function checkReadableTransferable(stream) {
   if (!isReadableStream(stream)) {
     return -1;
+  }
+  if (!checkStreamFence(fencedReadableStreams, stream)) {
+    return 3;
   }
   if (readableLockedGetter.call(stream)) {
     return 1;
@@ -104,16 +459,19 @@ function checkReadableTransferable(stream) {
     return 2;
   }
   const state = ownDesc(stream, '_state')?.value;
-  if (state !== undefined && state !== 'readable') {
+  if (state !== undefined && state !== 'readable' && state !== 'closed') {
     return 2;
   }
   return 0;
 }
 
-// Returns 0 = transferable, 1 = locked, 2 = closed/errored.
+// Returns 0 = transferable, 1 = locked, 2 = closed/errored, 3 = foreign request.
 function checkWritableTransferable(stream) {
   if (!isWritableStream(stream)) {
     return -1;
+  }
+  if (!checkStreamFence(fencedWritableStreams, stream)) {
+    return 3;
   }
   if (writableLockedGetter.call(stream)) {
     return 1;
@@ -193,7 +551,7 @@ function attachReadableSource(stream, onChunk, onEnd, onError) {
   };
 }
 
-function createReadableProxy(onPull, onCancel) {
+function createReadableProxy(onPull, onCancel, checkOwner) {
   let ctrl = null;
   let closed = false;
   const stream = new IntrinsicReadableStream(
@@ -211,6 +569,9 @@ function createReadableProxy(onPull, onCancel) {
     },
     { highWaterMark: 0 },
   );
+  if (typeof checkOwner === 'function') {
+    weakMapSet.call(fencedReadableStreams, stream, checkOwner);
+  }
   return {
     stream,
     enqueue(chunk) {
@@ -288,7 +649,7 @@ function attachWritableSource(stream) {
   };
 }
 
-function createWritableProxy(onWrite, onClose, onAbort) {
+function createWritableProxy(onWrite, onClose, onAbort, checkOwner) {
   let ctrl = null;
   const stream = new IntrinsicWritableStream(
     {
@@ -307,6 +668,9 @@ function createWritableProxy(onWrite, onClose, onAbort) {
     },
     { highWaterMark: 1 },
   );
+  if (typeof checkOwner === 'function') {
+    weakMapSet.call(fencedWritableStreams, stream, checkOwner);
+  }
   return {
     stream,
     error(err) {
@@ -320,43 +684,110 @@ function createWritableProxy(onWrite, onClose, onAbort) {
   };
 }
 
-// M4C helpers (genuine Request / Response brand inspection & construction).
+// M4C / F8 helpers: unforgeable WeakSet brand checks registered at construction
+// time in js/fetch.js (supporting genuine subclasses while rejecting spoofed
+// objects) plus side-effect-free data-descriptor extraction.
 function isRequest(value) {
-  if (value === null || typeof value !== 'object') return false;
-  return (
-    getProto(value) === requestProto &&
-    objectHasOwn(value, '_bodyConsumed') &&
-    objectHasOwn(value, '_noBody') &&
-    objectHasOwn(value, 'method') &&
-    objectHasOwn(value, 'url')
-  );
+  return isGenuineRequest(value);
 }
 
 function isResponse(value) {
-  if (value === null || typeof value !== 'object') return false;
-  return (
-    getProto(value) === responseProto &&
-    objectHasOwn(value, '_bodyConsumed') &&
-    objectHasOwn(value, '_noBody') &&
-    objectHasOwn(value, 'status')
-  );
+  return isGenuineResponse(value);
+}
+
+function readDataProp(obj, key) {
+  const desc = ownDesc(obj, key);
+  if (desc === undefined) {
+    return { present: false, accessor: false, value: undefined };
+  }
+  if (desc.get !== undefined || desc.set !== undefined) {
+    return { present: true, accessor: true, value: undefined };
+  }
+  return { present: true, accessor: false, value: desc.value };
+}
+
+function readSafeStringSlot(obj, key, fallback) {
+  const prop = readDataProp(obj, key);
+  if (!prop.present) return { ok: true, value: fallback };
+  if (prop.accessor || typeof prop.value !== 'string') return { ok: false, value: '' };
+  return { ok: true, value: prop.value };
+}
+
+function readSafeOptionalStringSlot(obj, key) {
+  const prop = readDataProp(obj, key);
+  if (!prop.present || prop.value === null || prop.value === undefined) {
+    return { ok: true, value: null };
+  }
+  if (prop.accessor || typeof prop.value !== 'string') return { ok: false, value: null };
+  return { ok: true, value: prop.value };
+}
+
+function isBodyUsedSafely(obj) {
+  const consumed = readDataProp(obj, '_bodyConsumed');
+  if (consumed.accessor) return { ok: false, used: true };
+  if (consumed.value === true) return { ok: true, used: true };
+  const streamProp = readDataProp(obj, '_bodyStream');
+  if (streamProp.accessor) return { ok: false, used: true };
+  const stream = streamProp.value;
+  if (stream !== null && stream !== undefined && isReadableStream(stream)) {
+    const disturbed = readDataProp(stream, '_disturbed');
+    if (disturbed.accessor) return { ok: false, used: true };
+    if (disturbed.value === true) return { ok: true, used: true };
+  }
+  return { ok: true, used: false };
 }
 
 function inspectRequest(req) {
   if (!isRequest(req)) return null;
-  if (requestBodyUsedGetter.call(req)) {
+  const usedCheck = isBodyUsedSafely(req);
+  if (!usedCheck.ok) return { error: 'Request internal state was tampered with' };
+  if (usedCheck.used) {
     return { error: 'Request body is already used' };
   }
+
+  const urlSlot = readSafeStringSlot(req, 'url', '');
+  const methodSlot = readSafeStringSlot(req, 'method', 'GET');
+  const credSlot = readSafeStringSlot(req, 'credentials', 'same-origin');
+  const redirSlot = readSafeStringSlot(req, 'redirect', 'follow');
+  const modeSlot = readSafeOptionalStringSlot(req, 'mode');
+  if (!urlSlot.ok || !methodSlot.ok || !credSlot.ok || !redirSlot.ok || !modeSlot.ok) {
+    return { error: 'Request metadata contains tampered properties' };
+  }
+
+  const rawHeadersProp = readDataProp(req, '_rawHeaders');
+  const headersSlotProp = readDataProp(req, '_headers');
+  if (rawHeadersProp.accessor || headersSlotProp.accessor) {
+    return { error: 'Request headers state was tampered with' };
+  }
   const headersObj = requestHeadersGetter.call(req);
-  const headerPairs = headersObj ? bridgeHeaderPairs(headersObj) : [];
+  let headerPairs = [];
+  if (headersObj !== null && headersObj !== undefined) {
+    const ownedPairs = tryBridgeOwnedHeaderPairs(headersObj);
+    if (ownedPairs === null) {
+      return { error: 'Request headers is not a genuine Headers object' };
+    }
+    headerPairs = ownedPairs;
+  }
+
+  const signalSlotProp = readDataProp(req, '_signal');
+  const signalStateProp = readDataProp(req, '_signalState');
+  if (signalSlotProp.accessor || signalStateProp.accessor) {
+    return { error: 'Request signal state was tampered with' };
+  }
   const signal = requestSignalGetter.call(req);
 
   let bodyKind = 0; // 0 = none, 1 = inline bytes, 2 = stream
   let inlineBytes = null;
   let bodyStream = null;
-  const fastKind = ownDesc(req, '_bodyFastKind')?.value ?? 0;
-  const fastData = ownDesc(req, '_bodyFastData')?.value ?? null;
-  const rawStream = ownDesc(req, '_bodyStream')?.value ?? null;
+  const fastKindProp = readDataProp(req, '_bodyFastKind');
+  const fastDataProp = readDataProp(req, '_bodyFastData');
+  const rawStreamProp = readDataProp(req, '_bodyStream');
+  if (fastKindProp.accessor || fastDataProp.accessor || rawStreamProp.accessor) {
+    return { error: 'Request body state was tampered with' };
+  }
+  const fastKind = fastKindProp.value ?? 0;
+  const fastData = fastDataProp.value ?? null;
+  const rawStream = rawStreamProp.value ?? null;
 
   if (fastKind === 1 && typeof fastData === 'string') {
     const encoded = textEncoderEncode.call(sharedTextEncoder, fastData);
@@ -366,7 +797,7 @@ function inspectRequest(req) {
       req._bodyConsumed = true;
     } else {
       bodyKind = 2;
-      bodyStream = req.body;
+      bodyStream = requestBodyGetter.call(req);
     }
   } else if (fastKind === 2 && fastData !== null) {
     const view = extractBytes(fastData);
@@ -376,22 +807,28 @@ function inspectRequest(req) {
       req._bodyConsumed = true;
     } else {
       bodyKind = 2;
-      bodyStream = req.body;
+      bodyStream = requestBodyGetter.call(req);
     }
   } else if (rawStream !== null && rawStream !== undefined) {
     const check = checkReadableTransferable(rawStream);
     if (check === 1) return { error: 'Request body stream is locked' };
     if (check === 2) return { error: 'Request body stream is disturbed' };
+    if (check === 3) {
+      return {
+        error: 'InvalidStateError: Cannot transfer Binding stream proxy outside its owning request',
+      };
+    }
+    if (check !== 0) return { error: 'Request body stream is not transferable' };
     bodyKind = 2;
     bodyStream = rawStream;
   }
 
   return {
-    url: String(ownDesc(req, 'url')?.value ?? ''),
-    method: String(ownDesc(req, 'method')?.value ?? 'GET'),
-    credentials: String(ownDesc(req, 'credentials')?.value ?? 'same-origin'),
-    redirect: String(ownDesc(req, 'redirect')?.value ?? 'follow'),
-    mode: ownDesc(req, 'mode')?.value ?? null,
+    url: urlSlot.value,
+    method: methodSlot.value,
+    credentials: credSlot.value,
+    redirect: redirSlot.value,
+    mode: modeSlot.value,
     headers: headerPairs,
     signal: signal ?? null,
     bodyKind,
@@ -428,19 +865,66 @@ function inspectResponse(res) {
   if (getResponseWebSocket(res) !== null) {
     return { error: 'Response with attached WebSocket cannot cross Binding RPC' };
   }
-  if (responseBodyUsedGetter.call(res)) {
+  const usedCheck = isBodyUsedSafely(res);
+  if (!usedCheck.ok) return { error: 'Response internal state was tampered with' };
+  if (usedCheck.used) {
     return { error: 'Response body is already used' };
   }
+
+  const statusProp = readDataProp(res, 'status');
+  if (
+    statusProp.accessor ||
+    (statusProp.present &&
+      (typeof statusProp.value !== 'number' ||
+        !numberIsInteger(statusProp.value) ||
+        (statusProp.value !== 0 && (statusProp.value < 100 || statusProp.value > 599))))
+  ) {
+    return { error: 'Response status was tampered with' };
+  }
+  const status = statusProp.present ? statusProp.value : 200;
+
+  const statusTextSlot = readSafeStringSlot(res, 'statusText', '');
+  const urlSlot = readSafeStringSlot(res, 'url', '');
+  const typeSlot = readSafeStringSlot(res, 'type', 'default');
+  const redirProp = readDataProp(res, 'redirected');
+  if (
+    !statusTextSlot.ok ||
+    !urlSlot.ok ||
+    !typeSlot.ok ||
+    redirProp.accessor ||
+    (redirProp.present && typeof redirProp.value !== 'boolean')
+  ) {
+    return { error: 'Response metadata contains tampered properties' };
+  }
+  const redirected = redirProp.present ? redirProp.value : false;
+
+  const headersSlotProp = readDataProp(res, '_headers');
+  const headersStateProp = readDataProp(res, '_headersState');
+  if (headersSlotProp.accessor || headersStateProp.accessor) {
+    return { error: 'Response headers state was tampered with' };
+  }
   const headersObj = responseHeadersGetter.call(res);
-  const headerPairs = headersObj ? bridgeHeaderPairs(headersObj) : [];
+  let headerPairs = [];
+  if (headersObj !== null && headersObj !== undefined) {
+    const ownedPairs = tryBridgeOwnedHeaderPairs(headersObj);
+    if (ownedPairs === null) {
+      return { error: 'Response headers is not a genuine Headers object' };
+    }
+    headerPairs = ownedPairs;
+  }
 
   let bodyKind = 0; // 0 = none, 1 = inline bytes, 2 = stream
   let inlineBytes = null;
   let bodyStream = null;
-  const status = Number(ownDesc(res, 'status')?.value ?? 200);
-  const fastKind = ownDesc(res, '_bodyFastKind')?.value ?? 0;
-  const fastData = ownDesc(res, '_bodyFastData')?.value ?? null;
-  const rawStream = ownDesc(res, '_bodyStream')?.value ?? null;
+  const fastKindProp = readDataProp(res, '_bodyFastKind');
+  const fastDataProp = readDataProp(res, '_bodyFastData');
+  const rawStreamProp = readDataProp(res, '_bodyStream');
+  if (fastKindProp.accessor || fastDataProp.accessor || rawStreamProp.accessor) {
+    return { error: 'Response body state was tampered with' };
+  }
+  const fastKind = fastKindProp.value ?? 0;
+  const fastData = fastDataProp.value ?? null;
+  const rawStream = rawStreamProp.value ?? null;
 
   if (!isNullFastResponseBody(res)) {
     if (fastKind === 1 && typeof fastData === 'string') {
@@ -451,7 +935,7 @@ function inspectResponse(res) {
         res._bodyConsumed = true;
       } else {
         bodyKind = 2;
-        bodyStream = res.body;
+        bodyStream = responseBodyGetter.call(res);
       }
     } else if (fastKind === 2 && fastData !== null) {
       const view = extractBytes(fastData);
@@ -461,7 +945,7 @@ function inspectResponse(res) {
         res._bodyConsumed = true;
       } else {
         bodyKind = 2;
-        bodyStream = res.body;
+        bodyStream = responseBodyGetter.call(res);
       }
     } else {
       const stream = getFastStreamResponseBody(res) ?? rawStream;
@@ -469,6 +953,13 @@ function inspectResponse(res) {
         const check = checkReadableTransferable(stream);
         if (check === 1) return { error: 'Response body stream is locked' };
         if (check === 2) return { error: 'Response body stream is disturbed' };
+        if (check === 3) {
+          return {
+            error:
+              'InvalidStateError: Cannot transfer Binding stream proxy outside its owning request',
+          };
+        }
+        if (check !== 0) return { error: 'Response body stream is not transferable' };
         bodyKind = 2;
         bodyStream = stream;
       } else {
@@ -486,10 +977,10 @@ function inspectResponse(res) {
 
   return {
     status,
-    statusText: String(ownDesc(res, 'statusText')?.value ?? ''),
-    url: String(ownDesc(res, 'url')?.value ?? ''),
-    redirected: Boolean(ownDesc(res, 'redirected')?.value ?? false),
-    type: String(ownDesc(res, 'type')?.value ?? 'default'),
+    statusText: statusTextSlot.value,
+    url: urlSlot.value,
+    redirected,
+    type: typeSlot.value,
     headers: headerPairs,
     bodyKind,
     inlineBytes,
@@ -513,7 +1004,10 @@ function createProxyAbortController() {
 
 function createProxyResponse(meta, body) {
   if (meta.type === 'error' || meta.status === 0) {
-    return IntrinsicResponse.error();
+    // F9: Cross-boundary Response.error() must enforce immutable headers too.
+    const errRes = IntrinsicResponse.error();
+    markResponseHeadersImmutable(errRes);
+    return errRes;
   }
   const headers = createHeadersFromIncomingPairs(meta.headers, false);
   const res = new IntrinsicResponse(body === undefined ? null : body, {
@@ -619,51 +1113,76 @@ function disposeRpcTarget(target) {
   }
 }
 
-function disposeLateValue(value) {
+// F2: Bounded, cycle-safe, identity-deduped late-result disposal covering
+// top-level and nested streams, Request/Response bodies, RpcTargets, and
+// disposable resources inside supported plain objects and arrays.
+const MAX_LATE_DISPOSE_DEPTH = 16;
+const MAX_LATE_DISPOSE_NODES = 256;
+
+function disposeLateValue(root) {
+  if (root === null || typeof root !== 'object') {
+    return;
+  }
   const abortErr = new IntrinsicDOMException('Binding call was canceled', 'AbortError');
-  if (isReadableStream(value)) {
-    try {
-      if (!readableLockedGetter.call(value)) {
-        const reader = readableGetReader.call(value);
-        promiseThen.call(
-          readerCancel.call(reader, abortErr),
-          () => {},
-          () => {},
-        );
+  const visited = new IntrinsicSet();
+  let nodes = 0;
+
+  function walk(value, depth) {
+    if (value === null || typeof value !== 'object') {
+      return;
+    }
+    if (depth > MAX_LATE_DISPOSE_DEPTH || nodes >= MAX_LATE_DISPOSE_NODES) {
+      return;
+    }
+    if (setHas.call(visited, value)) {
+      return;
+    }
+    setAdd.call(visited, value);
+    nodes++;
+
+    if (isReadableStream(value)) {
+      try {
+        if (!readableLockedGetter.call(value)) {
+          const reader = readableGetReader.call(value);
+          promiseThen.call(
+            readerCancel.call(reader, abortErr),
+            () => {},
+            () => {},
+          );
+        }
+      } catch {
+        // Best-effort bounded disposal.
       }
-    } catch {
-      // Best-effort bounded disposal.
+      return;
     }
-    return;
-  }
-  if (isWritableStream(value)) {
-    try {
-      if (!writableLockedGetter.call(value)) {
-        const writer = writableGetWriter.call(value);
-        promiseThen.call(
-          writerAbort.call(writer, abortErr),
-          () => {},
-          () => {},
-        );
+    if (isWritableStream(value)) {
+      try {
+        if (!writableLockedGetter.call(value)) {
+          const writer = writableGetWriter.call(value);
+          promiseThen.call(
+            writerAbort.call(writer, abortErr),
+            () => {},
+            () => {},
+          );
+        }
+      } catch {
+        // Best-effort bounded disposal.
       }
-    } catch {
-      // Best-effort bounded disposal.
+      return;
     }
-    return;
-  }
-  if (isResponse(value)) {
-    const stream = ownDesc(value, '_bodyStream')?.value ?? null;
-    if (stream !== null && isReadableStream(stream)) {
-      disposeLateValue(stream);
+    if (isResponse(value) || isRequest(value)) {
+      const streamProp = readDataProp(value, '_bodyStream');
+      if (!streamProp.accessor && streamProp.value !== null && isReadableStream(streamProp.value)) {
+        walk(streamProp.value, depth + 1);
+      }
+      return;
     }
-    return;
-  }
-  if (isRpcTarget(value)) {
-    disposeRpcTarget(value);
-    return;
-  }
-  // Best-effort Symbol.dispose resource cleanup (bounded, fault-isolated).
-  if (value !== null && typeof value === 'object') {
+    if (isRpcTarget(value)) {
+      disposeRpcTarget(value);
+      return;
+    }
+
+    // Best-effort Symbol.dispose resource cleanup (bounded, fault-isolated).
     if (IntrinsicSymbolDispose !== undefined) {
       try {
         const fn = value[IntrinsicSymbolDispose];
@@ -681,12 +1200,52 @@ function disposeLateValue(value) {
         // Fault-isolated disposal.
       }
     }
+
+    // Recurse into supported plain containers using own data descriptors only
+    // so hostile getters are never invoked during late-result cleanup.
+    if (arrayIsArray(value)) {
+      const lenProp = readDataProp(value, 'length');
+      const len = !lenProp.accessor && typeof lenProp.value === 'number' ? lenProp.value : 0;
+      const limit = len < MAX_LATE_DISPOSE_NODES ? len : MAX_LATE_DISPOSE_NODES;
+      for (let i = 0; i < limit && nodes < MAX_LATE_DISPOSE_NODES; i++) {
+        const elem = readDataProp(value, i);
+        if (elem.present && !elem.accessor) {
+          walk(elem.value, depth + 1);
+        }
+      }
+      return;
+    }
+    let proto;
+    try {
+      proto = getProto(value);
+    } catch {
+      return;
+    }
+    if (proto === null || proto === ObjectProto) {
+      let keys;
+      try {
+        keys = objectGetOwnPropertyNames(value);
+      } catch {
+        return;
+      }
+      for (let i = 0; i < keys.length && nodes < MAX_LATE_DISPOSE_NODES; i++) {
+        const d = ownDesc(value, keys[i]);
+        if (d !== undefined && d.get === undefined && d.set === undefined && d.enumerable) {
+          walk(d.value, depth + 1);
+        }
+      }
+    }
   }
+
+  walk(root, 0);
 }
 
 export function installBindingRpcBridge(core) {
   if (typeof core.capsidInstallBindingBridge !== 'function') {
     return;
+  }
+  if (core.capsidEnableStreamFencing === true) {
+    installStreamFenceGuards();
   }
   core.capsidInstallBindingBridge({
     isReadableStream,

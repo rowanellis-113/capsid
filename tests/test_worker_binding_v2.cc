@@ -718,44 +718,139 @@ export default {
             "m4b writable assertions failed: " + res.body);
 }
 
-// M4B-3: Cross-request stream proxy ownership fencing (concurrent requests).
+// M4B-3 / F4: Pre-mutation cross-request stream proxy ownership fencing.
+// Foreign-request cancel/abort/close/getReader/getWriter/constructor/tee/pipeTo/
+// re-transfer attempts MUST reject/throw InvalidStateError BEFORE js/streams.js
+// mutates stream state, so the owning request can continue reading and writing
+// complete payloads to EOF afterwards.
 void test_m4b_cross_request_fencing(const char* worker_path) {
     const std::string binding_src = R"JS(
+let sinkChunks = [];
+let sinkClosed = false;
 export default () => ({
-  open() {
+  openReadable() {
+    const chunks = [
+      new Uint8Array([0x11, 0x22]),
+      new Uint8Array([0x33, 0x44]),
+      new Uint8Array([0x55, 0x66]),
+    ];
+    let i = 0;
     return new ReadableStream({
-      pull(c) { c.enqueue(new Uint8Array([7, 7])); }
+      pull(c) {
+        if (i >= chunks.length) { c.close(); return; }
+        c.enqueue(chunks[i++]);
+      }
     });
+  },
+  openReadable2() {
+    return new ReadableStream({
+      start(c) {
+        c.enqueue(new Uint8Array([0xaa, 0xbb]));
+        c.close();
+      }
+    });
+  },
+  openWritable() {
+    sinkChunks = [];
+    sinkClosed = false;
+    return new WritableStream({
+      write(chunk) { sinkChunks.push(Array.from(chunk)); },
+      close() { sinkClosed = true; }
+    });
+  },
+  sinkStats() {
+    return { flat: sinkChunks.flat(), closed: sinkClosed };
+  },
+  async upload(stream) {
+    const r = stream.getReader();
+    await r.read();
+    return 'unexpected';
   }
 });
 )JS";
     const std::string app_src = R"JS(
 import svc from 'capsid:binding/svc';
+const savedProtoCancel = ReadableStream.prototype.cancel;
+const savedProtoAbort = WritableStream.prototype.abort;
 let releaseHold = null;
 export default {
   async fetch(req) {
     const path = new URL(req.url).pathname;
     if (path === '/hold') {
-      globalThis.__ownedStream = await svc.open();
+      const r1 = await svc.openReadable();
+      const r2 = await svc.openReadable2();
+      const reader2 = r2.getReader();
+      const w1 = await svc.openWritable();
+      globalThis.__ownedReadable = r1;
+      globalThis.__ownedReader = reader2;
+      globalThis.__ownedWritable = w1;
       await new Promise((r) => {
         releaseHold = r;
         console.log('hold-ready');
       });
-      globalThis.__ownedStream = null;
+      globalThis.__ownedReadable = null;
+      globalThis.__ownedReader = null;
+      globalThis.__ownedWritable = null;
       releaseHold = null;
-      return new Response('hold-done');
+
+      // After Request 2's rejected foreign attacks, Request 1 MUST still read
+      // every byte of both ReadableStreams and write/close its WritableStream!
+      const bytes1 = [];
+      const rd1 = r1.getReader();
+      for (;;) {
+        const { done, value } = await rd1.read();
+        if (done) break;
+        for (const b of value) bytes1.push(b);
+      }
+      const bytes2 = [];
+      for (;;) {
+        const { done, value } = await reader2.read();
+        if (done) break;
+        for (const b of value) bytes2.push(b);
+      }
+      const wr1 = w1.getWriter();
+      await wr1.write(new Uint8Array([9, 8, 7, 6]));
+      await wr1.close();
+      const st = await svc.sinkStats();
+      const ok = bytes1.join(',') === '17,34,51,68,85,102' &&
+                 bytes2.join(',') === '170,187' &&
+                 st.flat.join(',') === '9,8,7,6' &&
+                 st.closed === true;
+      return new Response(ok ? 'owner-intact' : 'owner-corrupted:' + JSON.stringify({ bytes1, bytes2, st }));
     }
     if (path === '/steal') {
-      let fenced = false;
-      try {
-        await globalThis.__ownedStream.getReader().read();
-      } catch (e) {
-        fenced = e instanceof DOMException && e.name === 'InvalidStateError';
-      }
+      const isInv = (e) => e instanceof DOMException && e.name === 'InvalidStateError';
+      const checkAsync = async (fn) => {
+        try { await fn(); return false; } catch (e) { return isInv(e); }
+      };
+      const checkSync = (fn) => {
+        try { fn(); return false; } catch (e) { return isInv(e); }
+      };
+      const r = globalThis.__ownedReadable;
+      const rd = globalThis.__ownedReader;
+      const w = globalThis.__ownedWritable;
+      const checks = {
+        rCancel: await checkAsync(() => r.cancel('stolen')),
+        rProtoCancel: await checkAsync(() => savedProtoCancel.call(r, 'proto')),
+        rGetReader: checkSync(() => r.getReader()),
+        rCtorReader: checkSync(() => new ReadableStreamDefaultReader(r)),
+        rTee: checkSync(() => r.tee()),
+        rPipeTo: await checkAsync(() => r.pipeTo(new WritableStream())),
+        rRetransfer: await checkAsync(() => svc.upload(r)),
+        rdRead: await checkAsync(() => rd.read()),
+        rdCancel: await checkAsync(() => rd.cancel('stolen-rd')),
+        rdRelease: checkSync(() => rd.releaseLock()),
+        wAbort: await checkAsync(() => w.abort('stolen-w')),
+        wProtoAbort: await checkAsync(() => savedProtoAbort.call(w, 'proto-w')),
+        wClose: await checkAsync(() => w.close()),
+        wGetWriter: checkSync(() => w.getWriter()),
+        wCtorWriter: checkSync(() => new WritableStreamDefaultWriter(w)),
+      };
+      const allOk = Object.values(checks).every(Boolean);
       const wake = releaseHold;
       releaseHold = null;
       if (wake) wake();
-      return new Response(fenced ? 'fenced-ok' : 'fenced-fail');
+      return new Response(allOk ? 'fenced-ok' : 'fenced-fail:' + JSON.stringify(checks));
     }
     return new Response('404', { status: 404 });
   }
@@ -839,7 +934,7 @@ export default {
         }
         return end1 && end2;
     });
-    require(body1 == "hold-done" && body2 == "fenced-ok",
+    require(body1 == "owner-intact" && body2 == "fenced-ok",
             "cross-request fencing failed: body1=" + body1 + " body2=" + body2);
 
     const auto exit = capsid_test::shutdown_and_wait(worker, 3000);
@@ -1519,6 +1614,426 @@ export default {
     capsid_worker_destroy(worker);
 }
 
+// Audit remediation regressions covering F1, F2 (nested recursive deduped
+// late-result cleanup), F3 (queued RPC & staged WritableStream quotas), F5
+// (strict 64 KiB credit slicing on 200 KiB chunks), F6 (queued-phase
+// Request.signal abort delivery), F7 (RpcTarget method snapshot immunity),
+// F8 (genuine Request/Response subclasses, spoof rejection, pre-closed empty
+// ReadableStream EOF), F9 (bidirectional Response.error() immutable headers),
+// and F10 (burst handle expiry fairness with concurrent ordinary RPC).
+void test_audit_f1_to_f10_regressions(const char* worker_path) {
+    const std::string binding_src = R"JS(
+const lateDisposeCounts = Object.create(null);
+const lateStreamCanceled = { s1: false, s2: false, s3: false };
+let lastMutableTarget = null;
+let mutatedGetterRan = false;
+let slicedSinkChecksum = 0;
+let slicedSinkLen = 0;
+let slicedSinkClosed = false;
+let burstDisposed = 0;
+
+class CountedTarget extends RpcTarget {
+  constructor(id) {
+    super();
+    this.id = id;
+  }
+  ping() { return this.id; }
+  [Symbol.dispose]() {
+    lateDisposeCounts[this.id] = (lateDisposeCounts[this.id] || 0) + 1;
+  }
+}
+
+class MutableTarget extends RpcTarget {
+  constructor() {
+    super();
+    this.v = 10;
+  }
+  inc(d) {
+    this.v += d;
+    return this.v;
+  }
+}
+
+class BurstTarget extends RpcTarget {
+  constructor(leaseMs) {
+    super({ leaseMs });
+  }
+  ping() { return 'ok'; }
+  [Symbol.dispose]() { burstDisposed++; }
+}
+
+class SubResponse extends Response {}
+
+export default () => ({
+  echoBytesLen(buf) { return buf ? buf.byteLength : 0; },
+  ping(tag) { return 'pong:' + tag; },
+  lateNested() {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        const t1 = new CountedTarget('t1');
+        const shared = new CountedTarget('shared');
+        const s1 = new ReadableStream({ cancel() { lateStreamCanceled.s1 = true; } });
+        const s2 = new ReadableStream({ cancel() { lateStreamCanceled.s2 = true; } });
+        const s3 = new ReadableStream({ cancel() { lateStreamCanceled.s3 = true; } });
+        const container = {
+          targets: [t1, shared],
+          dup: shared,
+          stream: s1,
+          req: new Request('https://late.test/req', { method: 'POST', body: s2, duplex: 'half' }),
+          res: new Response(s3, { status: 200 }),
+        };
+        container.self = container; // cycle guard
+        resolve(container);
+      }, 35);
+    });
+  },
+  lateStats() {
+    return { counts: lateDisposeCounts, streams: lateStreamCanceled };
+  },
+  openSlowSlicedSink() {
+    slicedSinkChecksum = 0;
+    slicedSinkLen = 0;
+    slicedSinkClosed = false;
+    return new WritableStream({
+      async write(chunk) {
+        await new Promise((r) => setTimeout(r, 2));
+        for (let i = 0; i < chunk.byteLength; ++i) {
+          slicedSinkChecksum = (slicedSinkChecksum + chunk[i]) % 65521;
+        }
+        slicedSinkLen += chunk.byteLength;
+      },
+      close() { slicedSinkClosed = true; }
+    });
+  },
+  slicedSinkStats() {
+    return { len: slicedSinkLen, checksum: slicedSinkChecksum, closed: slicedSinkClosed };
+  },
+  checkQueuedSignal(req) {
+    return {
+      hasSignal: Boolean(req.signal),
+      aborted: req.signal ? req.signal.aborted : false,
+      name: req.signal?.reason?.name ?? '',
+      message: req.signal?.reason?.message ?? '',
+    };
+  },
+  openMutableTarget() {
+    lastMutableTarget = new MutableTarget();
+    return lastMutableTarget;
+  },
+  mutateTarget() {
+    if (!lastMutableTarget) return false;
+    Object.defineProperty(lastMutableTarget, 'inc', {
+      configurable: true,
+      get() {
+        mutatedGetterRan = true;
+        throw new Error('mutated-getter-must-not-run');
+      },
+    });
+    return true;
+  },
+  mutatedStats() { return { mutatedGetterRan }; },
+  async echoSubRequest(req) {
+    return {
+      isReq: req instanceof Request,
+      method: req.method,
+      url: req.url,
+      hdr: req.headers.get('x-sub'),
+      text: await req.text(),
+    };
+  },
+  makeSubResponse() {
+    return new SubResponse('sub-res-body', { status: 202, headers: { 'x-sub-res': 'yes' } });
+  },
+  async drainEmptyStream(stream) {
+    const reader = stream.getReader();
+    const first = await reader.read();
+    return { done: first.done };
+  },
+  makeEmptyClosedStream() {
+    return new ReadableStream({ start(c) { c.close(); } });
+  },
+  makeErrorResponse() {
+    return Response.error();
+  },
+  checkErrorResponseImmutable(res) {
+    const checkThrow = (fn) => {
+      try { fn(); return false; } catch (e) { return e instanceof TypeError; }
+    };
+    const setThrew = checkThrow(() => res.headers.set('x-pwn', '1'));
+    const appendThrew = checkThrow(() => res.headers.append('x-pwn', '1'));
+    const deleteThrew = checkThrow(() => res.headers.delete('x-pwn'));
+    return {
+      type: res.type,
+      status: res.status,
+      setThrew,
+      appendThrew,
+      deleteThrew,
+      clean: res.headers.get('x-pwn') === null,
+    };
+  },
+  openBurstTarget(leaseMs) { return new BurstTarget(leaseMs); },
+  burstStats() { return { burstDisposed }; },
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+
+class CustomRequest extends Request {
+  constructor(url, init) {
+    super(url, init);
+    this.extraTag = 'custom';
+  }
+}
+
+export default {
+  async fetch() {
+    const out = {};
+
+    // F1: Signal ownership across input cloning + immediate option mutation.
+    const f1Ac = new AbortController();
+    const f1Opts = { signal: f1Ac.signal };
+    const f1Req = new Request('https://f1.test/clone', {
+      method: 'POST',
+      body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2])); c.close(); } }),
+      duplex: 'half',
+    });
+    const f1Promise = svc.echoSubRequest(f1Req, f1Opts);
+    f1Opts.signal = null;
+    f1Ac.abort(new DOMException('f1-mutated-opts-abort', 'AbortError'));
+    let f1AbortedOk = false;
+    try { await f1Promise; } catch (e) {
+      f1AbortedOk = e instanceof DOMException && e.name === 'AbortError' &&
+                    e.message === 'f1-mutated-opts-abort';
+    }
+    out.f1Ok = f1AbortedOk;
+
+    // F2: Bounded, cycle-safe, deduped nested late-result disposal.
+    let f2TimedOut = false;
+    try { await svc.lateNested(null, { timeoutMs: 10 }); } catch (e) {
+      f2TimedOut = e instanceof DOMException && e.name === 'TimeoutError';
+    }
+    await new Promise((r) => setTimeout(r, 80));
+    const f2Stats = await svc.lateStats();
+    out.f2NestedOk = f2TimedOut &&
+                     f2Stats.counts.t1 === 1 &&
+                     f2Stats.counts.shared === 1 &&
+                     f2Stats.streams.s1 === true &&
+                     f2Stats.streams.s2 === true &&
+                     f2Stats.streams.s3 === true;
+
+    // F3: Queued RPC input payload quota (4 MiB per-request ledger limit) + refill.
+    const payload900k = new Uint8Array(900 * 1024);
+    const queuedCalls = [];
+    for (let i = 0; i < 6; ++i) {
+      queuedCalls.push(
+        svc.echoBytesLen(payload900k).then(
+          (len) => ({ ok: true, len }),
+          (e) => ({ ok: false, msg: e && e.message ? e.message : String(e) }),
+        ),
+      );
+    }
+    const settledCalls = await Promise.all(queuedCalls);
+    const quotaRejected = settledCalls.some((r) => !r.ok && r.msg.includes('byte quota'));
+    const refillLen = await svc.echoBytesLen(payload900k);
+    out.f3RpcQuotaOk = quotaRejected && refillLen === 900 * 1024;
+
+    // F3 + F5: Staged WritableStream 2 MiB ceiling + 200 KiB credit-sliced write.
+    const bigWs = await svc.openSlowSlicedSink();
+    const bigWriter = bigWs.getWriter();
+    let stagedCapRejected = false;
+    try {
+      await bigWriter.write(new Uint8Array(2 * 1024 * 1024 + 1024));
+    } catch (e) {
+      stagedCapRejected = e && e.message && e.message.includes('buffered byte limit');
+    }
+    const ws200k = await svc.openSlowSlicedSink();
+    const w200k = ws200k.getWriter();
+    const buf200k = new Uint8Array(200000);
+    let expect200kSum = 0;
+    for (let i = 0; i < buf200k.length; ++i) {
+      buf200k[i] = (i * 11 + 3) & 0xff;
+      expect200kSum = (expect200kSum + buf200k[i]) % 65521;
+    }
+    await w200k.write(buf200k);
+    await w200k.close();
+    const s200k = await svc.slicedSinkStats();
+    out.f3f5StreamOk = stagedCapRejected &&
+                       s200k.len === 200000 &&
+                       s200k.checksum === expect200kSum &&
+                       s200k.closed === true;
+
+    // F6: Request.signal aborted synchronously while RPC call is still kQueued.
+    const qAc = new AbortController();
+    const qReq = new Request('https://f6.test/queued', { signal: qAc.signal });
+    const qPromise = svc.checkQueuedSignal(qReq);
+    qAc.abort(new DOMException('sync-queued-abort', 'AbortError'));
+    const qRes = await qPromise;
+    out.f6QueuedSignalOk = qRes.hasSignal && qRes.aborted === true &&
+                           qRes.name === 'AbortError' &&
+                           qRes.message === 'sync-queued-abort';
+
+    // F7: RpcTarget exported method snapshot immune to post-export getter mutation.
+    const mutH = await svc.openMutableTarget();
+    await svc.mutateTarget();
+    const incVal = await mutH.inc(5);
+    mutH.dispose();
+    const mutStats = await svc.mutatedStats();
+    out.f7SnapshotOk = incVal === 15 && mutStats.mutatedGetterRan === false;
+
+    // F8: Genuine Request/Response subclasses, spoofed prototype rejection, and
+    // pre-closed empty ReadableStream EOF round-trip.
+    const subReq = new CustomRequest('https://f8.test/sub', {
+      method: 'POST',
+      headers: { 'x-sub': 'ok' },
+      body: 'sub-req-body',
+    });
+    const subReqRes = await svc.echoSubRequest(subReq);
+    const subRes = await svc.makeSubResponse();
+    const subResText = await subRes.text();
+
+    const spoofReq = Object.create(Request.prototype);
+    spoofReq._bodyConsumed = false;
+    spoofReq._noBody = true;
+    spoofReq.method = 'GET';
+    spoofReq.url = 'https://spoof.test/';
+    let spoofRejected = false;
+    try { await svc.echoSubRequest(spoofReq); } catch { spoofRejected = true; }
+
+    const preClosedUser = new ReadableStream({ start(c) { c.close(); } });
+    const emptyU2B = await svc.drainEmptyStream(preClosedUser);
+    const preClosedBinding = await svc.makeEmptyClosedStream();
+    const emptyB2U = await preClosedBinding.getReader().read();
+
+    out.f8Ok = subReqRes.isReq && subReqRes.method === 'POST' && subReqRes.hdr === 'ok' &&
+               subReqRes.text === 'sub-req-body' &&
+               (subRes instanceof Response) && subRes.status === 202 &&
+               subRes.headers.get('x-sub-res') === 'yes' && subResText === 'sub-res-body' &&
+               spoofRejected && emptyU2B.done === true && emptyB2U.done === true;
+
+    // F9: Response.error() headers are immutable in BOTH directions.
+    const errFromBinding = await svc.makeErrorResponse();
+    const checkThrow = (fn) => {
+      try { fn(); return false; } catch (e) { return e instanceof TypeError; }
+    };
+    const b2uErrImm = errFromBinding.type === 'error' && errFromBinding.status === 0 &&
+                      checkThrow(() => errFromBinding.headers.set('x-pwn', '1')) &&
+                      checkThrow(() => errFromBinding.headers.append('x-pwn', '1')) &&
+                      checkThrow(() => errFromBinding.headers.delete('x-pwn')) &&
+                      errFromBinding.headers.get('x-pwn') === null;
+    const u2bErrImm = await svc.checkErrorResponseImmutable(Response.error());
+    out.f9ErrorHeadersOk = b2uErrImm && u2bErrImm.type === 'error' && u2bErrImm.status === 0 &&
+                           u2bErrImm.setThrew && u2bErrImm.appendThrew && u2bErrImm.deleteThrew &&
+                           u2bErrImm.clean;
+
+    // F10: Expiring 32 short-lease handles in a burst shares the bounded
+    // per-turn control budget and does not starve concurrent ordinary RPC.
+    const burst = [];
+    for (let i = 0; i < 32; ++i) {
+      burst.push(await svc.openBurstTarget(30));
+    }
+    await new Promise((r) => setTimeout(r, 55));
+    const pings = await Promise.all([svc.ping('a'), svc.ping('b'), svc.ping('c')]);
+    await new Promise((r) => setTimeout(r, 30));
+    const bStats = await svc.burstStats();
+    out.f10FairnessOk = pings.join(',') === 'pong:a,pong:b,pong:c' && bStats.burstDisposed === 32;
+
+    return new Response(JSON.stringify(out));
+  }
+};
+)JS";
+
+    WorkerHarness harness(worker_path, {{"svc", binding_src}}, app_src);
+    const HttpResponse res = harness.get(1, "/");
+    require(res.status == 200, "audit regressions status != 200: " + res.body);
+    require(res.body == "{\"f1Ok\":true,\"f2NestedOk\":true,\"f3RpcQuotaOk\":true,"
+                        "\"f3f5StreamOk\":true,\"f6QueuedSignalOk\":true,\"f7SnapshotOk\":true,"
+                        "\"f8Ok\":true,\"f9ErrorHeadersOk\":true,\"f10FairnessOk\":true}",
+            "audit regressions failed: " + res.body);
+}
+
+// F2: Malicious late-result nested [Symbol.dispose]() CPU loop is bounded by
+// the same 100 ms disposal interrupt window and cleanly poisons/exits the
+// worker instead of hanging the shared event loop.
+void test_audit_f2_late_dispose_cpu_loop(const char* worker_path) {
+    const std::string binding_src = R"JS(
+class InfiniteLateTarget extends RpcTarget {
+  ping() { return 'ok'; }
+  [Symbol.dispose]() {
+    while (true) {}
+  }
+}
+export default () => ({
+  lateLoop() {
+    return new Promise((resolve) => {
+      setTimeout(() => resolve({ nested: new InfiniteLateTarget() }), 25);
+    });
+  }
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+export default {
+  async fetch() {
+    try { await svc.lateLoop(null, { timeoutMs: 10 }); } catch {}
+    await new Promise((r) => setTimeout(r, 400));
+    return new Response('done');
+  }
+};
+)JS";
+
+    capsid_worker_config config;
+    capsid_worker_config_init(&config);
+    config.worker_path = worker_path;
+    config.strict_sandbox = 0;
+    config.process_memory_limit = 0;
+    config.request_timeout_ms = 5000;
+    capsid_worker* worker = nullptr;
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn late-loop worker");
+    capsid::host::EffectiveBinding b;
+    b.id = "svc";
+    b.package.source = binding_src;
+    b.request.config_json = "{}";
+    b.profiles = {"network-client"};
+    std::string err;
+    require(capsid::host::load_effective_bindings_into_worker(worker, {b}, &err), err);
+    require_result(capsid_worker_load_bundle_named(
+                       worker, reinterpret_cast<const std::uint8_t*>(app_src.data()),
+                       app_src.size(), "file:///late-cpu-dispose.js"),
+                   "load late-loop bundle");
+
+    bool ready = false;
+    bool exited = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline && !exited) {
+        const capsid_result flush = capsid_worker_flush(worker);
+        require(flush == CAPSID_OK || flush == CAPSID_WOULD_BLOCK, "flush");
+        capsid_event ev = {};
+        ev.struct_size = sizeof(ev);
+        const capsid_result r = capsid_worker_next_event(worker, &ev);
+        if (r == CAPSID_OK) {
+            if (ev.type == CAPSID_EVENT_READY && !ready) {
+                ready = true;
+                require_result(capsid_worker_begin_bodyless_request(
+                                   worker, 1, "GET", "https://v2.test/late-loop", nullptr, 0),
+                               "begin late-loop");
+            } else if (ev.type == CAPSID_EVENT_EXIT) {
+                exited = true;
+            }
+            continue;
+        }
+        require(r == CAPSID_WOULD_BLOCK, "next_event");
+        capsid_pollfd pfd = {};
+        pfd.fd = capsid_worker_fd(worker);
+        pfd.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+        require(capsid::win32::capsid_poll(&pfd, 1, 20) >= 0, "poll");
+    }
+    require(ready && exited,
+            "malicious late-result CPU-loop [Symbol.dispose]() did not interrupt and exit");
+    capsid_worker_destroy(worker);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1533,5 +2048,7 @@ int main(int argc, char** argv) {
     test_m4d_rpc_target_handles(argv[1]);
     test_m4d_cross_request_handle_fencing(argv[1]);
     test_m4d_malicious_dispose_cpu_loop(argv[1]);
+    test_audit_f1_to_f10_regressions(argv[1]);
+    test_audit_f2_late_dispose_cpu_loop(argv[1]);
     return 0;
 }

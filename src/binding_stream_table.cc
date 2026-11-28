@@ -87,14 +87,21 @@ bool BindingStreamTable::enqueue_bytes(std::uint64_t stream_id, const std::uint8
         }
         return false;
     }
-    if (rec->queued_frames >= kBindingStreamMaxQueuedFrames) {
+    if (size > rec->credit_bytes) {
+        if (error != nullptr) {
+            *error = "insufficient stream credit";
+        }
+        return false;
+    }
+    if (rec->queued_frames + rec->staged_frames >= kBindingStreamMaxQueuedFrames) {
         if (error != nullptr) {
             *error = "binding stream queued frame limit exceeded";
         }
         return false;
     }
+    const std::size_t total_buffered = rec->queued_bytes + rec->staged_bytes;
     if (size > kBindingStreamMaxBufferedBytes ||
-        rec->queued_bytes > kBindingStreamMaxBufferedBytes - size) {
+        total_buffered > kBindingStreamMaxBufferedBytes - size) {
         if (error != nullptr) {
             *error = "binding stream buffered byte limit exceeded";
         }
@@ -116,7 +123,7 @@ bool BindingStreamTable::enqueue_bytes(std::uint64_t stream_id, const std::uint8
     rec->queue.push_back(std::move(frame));
     ++rec->queued_frames;
     rec->queued_bytes += size;
-    rec->credit_bytes = (rec->credit_bytes > size) ? (rec->credit_bytes - size) : 0;
+    rec->credit_bytes -= size;
     return true;
 }
 
@@ -136,14 +143,21 @@ bool BindingStreamTable::enqueue_value(std::uint64_t stream_id, NeutralValue val
         }
         return false;
     }
-    if (rec->queued_frames >= kBindingStreamMaxQueuedFrames) {
+    if (weight > rec->credit_bytes) {
+        if (error != nullptr) {
+            *error = "insufficient stream credit";
+        }
+        return false;
+    }
+    if (rec->queued_frames + rec->staged_frames >= kBindingStreamMaxQueuedFrames) {
         if (error != nullptr) {
             *error = "binding stream queued frame limit exceeded";
         }
         return false;
     }
+    const std::size_t total_buffered = rec->queued_bytes + rec->staged_bytes;
     if (weight > kBindingStreamMaxBufferedBytes ||
-        rec->queued_bytes > kBindingStreamMaxBufferedBytes - weight) {
+        total_buffered > kBindingStreamMaxBufferedBytes - weight) {
         if (error != nullptr) {
             *error = "binding stream buffered byte limit exceeded";
         }
@@ -163,7 +177,194 @@ bool BindingStreamTable::enqueue_value(std::uint64_t stream_id, NeutralValue val
     rec->queue.push_back(std::move(frame));
     ++rec->queued_frames;
     rec->queued_bytes += weight;
-    rec->credit_bytes = (rec->credit_bytes > weight) ? (rec->credit_bytes - weight) : 0;
+    rec->credit_bytes -= weight;
+    return true;
+}
+
+bool BindingStreamTable::stage_pending(std::uint64_t stream_id, std::size_t bytes,
+                                       std::size_t frames, std::string* error) {
+    BindingStreamRecord* rec = find(stream_id);
+    if (rec == nullptr || rec->state != BindingStreamState::kOpen) {
+        if (error != nullptr) {
+            *error = "binding stream is not open";
+        }
+        return false;
+    }
+    const std::size_t frame_count = frames > 0 ? frames : 1;
+    const std::size_t total_frames = rec->queued_frames + rec->staged_frames;
+    if (frame_count > kBindingStreamMaxQueuedFrames ||
+        total_frames > kBindingStreamMaxQueuedFrames - frame_count) {
+        if (error != nullptr) {
+            *error = "binding stream queued frame limit exceeded";
+        }
+        return false;
+    }
+    const std::size_t total_buffered = rec->queued_bytes + rec->staged_bytes;
+    if (bytes > kBindingStreamMaxBufferedBytes ||
+        total_buffered > kBindingStreamMaxBufferedBytes - bytes) {
+        if (error != nullptr) {
+            *error = "binding stream buffered byte limit exceeded";
+        }
+        return false;
+    }
+    // Reserve the full byte payload on the first frame and 0 bytes on any
+    // additional slice frames so rollback is atomic and exact.
+    BindingQuotaError qerr = BindingQuotaError::kOk;
+    if (!ledger_->reserve_frame(rec->owner_request_id, rec->owner_binding_id, bytes, &qerr)) {
+        if (error != nullptr) {
+            *error = binding_quota_error_message(qerr);
+        }
+        return false;
+    }
+    for (std::size_t i = 1; i < frame_count; ++i) {
+        if (!ledger_->reserve_frame(rec->owner_request_id, rec->owner_binding_id, 0, &qerr)) {
+            ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, bytes);
+            for (std::size_t j = 1; j < i; ++j) {
+                ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, 0);
+            }
+            if (error != nullptr) {
+                *error = binding_quota_error_message(qerr);
+            }
+            return false;
+        }
+    }
+    rec->staged_bytes += bytes;
+    rec->staged_frames += frame_count;
+    return true;
+}
+
+void BindingStreamTable::release_staged(std::uint64_t stream_id, std::size_t bytes,
+                                        std::size_t frames) {
+    BindingStreamRecord* rec = find(stream_id);
+    if (rec == nullptr) {
+        return;
+    }
+    const std::size_t rel_bytes = (bytes <= rec->staged_bytes) ? bytes : rec->staged_bytes;
+    const std::size_t rel_frames = (frames <= rec->staged_frames) ? frames : rec->staged_frames;
+    rec->staged_bytes -= rel_bytes;
+    rec->staged_frames -= rel_frames;
+    if (rel_frames > 0) {
+        ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, rel_bytes);
+        for (std::size_t i = 1; i < rel_frames; ++i) {
+            ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, 0);
+        }
+    }
+}
+
+bool BindingStreamTable::admit_staged_bytes(std::uint64_t stream_id, const std::uint8_t* data,
+                                            std::size_t size, std::size_t staged_bytes_consumed,
+                                            std::size_t staged_frames_consumed,
+                                            std::string* error) {
+    BindingStreamRecord* rec = find(stream_id);
+    if (rec == nullptr || rec->state != BindingStreamState::kOpen) {
+        if (error != nullptr) {
+            *error = "binding stream is not open";
+        }
+        return false;
+    }
+    if (size > kBindingStreamMaxChunkBytes) {
+        if (error != nullptr) {
+            *error = "binding stream chunk exceeds maximum frame size";
+        }
+        return false;
+    }
+    if (size > rec->credit_bytes) {
+        if (error != nullptr) {
+            *error = "insufficient stream credit";
+        }
+        return false;
+    }
+    if (staged_bytes_consumed < size || staged_bytes_consumed > rec->staged_bytes ||
+        staged_frames_consumed > rec->staged_frames) {
+        if (error != nullptr) {
+            *error = "staged stream accounting underflow";
+        }
+        return false;
+    }
+    // Transfer byte ownership from staged -> queued. If slicing produces an
+    // extra frame beyond staged_frames_consumed (e.g. a smaller credit window
+    // forced finer slicing), reserve one 0-byte frame slot in the ledger first.
+    if (staged_frames_consumed == 0) {
+        if (rec->queued_frames + rec->staged_frames >= kBindingStreamMaxQueuedFrames) {
+            if (error != nullptr) {
+                *error = "binding stream queued frame limit exceeded";
+            }
+            return false;
+        }
+        BindingQuotaError qerr = BindingQuotaError::kOk;
+        if (!ledger_->reserve_frame(rec->owner_request_id, rec->owner_binding_id, 0, &qerr)) {
+            if (error != nullptr) {
+                *error = binding_quota_error_message(qerr);
+            }
+            return false;
+        }
+    } else if (staged_frames_consumed > 1) {
+        for (std::size_t i = 1; i < staged_frames_consumed; ++i) {
+            ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, 0);
+        }
+    }
+    if (staged_bytes_consumed > size) {
+        // Release any unused staged byte delta cleanly without dropping a frame.
+        // Callers normally pass staged_bytes_consumed == size.
+        const std::size_t excess = staged_bytes_consumed - size;
+        BindingQuotaError qerr = BindingQuotaError::kOk;
+        ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, staged_bytes_consumed);
+        (void)ledger_->reserve_frame(rec->owner_request_id, rec->owner_binding_id,
+                                     staged_bytes_consumed - excess, &qerr);
+    }
+    rec->staged_bytes -= staged_bytes_consumed;
+    rec->staged_frames -= staged_frames_consumed;
+    BindingStreamFrame frame;
+    frame.type = BindingStreamFrame::Type::kBytes;
+    if (size > 0 && data != nullptr) {
+        frame.bytes.assign(data, data + size);
+    }
+    frame.accounted_bytes = size;
+    rec->queue.push_back(std::move(frame));
+    ++rec->queued_frames;
+    rec->queued_bytes += size;
+    rec->credit_bytes -= size;
+    return true;
+}
+
+bool BindingStreamTable::admit_staged_value(std::uint64_t stream_id, NeutralValue value,
+                                            std::size_t accounted_bytes, std::string* error) {
+    BindingStreamRecord* rec = find(stream_id);
+    if (rec == nullptr || rec->state != BindingStreamState::kOpen) {
+        if (error != nullptr) {
+            *error = "binding stream is not open";
+        }
+        return false;
+    }
+    const std::size_t weight = accounted_bytes > 0 ? accounted_bytes : 1;
+    if (weight > kBindingStreamMaxChunkBytes) {
+        if (error != nullptr) {
+            *error = "binding stream chunk exceeds maximum frame size";
+        }
+        return false;
+    }
+    if (weight > rec->credit_bytes) {
+        if (error != nullptr) {
+            *error = "insufficient stream credit";
+        }
+        return false;
+    }
+    if (weight > rec->staged_bytes || rec->staged_frames == 0) {
+        if (error != nullptr) {
+            *error = "staged stream accounting underflow";
+        }
+        return false;
+    }
+    rec->staged_bytes -= weight;
+    --rec->staged_frames;
+    BindingStreamFrame frame;
+    frame.type = BindingStreamFrame::Type::kValue;
+    frame.value = std::move(value);
+    frame.accounted_bytes = weight;
+    rec->queue.push_back(std::move(frame));
+    ++rec->queued_frames;
+    rec->queued_bytes += weight;
+    rec->credit_bytes -= weight;
     return true;
 }
 
@@ -300,6 +501,14 @@ void BindingStreamTable::release_queued_frames(BindingStreamRecord* rec) {
     }
     rec->queued_frames = 0;
     rec->queued_bytes = 0;
+    if (rec->staged_frames > 0) {
+        ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, rec->staged_bytes);
+        for (std::size_t i = 1; i < rec->staged_frames; ++i) {
+            ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, 0);
+        }
+    }
+    rec->staged_bytes = 0;
+    rec->staged_frames = 0;
 }
 
 } // namespace capsid

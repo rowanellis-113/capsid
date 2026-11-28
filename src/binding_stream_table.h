@@ -74,6 +74,13 @@ struct BindingStreamRecord {
     std::size_t max_credit_bytes = kBindingStreamInitialCreditBytes;
     std::size_t queued_bytes = 0;
     std::size_t queued_frames = 0;
+    // Native bytes/frames staged in WorkerRuntime pending credit admission
+    // (WritableStream pending_writes or sliced ReadableStream producer chunks).
+    // Accounted immediately in BindingRpcLedger and counted against the 2 MiB /
+    // 256 frame per-stream ceiling; transferred into queued_* without double
+    // charging when credit permits admission.
+    std::size_t staged_bytes = 0;
+    std::size_t staged_frames = 0;
 
     bool producer_pull_inflight = false;
     bool consumer_waiting = false;
@@ -99,15 +106,38 @@ class BindingStreamTable {
     BindingStreamRecord* find(std::uint64_t stream_id);
     const BindingStreamRecord* find(std::uint64_t stream_id) const;
 
-    // Enqueues a byte chunk from producer -> consumer, enforcing per-stream
-    // and 3-tier ledger frame/byte caps and deducting available byte credit.
+    // Enqueues a byte chunk from producer -> consumer, enforcing strict credit
+    // conservation (size <= credit_bytes), per-stream bounds, and 3-tier ledger
+    // frame/byte caps.
     bool enqueue_bytes(std::uint64_t stream_id, const std::uint8_t* data, std::size_t size,
                        std::string* error = nullptr);
 
     // Enqueues a neutral value chunk from producer -> consumer with an
-    // explicit accounted byte weight.
+    // explicit accounted byte weight, enforcing strict credit conservation.
     bool enqueue_value(std::uint64_t stream_id, NeutralValue value, std::size_t accounted_bytes,
                        std::string* error = nullptr);
+
+    // Reserves native staged bytes/frames in both the per-stream ceiling
+    // (queued + staged <= 2 MiB / 256 frames) and the 3-tier BindingRpcLedger
+    // at the moment a pending native copy is created.
+    bool stage_pending(std::uint64_t stream_id, std::size_t bytes, std::size_t frames,
+                       std::string* error = nullptr);
+
+    // Releases staged bytes/frames back to the 3-tier ledger (e.g. on partial
+    // failure or cancellation before credit admission).
+    void release_staged(std::uint64_t stream_id, std::size_t bytes, std::size_t frames);
+
+    // Moves up to `size` bytes (strictly <= credit_bytes) and `frames_consumed`
+    // (typically 1) from staged accounting into the active frame queue without
+    // double-charging the 3-tier ledger.
+    bool admit_staged_bytes(std::uint64_t stream_id, const std::uint8_t* data, std::size_t size,
+                            std::size_t staged_bytes_consumed, std::size_t staged_frames_consumed,
+                            std::string* error = nullptr);
+
+    // Moves a staged NeutralValue chunk into the active frame queue (strictly
+    // <= credit_bytes) without double-charging the 3-tier ledger.
+    bool admit_staged_value(std::uint64_t stream_id, NeutralValue value,
+                            std::size_t accounted_bytes, std::string* error = nullptr);
 
     // Producer marks normal EOF (Open -> HalfClosed).
     bool enqueue_end(std::uint64_t stream_id);

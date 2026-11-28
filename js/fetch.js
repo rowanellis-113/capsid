@@ -166,6 +166,8 @@ const HEADER_MAP_THRESHOLD = 32; // 16 pairs in flat array before promoting to M
 const headerStates = new WeakMap();
 const iteratorStates = new WeakMap();
 const ordinaryFetchStreams = new WeakSet();
+const genuineRequests = new WeakSet();
+const genuineResponses = new WeakSet();
 const readableLocked = Object.getOwnPropertyDescriptor(ReadableStream.prototype, 'locked').get;
 const headerInvocationMessage =
   'Illegal invocation: function called with incorrect `this` reference. See https://developers.cloudflare.com/workers/observability/errors/#illegal-invocation-errors for details.';
@@ -964,6 +966,22 @@ export function markResponseHeadersImmutable(response) {
   if (state !== undefined && state !== null) {
     state.immutable = true;
   }
+}
+
+export function isGenuineRequest(value) {
+  return isObjectValue(value) && weakSetHas.call(genuineRequests, value);
+}
+
+export function isGenuineResponse(value) {
+  return isObjectValue(value) && weakSetHas.call(genuineResponses, value);
+}
+
+export function tryBridgeOwnedHeaderPairs(headers) {
+  const state = getHeaderState(headers);
+  if (state === undefined) {
+    return null;
+  }
+  return bridgePairsFromState(state);
 }
 
 function finishFetchedResponse(response, url, redirected) {
@@ -1876,6 +1894,7 @@ function assignRequestSlots(
   req._bodyFastKind = 0;
   req._bodyFastData = null;
   req._bodyExposed = false;
+  weakSetAdd.call(genuineRequests, req);
 }
 
 class Request {
@@ -2350,6 +2369,7 @@ function assignResponseSlots(
   res._bodyFastKind = bodyFastKind;
   res._bodyFastData = bodyFastData;
   res._bodyExposed = false;
+  weakSetAdd.call(genuineResponses, res);
 }
 
 function constructResponseWithHeaders(
