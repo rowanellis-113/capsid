@@ -1719,6 +1719,37 @@ struct BorrowedJsString {
         return true;
     }
 
+    // Distinguishes valid null/undefined absence from invalid types or conversion
+    // errors for optional string metadata (such as Request.mode).
+    bool borrow_optional_prop(JSValueConst obj, const char* name) {
+        reset();
+        JSValue prop = JS_GetPropertyStr(ctx, obj, name);
+        if (JS_IsException(prop)) {
+            clear_pending_exception(ctx);
+            return false;
+        }
+        if (JS_IsNull(prop) || JS_IsUndefined(prop)) {
+            JS_FreeValue(ctx, prop);
+            return true;
+        }
+        if (!JS_IsString(prop)) {
+            JS_FreeValue(ctx, prop);
+            return false;
+        }
+        size_t slen = 0;
+        const char* s = JS_ToCStringLen(ctx, &slen, prop);
+        if (s == NULL) {
+            clear_pending_exception(ctx);
+            JS_FreeValue(ctx, prop);
+            return false;
+        }
+        val = prop;
+        ptr = s;
+        len = slen;
+        present = true;
+        return true;
+    }
+
     void copy_to(std::string* out, std::size_t* copy_count) const {
         if (present && out != NULL) {
             out->assign(ptr, len);
@@ -1745,11 +1776,21 @@ bool extract_neutral_http_request_meta(JSContext* ctx, JSValueConst info, Neutra
     BorrowedJsString credentials(ctx);
     BorrowedJsString redirect(ctx);
     BorrowedJsString mode(ctx);
-    url.borrow_prop(info, "url");
-    method.borrow_prop(info, "method");
-    credentials.borrow_prop(info, "credentials");
-    redirect.borrow_prop(info, "redirect");
-    mode.borrow_prop(info, "mode");
+    if (!url.borrow_prop(info, "url")) {
+        return fail_closed(error, "Request metadata missing or invalid url");
+    }
+    if (!method.borrow_prop(info, "method")) {
+        return fail_closed(error, "Request metadata missing or invalid method");
+    }
+    if (!credentials.borrow_prop(info, "credentials")) {
+        return fail_closed(error, "Request metadata missing or invalid credentials");
+    }
+    if (!redirect.borrow_prop(info, "redirect")) {
+        return fail_closed(error, "Request metadata missing or invalid redirect");
+    }
+    if (!mode.borrow_optional_prop(info, "mode")) {
+        return fail_closed(error, "Request metadata has invalid mode");
+    }
 
     std::size_t meta_bytes = 64;
     meta_bytes = saturating_add(meta_bytes, url.len);
@@ -1769,6 +1810,9 @@ bool extract_neutral_http_request_meta(JSContext* ctx, JSValueConst info, Neutra
     if (mode.present) {
         out->has_mode = true;
         mode.copy_to(&out->mode, out_copies);
+    } else {
+        out->has_mode = false;
+        out->mode.clear();
     }
     return true;
 }
@@ -1783,31 +1827,47 @@ bool extract_neutral_http_response_meta(JSContext* ctx, JSValueConst info, Neutr
         return fail_closed(error, "invalid Response metadata object");
     }
     JSValue st_val = JS_GetPropertyStr(ctx, info, "status");
-    int32_t st_i32 = 200;
     if (JS_IsException(st_val)) {
         clear_pending_exception(ctx);
-    } else {
-        if (JS_ToInt32(ctx, &st_i32, st_val) != 0) {
-            clear_pending_exception(ctx);
-            st_i32 = 200;
-        }
-        JS_FreeValue(ctx, st_val);
+        return fail_closed(error, "Response metadata status is unreadable");
     }
+    double st_f64 = 0.0;
+    if (!JS_IsNumber(st_val) || JS_ToFloat64(ctx, &st_f64, st_val) != 0) {
+        clear_pending_exception(ctx);
+        JS_FreeValue(ctx, st_val);
+        return fail_closed(error, "Response metadata status is invalid");
+    }
+    JS_FreeValue(ctx, st_val);
+    if (!std::isfinite(st_f64) || std::floor(st_f64) != st_f64 ||
+        (st_f64 != 0.0 && (st_f64 < 100.0 || st_f64 > 599.0))) {
+        return fail_closed(error, "Response metadata status is out of range");
+    }
+    const std::uint16_t status_u16 = static_cast<std::uint16_t>(st_f64);
+
     JSValue redir_val = JS_GetPropertyStr(ctx, info, "redirected");
-    bool redirected = false;
     if (JS_IsException(redir_val)) {
         clear_pending_exception(ctx);
-    } else {
-        redirected = JS_ToBool(ctx, redir_val) != 0;
-        JS_FreeValue(ctx, redir_val);
+        return fail_closed(error, "Response metadata redirected is unreadable");
     }
+    if (!JS_IsBool(redir_val)) {
+        JS_FreeValue(ctx, redir_val);
+        return fail_closed(error, "Response metadata redirected is invalid");
+    }
+    const bool redirected = JS_ToBool(ctx, redir_val) != 0;
+    JS_FreeValue(ctx, redir_val);
 
     BorrowedJsString status_text(ctx);
     BorrowedJsString url(ctx);
     BorrowedJsString type(ctx);
-    status_text.borrow_prop(info, "statusText");
-    url.borrow_prop(info, "url");
-    type.borrow_prop(info, "type");
+    if (!status_text.borrow_prop(info, "statusText")) {
+        return fail_closed(error, "Response metadata missing or invalid statusText");
+    }
+    if (!url.borrow_prop(info, "url")) {
+        return fail_closed(error, "Response metadata missing or invalid url");
+    }
+    if (!type.borrow_prop(info, "type")) {
+        return fail_closed(error, "Response metadata missing or invalid type");
+    }
 
     std::size_t meta_bytes = 64;
     meta_bytes = saturating_add(meta_bytes, status_text.len);
@@ -1816,7 +1876,7 @@ bool extract_neutral_http_response_meta(JSContext* ctx, JSValueConst info, Neutr
     if (reserve_bytes != NULL && !reserve_bytes(meta_bytes, error, reserve_opaque)) {
         return false;
     }
-    out->status = static_cast<std::uint16_t>(st_i32);
+    out->status = status_u16;
     out->redirected = redirected;
     status_text.copy_to(&out->status_text, out_copies);
     url.copy_to(&out->url, out_copies);
@@ -1834,8 +1894,8 @@ bool extract_neutral_header_pairs(JSContext* ctx, JSValueConst arr,
     if (ctx == NULL || out == NULL) {
         return fail_closed(error, "invalid proxy headers destination");
     }
-    out->clear();
     if (JS_IsNull(arr) || JS_IsUndefined(arr)) {
+        out->clear();
         return true;
     }
     if (!JS_IsArray(arr)) {
@@ -1856,7 +1916,45 @@ bool extract_neutral_header_pairs(JSContext* ctx, JSValueConst arr,
     if (count > kMaxBindingProxyHeaders) {
         return fail_closed(error, "proxy header count limit exceeded");
     }
-    std::size_t total_bytes = 0;
+
+    // U3/T1: Two-pass transactional extraction using bounded stack storage
+    // (<= 256 pairs) so ANY validation error or whole-block quota rejection
+    // performs zero target container string copies, leaves `*out` untouched,
+    // and leaves ledger reservations unchanged.
+    struct PendingHeader {
+        JSValue k_val = JS_UNDEFINED;
+        JSValue v_val = JS_UNDEFINED;
+        const char* ks = NULL;
+        const char* vs = NULL;
+        std::size_t klen = 0;
+        std::size_t vlen = 0;
+    };
+    PendingHeader pending[kMaxBindingProxyHeaders];
+    std::size_t pending_count = 0;
+    auto cleanup_pending = [&]() {
+        for (std::size_t i = 0; i < pending_count; ++i) {
+            if (pending[i].ks != NULL) {
+                JS_FreeCString(ctx, pending[i].ks);
+                pending[i].ks = NULL;
+            }
+            if (pending[i].vs != NULL) {
+                JS_FreeCString(ctx, pending[i].vs);
+                pending[i].vs = NULL;
+            }
+            if (!JS_IsUndefined(pending[i].k_val)) {
+                JS_FreeValue(ctx, pending[i].k_val);
+                pending[i].k_val = JS_UNDEFINED;
+            }
+            if (!JS_IsUndefined(pending[i].v_val)) {
+                JS_FreeValue(ctx, pending[i].v_val);
+                pending[i].v_val = JS_UNDEFINED;
+            }
+        }
+        pending_count = 0;
+    };
+
+    std::size_t total_raw_bytes = 0;
+    std::size_t total_reserve_bytes = 0;
     for (uint32_t i = 0; i < count; ++i) {
         JSValue entry = JS_GetPropertyUint32(ctx, arr, i);
         if (!JS_IsArray(entry)) {
@@ -1865,12 +1963,13 @@ bool extract_neutral_header_pairs(JSContext* ctx, JSValueConst arr,
             } else {
                 JS_FreeValue(ctx, entry);
             }
+            cleanup_pending();
             return fail_closed(error, "invalid proxy header pair");
         }
         JSValue k = JS_GetPropertyUint32(ctx, entry, 0);
         JSValue v = JS_GetPropertyUint32(ctx, entry, 1);
         JS_FreeValue(ctx, entry);
-        if (JS_IsException(k) || JS_IsException(v)) {
+        if (JS_IsException(k) || JS_IsException(v) || !JS_IsString(k) || !JS_IsString(v)) {
             clear_pending_exception(ctx);
             if (!JS_IsException(k)) {
                 JS_FreeValue(ctx, k);
@@ -1878,14 +1977,13 @@ bool extract_neutral_header_pairs(JSContext* ctx, JSValueConst arr,
             if (!JS_IsException(v)) {
                 JS_FreeValue(ctx, v);
             }
+            cleanup_pending();
             return fail_closed(error, "unreadable proxy header entry");
         }
         size_t klen = 0;
         size_t vlen = 0;
         const char* ks = JS_ToCStringLen(ctx, &klen, k);
         const char* vs = JS_ToCStringLen(ctx, &vlen, v);
-        JS_FreeValue(ctx, k);
-        JS_FreeValue(ctx, v);
         if (ks == NULL || vs == NULL) {
             clear_pending_exception(ctx);
             if (ks != NULL) {
@@ -1894,28 +1992,48 @@ bool extract_neutral_header_pairs(JSContext* ctx, JSValueConst arr,
             if (vs != NULL) {
                 JS_FreeCString(ctx, vs);
             }
+            JS_FreeValue(ctx, k);
+            JS_FreeValue(ctx, v);
+            cleanup_pending();
             return fail_closed(error, "unreadable proxy header entry");
         }
         if (klen > kMaxBindingProxyHeaderBytes || vlen > kMaxBindingProxyHeaderBytes - klen ||
-            total_bytes > kMaxBindingProxyHeaderBytes - (klen + vlen)) {
+            total_raw_bytes > kMaxBindingProxyHeaderBytes - (klen + vlen)) {
             JS_FreeCString(ctx, ks);
             JS_FreeCString(ctx, vs);
+            JS_FreeValue(ctx, k);
+            JS_FreeValue(ctx, v);
+            cleanup_pending();
             return fail_closed(error, "proxy header byte limit exceeded");
         }
-        const std::size_t entry_bytes = saturating_add(saturating_add(klen, vlen), 16);
-        if (reserve_bytes != NULL && !reserve_bytes(entry_bytes, error, reserve_opaque)) {
-            JS_FreeCString(ctx, ks);
-            JS_FreeCString(ctx, vs);
-            return false;
-        }
-        total_bytes += klen + vlen;
-        out->push_back(std::make_pair(std::string(ks, klen), std::string(vs, vlen)));
+        total_raw_bytes += klen + vlen;
+        total_reserve_bytes =
+            saturating_add(total_reserve_bytes, saturating_add(saturating_add(klen, vlen), 16));
+        pending[pending_count].k_val = k;
+        pending[pending_count].v_val = v;
+        pending[pending_count].ks = ks;
+        pending[pending_count].vs = vs;
+        pending[pending_count].klen = klen;
+        pending[pending_count].vlen = vlen;
+        ++pending_count;
+    }
+
+    if (total_reserve_bytes > 0 && reserve_bytes != NULL &&
+        !reserve_bytes(total_reserve_bytes, error, reserve_opaque)) {
+        cleanup_pending();
+        return false;
+    }
+
+    out->clear();
+    out->reserve(pending_count);
+    for (std::size_t i = 0; i < pending_count; ++i) {
+        out->push_back(std::make_pair(std::string(pending[i].ks, pending[i].klen),
+                                      std::string(pending[i].vs, pending[i].vlen)));
         if (out_copies != NULL) {
             *out_copies += 2;
         }
-        JS_FreeCString(ctx, ks);
-        JS_FreeCString(ctx, vs);
     }
+    cleanup_pending();
     return true;
 }
 
@@ -1931,14 +2049,10 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
     if (ctx == NULL || out_methods == NULL || out_method_fns == NULL) {
         return fail_closed(error, "invalid RpcTarget inspection arguments");
     }
-    out_methods->clear();
-    for (std::map<std::string, JSValue>::iterator mit = out_method_fns->begin();
-         mit != out_method_fns->end(); ++mit) {
-        JS_FreeValue(ctx, mit->second);
-    }
-    out_method_fns->clear();
 
     constexpr std::size_t kMaxStackMethods = 128;
+    constexpr std::size_t kMaxInspectProperties = 1024;
+    constexpr std::size_t kSeenTableMask = 2047; // 2048 open-addressed stack slots
     const std::size_t method_limit =
         (max_methods > 0 && max_methods < kMaxStackMethods) ? max_methods : kMaxStackMethods;
     struct PendingMethod {
@@ -1962,7 +2076,33 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
         pending_count = 0;
     };
 
-    std::unordered_set<JSAtom> seen;
+    // U3: Bounded fixed-size stack atom set (zero heap allocation, capped at
+    // 1024 unique properties scanned across the prototype chain).
+    JSAtom seen_slots[kSeenTableMask + 1] = {};
+    std::size_t seen_count = 0;
+    auto insert_seen_atom = [&](JSAtom atom, bool* out_limit_exceeded) -> bool {
+        *out_limit_exceeded = false;
+        std::size_t slot = static_cast<std::size_t>(atom) & kSeenTableMask;
+        for (std::size_t probe = 0; probe <= kSeenTableMask; ++probe) {
+            const JSAtom existing = seen_slots[slot];
+            if (existing == atom) {
+                return false;
+            }
+            if (existing == JS_ATOM_NULL) {
+                if (seen_count >= kMaxInspectProperties) {
+                    *out_limit_exceeded = true;
+                    return false;
+                }
+                seen_slots[slot] = atom;
+                ++seen_count;
+                return true;
+            }
+            slot = (slot + 1) & kSeenTableMask;
+        }
+        *out_limit_exceeded = true;
+        return false;
+    };
+
     JSValue cur = JS_DupValue(ctx, target);
     for (int depth = 0; depth < 16 && JS_IsObject(cur); ++depth) {
         if (JS_IsProxy(cur)) {
@@ -1984,6 +2124,12 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
             JS_FreeValue(ctx, cur);
             cleanup_pending();
             return fail_closed(error, "RpcTarget method enumeration failed");
+        }
+        if (count > kMaxInspectProperties) {
+            JS_FreePropertyEnum(ctx, tab, count);
+            JS_FreeValue(ctx, cur);
+            cleanup_pending();
+            return fail_closed(error, "RpcTarget exceeds property inspection limit");
         }
         for (uint32_t i = 0; i < count; ++i) {
             size_t name_len = 0;
@@ -2023,7 +2169,7 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
             if (is_accessor) {
                 if (error != NULL) {
                     *error = "RpcTarget cannot expose accessor property: " +
-                             std::string(raw_name, name_len);
+                             clamp_utf8_text(raw_name, name_len, 64);
                 }
                 JS_FreeValue(ctx, desc.value);
                 JS_FreeCString(ctx, raw_name);
@@ -2032,9 +2178,16 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
                 cleanup_pending();
                 return false;
             }
-            if (!seen.insert(tab[i].atom).second) {
+            bool seen_limit = false;
+            if (!insert_seen_atom(tab[i].atom, &seen_limit)) {
                 JS_FreeValue(ctx, desc.value);
                 JS_FreeCString(ctx, raw_name);
+                if (seen_limit) {
+                    JS_FreePropertyEnum(ctx, tab, count);
+                    JS_FreeValue(ctx, cur);
+                    cleanup_pending();
+                    return fail_closed(error, "RpcTarget exceeds property inspection limit");
+                }
                 continue;
             }
             const bool is_dispose = (name_len == 7 && std::memcmp(raw_name, "dispose", 7) == 0);
@@ -2045,8 +2198,8 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
             }
             if (!valid_binding_method_name(raw_name, name_len)) {
                 if (error != NULL) {
-                    *error =
-                        "RpcTarget exposes invalid method name: " + std::string(raw_name, name_len);
+                    *error = "RpcTarget exposes invalid method name: " +
+                             clamp_utf8_text(raw_name, name_len, 64);
                 }
                 JS_FreeValue(ctx, desc.value);
                 JS_FreeCString(ctx, raw_name);
@@ -2063,9 +2216,9 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
                 cleanup_pending();
                 return fail_closed(error, "RpcTarget exceeds 128 method limit");
             }
-            // T1/F7: Retain only the QuickJS atom and validated callable on the
-            // stack during pass 1 — zero native string/map copies until quota
-            // reservation succeeds below.
+            // T1/F7/U3: Retain only the QuickJS atom and validated callable on
+            // the stack during pass 1 — zero native string/map copies until
+            // quota reservation succeeds below.
             pending[pending_count].atom = JS_DupAtom(ctx, tab[i].atom);
             pending[pending_count].name_len = name_len;
             pending[pending_count].fn = desc.value;
@@ -2096,6 +2249,13 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
         cleanup_pending();
         return false;
     }
+
+    out_methods->clear();
+    for (std::map<std::string, JSValue>::iterator mit = out_method_fns->begin();
+         mit != out_method_fns->end(); ++mit) {
+        JS_FreeValue(ctx, mit->second);
+    }
+    out_method_fns->clear();
 
     for (std::size_t i = 0; i < pending_count; ++i) {
         size_t slen = 0;

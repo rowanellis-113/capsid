@@ -9,6 +9,7 @@
 // never exposed on globalThis.
 
 import {
+  commitHttpBodyConsumedForBinding,
   createHeadersFromIncomingPairs,
   enableBindingHttpTracking,
   finalizeProxyResponse,
@@ -623,6 +624,13 @@ export function installBindingRpcBridge(core) {
           // Ignore cancel errors on already-terminated sources.
         }
       },
+      detach() {
+        try {
+          readerReleaseLock.call(reader);
+        } catch {
+          // Ignore if lock already released.
+        }
+      },
     };
   }
 
@@ -721,6 +729,13 @@ export function installBindingRpcBridge(core) {
           // Ignore abort errors on already-terminated sinks.
         }
       },
+      detach() {
+        try {
+          writerReleaseLock.call(writer);
+        } catch {
+          // Ignore if lock already released.
+        }
+      },
     };
   }
 
@@ -798,6 +813,10 @@ export function installBindingRpcBridge(core) {
 
   function inspectResponse(res) {
     return snapshotResponseForBinding(res, checkReadableTransferable, extractBytes);
+  }
+
+  function commitHttpBodyConsumed(target) {
+    commitHttpBodyConsumedForBinding(target);
   }
 
   function createProxyAbortController() {
@@ -1089,6 +1108,7 @@ export function installBindingRpcBridge(core) {
     inspectRequest,
     createProxyRequest,
     inspectResponse,
+    commitHttpBodyConsumed,
     createProxyResponse,
     createProxyAbortController,
     RpcTarget,

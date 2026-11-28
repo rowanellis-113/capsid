@@ -855,17 +855,80 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
         IncrementalCloneLedgerCtx rctx;
         rctx.ledger = &ledger;
         capsid::NeutralHttpRequest req;
+        req.url = "sentinel-url";
+        req.method = "PATCH";
+        req.credentials = "omit";
+        req.redirect = "manual";
+        req.has_mode = true;
+        req.mode = "no-cors";
         std::string err;
         std::size_t copies = 99;
         require(!capsid::extract_neutral_http_request_meta(
                     ctx, req_info, &req, test_reserve_clone_bytes, &rctx, &err, &copies),
                 "Request meta 1-byte-short must reject");
         require(err.find("byte quota") != std::string::npos, "expected byte quota error");
-        require(copies == 0 && req.url.empty() && req.method.empty() && req.credentials.empty() &&
-                    req.redirect.empty() && !req.has_mode && req.mode.empty(),
-                "Request meta must perform ZERO native copies on quota reject");
+        require(copies == 0 && req.url == "sentinel-url" && req.method == "PATCH" &&
+                    req.credentials == "omit" && req.redirect == "manual" && req.has_mode &&
+                    req.mode == "no-cors",
+                "Request meta must perform ZERO native copies and leave output untouched on "
+                "quota reject");
         require(rctx.reserved == 0, "failed Request meta must not retain reservation");
         check_tiers(ledger, kBaseline, "Request meta reject must leave all 3 tiers at baseline");
+    }
+    // U5: Missing or invalid required/optional Request metadata fails closed with
+    // zero copies, untouched output, and zero ledger mutation.
+    {
+        const char* bad_reqs[] = {
+            "({ method: 'GET', credentials: 'same-origin', redirect: 'follow' })",
+            "({ url: 'https://u5.test', credentials: 'same-origin', redirect: 'follow' })",
+            "({ url: 'https://u5.test', method: 'GET', credentials: 42, redirect: 'follow' })",
+            "({ url: 'https://u5.test', method: 'GET', credentials: 'same-origin', redirect: null "
+            "})",
+            "({ url: 'https://u5.test', method: 'GET', credentials: 'same-origin', "
+            "   redirect: 'follow', mode: 123 })",
+        };
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + 4096);
+        for (std::size_t i = 0; i < sizeof(bad_reqs) / sizeof(bad_reqs[0]); ++i) {
+            JSValue bad = rt.eval(bad_reqs[i]);
+            IncrementalCloneLedgerCtx rctx;
+            rctx.ledger = &ledger;
+            capsid::NeutralHttpRequest req;
+            req.url = "keep-url";
+            req.method = "KEEP";
+            req.has_mode = true;
+            req.mode = "keep-mode";
+            std::string err;
+            std::size_t copies = 99;
+            require(!capsid::extract_neutral_http_request_meta(
+                        ctx, bad, &req, test_reserve_clone_bytes, &rctx, &err, &copies),
+                    "invalid Request metadata must fail closed");
+            require(!err.empty() && copies == 0 && rctx.reserved == 0 && req.url == "keep-url" &&
+                        req.method == "KEEP" && req.has_mode && req.mode == "keep-mode",
+                    "invalid Request metadata must leave output and ledger untouched");
+            check_tiers(ledger, kBaseline, "invalid Request metadata must not touch ledger");
+            JS_FreeValue(ctx, bad);
+        }
+        // Valid omitted/null optional `mode` clears stale mode fields cleanly.
+        JSValue no_mode = rt.eval("({ url: 'https://u5.test/ok', method: 'GET', "
+                                  "   credentials: 'same-origin', redirect: 'follow', mode: null "
+                                  "})");
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        capsid::NeutralHttpRequest req;
+        req.has_mode = true;
+        req.mode = "stale";
+        std::string err;
+        std::size_t copies = 0;
+        require(capsid::extract_neutral_http_request_meta(
+                    ctx, no_mode, &req, test_reserve_clone_bytes, &rctx, &err, &copies),
+                ("Request meta with null mode rejected: " + err).c_str());
+        require(copies == 4 && !req.has_mode && req.mode.empty() &&
+                    req.url == "https://u5.test/ok" &&
+                    rctx.reserved == capsid::estimate_neutral_request_bytes(req),
+                "Request meta null mode mismatch");
+        ledger.release_bytes(1, "svc", rctx.reserved);
+        check_tiers(ledger, kBaseline, "Request meta null mode release restores baseline");
+        JS_FreeValue(ctx, no_mode);
     }
     {
         capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + req_expected);
@@ -898,16 +961,70 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
         IncrementalCloneLedgerCtx rctx;
         rctx.ledger = &ledger;
         capsid::NeutralHttpResponse res;
+        res.status = 418;
+        res.redirected = true;
+        res.status_text = "sentinel-text";
+        res.url = "sentinel-url";
+        res.type = "sentinel-type";
         std::string err;
         std::size_t copies = 99;
         require(!capsid::extract_neutral_http_response_meta(
                     ctx, res_info, &res, test_reserve_clone_bytes, &rctx, &err, &copies),
                 "Response meta 1-byte-short must reject");
         require(err.find("byte quota") != std::string::npos, "expected byte quota error");
-        require(copies == 0 && res.status_text.empty() && res.url.empty() && res.type.empty() &&
-                    res.status == 200 && !res.redirected,
-                "Response meta must perform ZERO native copies on quota reject");
+        require(copies == 0 && res.status_text == "sentinel-text" && res.url == "sentinel-url" &&
+                    res.type == "sentinel-type" && res.status == 418 && res.redirected,
+                "Response meta must perform ZERO native copies and leave output untouched on "
+                "quota reject");
         check_tiers(ledger, kBaseline, "Response meta reject must leave all 3 tiers at baseline");
+    }
+    // U5: Missing or invalid required Response metadata fails closed cleanly.
+    {
+        const char* bad_res[] = {
+            "({ redirected: false, statusText: 'OK', url: '', type: 'default' })",
+            "({ status: 99, redirected: false, statusText: 'OK', url: '', type: 'default' })",
+            "({ status: 600, redirected: false, statusText: 'OK', url: '', type: 'default' })",
+            "({ status: '200', redirected: false, statusText: 'OK', url: '', type: 'default' })",
+            "({ status: 200, redirected: 1, statusText: 'OK', url: '', type: 'default' })",
+            "({ status: 200, redirected: false, url: '', type: 'default' })",
+            "({ status: 200, redirected: false, statusText: 'OK', type: 'default' })",
+            "({ status: 200, redirected: false, statusText: 'OK', url: '' })",
+        };
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + 4096);
+        for (std::size_t i = 0; i < sizeof(bad_res) / sizeof(bad_res[0]); ++i) {
+            JSValue bad = rt.eval(bad_res[i]);
+            IncrementalCloneLedgerCtx rctx;
+            rctx.ledger = &ledger;
+            capsid::NeutralHttpResponse res;
+            res.status = 418;
+            res.url = "keep-res-url";
+            std::string err;
+            std::size_t copies = 99;
+            require(!capsid::extract_neutral_http_response_meta(
+                        ctx, bad, &res, test_reserve_clone_bytes, &rctx, &err, &copies),
+                    "invalid Response metadata must fail closed");
+            require(!err.empty() && copies == 0 && rctx.reserved == 0 && res.status == 418 &&
+                        res.url == "keep-res-url",
+                    "invalid Response metadata must leave output and ledger untouched");
+            check_tiers(ledger, kBaseline, "invalid Response metadata must not touch ledger");
+            JS_FreeValue(ctx, bad);
+        }
+        // Valid status 0 (Response.error() network error response) succeeds.
+        JSValue err_res = rt.eval("({ status: 0, redirected: false, statusText: '', "
+                                  "   url: '', type: 'error' })");
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        capsid::NeutralHttpResponse res;
+        std::string err;
+        std::size_t copies = 0;
+        require(capsid::extract_neutral_http_response_meta(
+                    ctx, err_res, &res, test_reserve_clone_bytes, &rctx, &err, &copies),
+                ("Response.error() status=0 rejected: " + err).c_str());
+        require(copies == 3 && res.status == 0 && !res.redirected && res.type == "error",
+                "Response.error() metadata mismatch");
+        ledger.release_bytes(1, "svc", rctx.reserved);
+        check_tiers(ledger, kBaseline, "Response.error() release restores baseline");
+        JS_FreeValue(ctx, err_res);
     }
     {
         capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + res_expected);
@@ -932,7 +1049,8 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
     }
     JS_FreeValue(ctx, res_info);
 
-    // 3. Header pairs (per-entry reserve before copy).
+    // 3. Header pairs (U3: transactional 2-pass reserve-before-copy; zero copies
+    // and untouched output whenever any pair fails validation or quota).
     JSValue hdrs_js = rt.eval("[['x-one', 'alpha'], ['x-two', 'beta-long']]");
     const std::size_t h0_bytes = 5 + 5 + 16; // 26
     const std::size_t h1_bytes = 5 + 9 + 16; // 30
@@ -941,13 +1059,15 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
         IncrementalCloneLedgerCtx rctx;
         rctx.ledger = &ledger;
         std::vector<std::pair<std::string, std::string>> pairs;
+        pairs.push_back(std::make_pair("sentinel-k", "sentinel-v"));
         std::string err;
         std::size_t copies = 99;
         require(!capsid::extract_neutral_header_pairs(
                     ctx, hdrs_js, &pairs, test_reserve_clone_bytes, &rctx, &err, &copies),
                 "Header 0 1-byte-short must reject");
-        require(copies == 0 && pairs.empty() && rctx.reserved == 0,
-                "Header 0 reject must perform ZERO copies");
+        require(copies == 0 && pairs.size() == 1 && pairs[0].first == "sentinel-k" &&
+                    pairs[0].second == "sentinel-v" && rctx.reserved == 0,
+                "Header 0 reject must perform ZERO copies and leave output untouched");
         check_tiers(ledger, kBaseline, "Header 0 reject leaves all 3 tiers at baseline");
     }
     {
@@ -955,27 +1075,31 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
         IncrementalCloneLedgerCtx rctx;
         rctx.ledger = &ledger;
         std::vector<std::pair<std::string, std::string>> pairs;
+        pairs.push_back(std::make_pair("sentinel-k", "sentinel-v"));
         std::string err;
-        std::size_t copies = 0;
+        std::size_t copies = 99;
         require(!capsid::extract_neutral_header_pairs(
                     ctx, hdrs_js, &pairs, test_reserve_clone_bytes, &rctx, &err, &copies),
-                "Header 1 1-byte-short must reject");
-        require(copies == 2 && pairs.size() == 1 && rctx.reserved == h0_bytes,
-                "Header 1 reject must not copy header 1");
-        ledger.release_bytes(1, "svc", rctx.reserved);
-        check_tiers(ledger, kBaseline, "Header 1 rollback restores baseline");
+                "Header block 1-byte-short must reject transactionally");
+        require(copies == 0 && pairs.size() == 1 && pairs[0].first == "sentinel-k" &&
+                    pairs[0].second == "sentinel-v" && rctx.reserved == 0,
+                "Header block reject must perform ZERO copies, zero reservation, and leave "
+                "output untouched");
+        check_tiers(ledger, kBaseline, "Header block reject leaves all 3 tiers at baseline");
     }
     {
         capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + h0_bytes + h1_bytes);
         IncrementalCloneLedgerCtx rctx;
         rctx.ledger = &ledger;
         std::vector<std::pair<std::string, std::string>> pairs;
+        pairs.push_back(std::make_pair("stale-k", "stale-v"));
         std::string err;
         std::size_t copies = 0;
         require(capsid::extract_neutral_header_pairs(ctx, hdrs_js, &pairs, test_reserve_clone_bytes,
                                                      &rctx, &err, &copies),
                 ("Headers exact-fit rejected: " + err).c_str());
-        require(copies == 4 && pairs.size() == 2 && rctx.reserved == h0_bytes + h1_bytes,
+        require(copies == 4 && pairs.size() == 2 && pairs[0].first == "x-one" &&
+                    pairs[1].first == "x-two" && rctx.reserved == h0_bytes + h1_bytes,
                 "Headers exact-fit mismatch");
         check_tiers(ledger, kBaseline + h0_bytes + h1_bytes, "Headers exact-fit tier accounting");
         ledger.release_bytes(1, "svc", rctx.reserved);
@@ -1001,7 +1125,9 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
         IncrementalCloneLedgerCtx rctx;
         rctx.ledger = &ledger;
         std::vector<std::string> methods;
+        methods.push_back("keepMethod");
         std::map<std::string, JSValue> method_fns;
+        method_fns["keepMethod"] = JS_NewInt32(ctx, 7);
         std::string err;
         std::size_t copies = 99;
         require(!capsid::inspect_rpc_target_methods(ctx, target_obj, base_proto, obj_proto, 128,
@@ -1009,8 +1135,12 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
                                                     &rctx, &err, &copies),
                 "RpcTarget methods 1-byte-short must reject");
         require(err.find("byte quota") != std::string::npos, "expected byte quota error");
-        require(copies == 0 && methods.empty() && method_fns.empty() && rctx.reserved == 0,
-                "RpcTarget reject must perform ZERO native method-name copies");
+        require(copies == 0 && methods.size() == 1 && methods[0] == "keepMethod" &&
+                    method_fns.size() == 1 && rctx.reserved == 0,
+                "RpcTarget reject must perform ZERO native method-name copies and leave outputs "
+                "untouched");
+        JS_FreeValue(ctx, method_fns["keepMethod"]);
+        method_fns.clear();
         check_tiers(ledger, kBaseline, "RpcTarget reject leaves all 3 tiers at baseline");
     }
     {
@@ -1037,7 +1167,8 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
         ledger.release_bytes(1, "svc", rctx.reserved);
         check_tiers(ledger, kBaseline, "RpcTarget release restores baseline");
     }
-    // Embedded NUL method name and accessor must fail closed with zero copies/reservations.
+    // Embedded NUL method name, >1024 property inspection cap, and long accessor
+    // name clamping must all fail closed with zero copies/reservations.
     {
         capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + 1024);
         IncrementalCloneLedgerCtx rctx;
@@ -1054,6 +1185,45 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
         require(copies == 0 && rctx.reserved == 0, "invalid method name must reserve/copy zero");
         JS_FreeValue(ctx, nul_method_target);
         check_tiers(ledger, kBaseline, "invalid RpcTarget leaves baseline untouched");
+
+        JSValue bloated_target = rt.eval("(() => {"
+                                         "  const o = {};"
+                                         "  for (let i = 0; i < 1030; ++i) o['p' + i] = i;"
+                                         "  return o;"
+                                         "})()");
+        copies = 99;
+        err.clear();
+        require(!capsid::inspect_rpc_target_methods(ctx, bloated_target, base_proto, obj_proto, 128,
+                                                    &methods, &method_fns, test_reserve_clone_bytes,
+                                                    &rctx, &err, &copies),
+                "RpcTarget exceeding property inspection cap must reject");
+        require(err.find("inspection limit") != std::string::npos && copies == 0 &&
+                    rctx.reserved == 0,
+                "bloated RpcTarget must reject at bounded inspection cap with zero copies");
+        JS_FreeValue(ctx, bloated_target);
+        check_tiers(ledger, kBaseline, "bloated RpcTarget leaves baseline untouched");
+
+        JSValue long_accessor_target =
+            rt.eval("(() => {"
+                    "  const o = {};"
+                    "  Object.defineProperty(o, 'a'.repeat(200), { get() { return 1; } });"
+                    "  return o;"
+                    "})()");
+        copies = 99;
+        err.clear();
+        require(!capsid::inspect_rpc_target_methods(ctx, long_accessor_target, base_proto,
+                                                    obj_proto, 128, &methods, &method_fns,
+                                                    test_reserve_clone_bytes, &rctx, &err, &copies),
+                "RpcTarget accessor with huge name must reject");
+        require(copies == 0 && rctx.reserved == 0 &&
+                    err == ("RpcTarget cannot expose accessor property: " + std::string(64, 'a')),
+                "huge accessor name error must be clamped and reserve/copy zero");
+        JS_FreeValue(ctx, long_accessor_target);
+        check_tiers(ledger, kBaseline, "accessor RpcTarget leaves baseline untouched");
+
+        require(capsid::valid_binding_method_name(std::string("okMethod")) &&
+                    !capsid::valid_binding_method_name(std::string("__proto__")),
+                "valid_binding_method_name string overload mismatch");
     }
     JS_FreeValue(ctx, target_obj);
     JS_FreeValue(ctx, base_proto);

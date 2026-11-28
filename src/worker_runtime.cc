@@ -734,6 +734,7 @@ class WorkerRuntime {
         JSValue create_proxy_request = JS_UNDEFINED;
         JSValue inspect_response = JS_UNDEFINED;
         JSValue create_proxy_response = JS_UNDEFINED;
+        JSValue commit_http_body_consumed = JS_UNDEFINED;
         JSValue create_proxy_abort_controller = JS_UNDEFINED;
         JSValue rpc_target_ctor = JS_UNDEFINED;
         JSValue is_rpc_target = JS_UNDEFINED;
@@ -762,6 +763,7 @@ class WorkerRuntime {
             &bridge->create_proxy_request,
             &bridge->inspect_response,
             &bridge->create_proxy_response,
+            &bridge->commit_http_body_consumed,
             &bridge->create_proxy_abort_controller,
             &bridge->rpc_target_ctor,
             &bridge->is_rpc_target,
@@ -5107,6 +5109,7 @@ class WorkerRuntime {
             {"createProxyRequest", &target->create_proxy_request},
             {"inspectResponse", &target->inspect_response},
             {"createProxyResponse", &target->create_proxy_response},
+            {"commitHttpBodyConsumed", &target->commit_http_body_consumed},
             {"createProxyAbortController", &target->create_proxy_abort_controller},
             {"RpcTarget", &target->rpc_target_ctor},
             {"isRpcTarget", &target->is_rpc_target},
@@ -7844,6 +7847,24 @@ class WorkerRuntime {
     JSValue enqueue_binding_rpc_call(JSContext* ctx, RequestToken* token, size_t table_index,
                                      uint64_t handle_id, uint64_t lease_deadline_ns,
                                      const std::string& method_name, int argc, JSValueConst* argv) {
+        // U1: Reject new Binding calls once an HTTP request has timed out, been
+        // canceled, or finished its response (`responses_` erased or marked
+        // `kFailurePending`). Otherwise a continuation resuming inside
+        // `expire_requests()`/`cancel_request()` could enqueue an orphan call
+        // with `deadline_ns == 0` that keeps the RequestToken alive and later
+        // triggers `WORKER POISONED: detached resource after response end`.
+        const bool is_http_token = (token->connection_id == 0 && token->connection_dial_id == 0);
+        const ResponseMap::const_iterator active_resp = responses_.find(token->request_id);
+        if (is_http_token && (active_resp == responses_.end() ||
+                              active_resp->second.phase == ResponsePhase::kFailurePending)) {
+            JSValue error = capsid::materialize_remote_error(
+                ctx,
+                capsid::RemoteErrorInfo::make_dom_exception(
+                    "InvalidStateError", "binding calls require an active request"),
+                &user_binding_intrinsics_);
+            return rejected_promise(ctx, error);
+        }
+
         const BindingRuntimeMethodTable& table = binding_tables_[table_index];
         // Three-tier quota check precedes options parsing and payload cloning so
         // overflow fails closed before inspecting untrusted inputs.
@@ -8056,6 +8077,7 @@ class WorkerRuntime {
                 } else {
                     JS_FreeValue(ctx, listener);
                 }
+                rollback_opened_proxies(clone_ctx);
                 self_finish_binding_call(call);
                 JS_FreeValue(ctx, promise);
                 binding_ledger_.release_call(token->request_id, table.id);
@@ -8069,6 +8091,7 @@ class WorkerRuntime {
             if (capsid::binding_signal_is_aborted(
                     ctx, call_options.signal, &user_binding_intrinsics_, &aborted_after_attach) &&
                 aborted_after_attach) {
+                rollback_opened_proxies(clone_ctx);
                 self_finish_binding_call(call);
                 JS_FreeValue(ctx, promise);
                 binding_ledger_.release_call(token->request_id, table.id);
@@ -8076,6 +8099,9 @@ class WorkerRuntime {
             }
         }
 
+        // U2: Commit deferred HTTP inline-body consumption ONLY once the entire
+        // input has validated and the call is guaranteed to enter the queue.
+        commit_opened_proxies(clone_ctx);
         pending_binding_calls_.emplace(call_id, std::move(call));
         binding_scheduler_.enqueue_call(table_index, call_id);
         ensure_deadline_timer_armed();
@@ -8423,6 +8449,11 @@ class WorkerRuntime {
     // --- Binding RPC v2 (M4B): Bidirectional Credit-Based Stream Proxies ---
 
     struct BindingCloneContext {
+        BindingCloneContext() = default;
+        BindingCloneContext(const BindingCloneContext&) = delete;
+        BindingCloneContext& operator=(const BindingCloneContext&) = delete;
+        ~BindingCloneContext() { release_pending_consume_targets(); }
+
         WorkerRuntime* self = NULL;
         uint64_t request_id = 0;
         std::string binding_id;
@@ -8430,10 +8461,35 @@ class WorkerRuntime {
         capsid::BindingStreamSide side = capsid::BindingStreamSide::kUser;
         bool reserve_ledger_bytes = false;
         size_t reserved_bytes = 0;
+        JSContext* consume_ctx = NULL;
+        std::vector<JSValue> pending_consume_targets;
         std::vector<uint64_t> opened_streams;
         std::vector<uint64_t> opened_signals;
         std::vector<uint64_t> opened_handles;
+
+        void release_pending_consume_targets() {
+            if (consume_ctx != NULL) {
+                for (size_t i = 0; i < pending_consume_targets.size(); ++i) {
+                    JS_FreeValue(consume_ctx, pending_consume_targets[i]);
+                }
+            }
+            pending_consume_targets.clear();
+            consume_ctx = NULL;
+        }
     };
+
+    static bool is_pending_consume_target(const BindingCloneContext* cctx, JSValueConst value) {
+        if (cctx == NULL || !JS_IsObject(value)) {
+            return false;
+        }
+        void* target_ptr = JS_VALUE_GET_PTR(value);
+        for (size_t i = 0; i < cctx->pending_consume_targets.size(); ++i) {
+            if (JS_VALUE_GET_PTR(cctx->pending_consume_targets[i]) == target_ptr) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     static bool reserve_binding_clone_bytes(size_t delta, std::string* error, void* opaque) {
         BindingCloneContext* cctx = static_cast<BindingCloneContext*>(opaque);
@@ -9035,6 +9091,12 @@ class WorkerRuntime {
                         *error = inspect_err;
                     return capsid::BindingCloneHookResult::kFailed;
                 }
+                if (is_pending_consume_target(cctx, value)) {
+                    JS_FreeValue(ctx, info);
+                    if (error != NULL)
+                        *error = "Request body is already used";
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
                 capsid::NeutralHttpRequest req;
                 if (!capsid::extract_neutral_http_request_meta(
                         ctx, info, &req, reserve_binding_clone_bytes, opaque, error)) {
@@ -9138,6 +9200,19 @@ class WorkerRuntime {
                     }
                 }
                 JS_FreeValue(ctx, sig_val);
+                JSValue needs_consume_val = JS_GetPropertyStr(ctx, info, "needsCommitConsume");
+                const bool needs_commit_consume =
+                    !JS_IsException(needs_consume_val) && JS_ToBool(ctx, needs_consume_val) != 0;
+                if (JS_IsException(needs_consume_val)) {
+                    JSValue exc = JS_GetException(ctx);
+                    JS_FreeValue(ctx, exc);
+                } else {
+                    JS_FreeValue(ctx, needs_consume_val);
+                }
+                if (needs_commit_consume) {
+                    cctx->consume_ctx = ctx;
+                    cctx->pending_consume_targets.push_back(JS_DupValue(ctx, value));
+                }
                 JS_FreeValue(ctx, info);
                 out->kind = capsid::NeutralValue::Kind::kRequestProxy;
                 out->request = std::move(req);
@@ -9164,6 +9239,12 @@ class WorkerRuntime {
                     JS_FreeValue(ctx, info);
                     if (error != NULL)
                         *error = inspect_err;
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                if (is_pending_consume_target(cctx, value)) {
+                    JS_FreeValue(ctx, info);
+                    if (error != NULL)
+                        *error = "Response body is already used";
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 capsid::NeutralHttpResponse res;
@@ -9214,6 +9295,19 @@ class WorkerRuntime {
                         return capsid::BindingCloneHookResult::kFailed;
                     }
                     res.body_stream_id = stream_nv.stream_id;
+                }
+                JSValue needs_consume_val = JS_GetPropertyStr(ctx, info, "needsCommitConsume");
+                const bool needs_commit_consume =
+                    !JS_IsException(needs_consume_val) && JS_ToBool(ctx, needs_consume_val) != 0;
+                if (JS_IsException(needs_consume_val)) {
+                    JSValue exc = JS_GetException(ctx);
+                    JS_FreeValue(ctx, exc);
+                } else {
+                    JS_FreeValue(ctx, needs_consume_val);
+                }
+                if (needs_commit_consume) {
+                    cctx->consume_ctx = ctx;
+                    cctx->pending_consume_targets.push_back(JS_DupValue(ctx, value));
                 }
                 JS_FreeValue(ctx, info);
                 out->kind = capsid::NeutralValue::Kind::kResponseProxy;
@@ -9709,20 +9803,50 @@ class WorkerRuntime {
         return JS_ThrowInternalError(ctx, "unsupported binding proxy kind");
     }
 
+    void commit_opened_proxies(BindingCloneContext& cctx) {
+        if (cctx.pending_consume_targets.empty() || cctx.consume_ctx == NULL) {
+            cctx.release_pending_consume_targets();
+            return;
+        }
+        const BindingJsBridge* bridge = (cctx.side == capsid::BindingStreamSide::kUser)
+                                            ? &user_binding_bridge_
+                                            : (cctx.table_index < binding_tables_.size()
+                                                   ? &binding_tables_[cctx.table_index].js_bridge
+                                                   : NULL);
+        if (bridge != NULL && JS_IsFunction(cctx.consume_ctx, bridge->commit_http_body_consumed)) {
+            for (size_t i = 0; i < cctx.pending_consume_targets.size(); ++i) {
+                JSValue arg = cctx.pending_consume_targets[i];
+                JSValue ret = JS_Call(cctx.consume_ctx, bridge->commit_http_body_consumed,
+                                      JS_UNDEFINED, 1, &arg);
+                if (JS_IsException(ret)) {
+                    JSValue exc = JS_GetException(cctx.consume_ctx);
+                    JS_FreeValue(cctx.consume_ctx, exc);
+                } else {
+                    JS_FreeValue(cctx.consume_ctx, ret);
+                }
+            }
+        }
+        cctx.release_pending_consume_targets();
+    }
+
     void rollback_opened_proxies(BindingCloneContext& cctx) {
+        cctx.release_pending_consume_targets();
         if (cctx.reserved_bytes > 0) {
             binding_ledger_.release_bytes(cctx.request_id, cctx.binding_id, cctx.reserved_bytes);
             cctx.reserved_bytes = 0;
         }
         for (size_t i = 0; i < cctx.opened_streams.size(); ++i) {
-            teardown_binding_stream(cctx.opened_streams[i], true);
+            teardown_binding_stream(cctx.opened_streams[i], true, true);
         }
+        cctx.opened_streams.clear();
         for (size_t i = 0; i < cctx.opened_signals.size(); ++i) {
             teardown_signal_bridge(cctx.opened_signals[i]);
         }
+        cctx.opened_signals.clear();
         for (size_t i = 0; i < cctx.opened_handles.size(); ++i) {
             dispose_binding_handle_now(cctx.opened_handles[i], true);
         }
+        cctx.opened_handles.clear();
     }
 
     void teardown_unmaterialized_streams_in_value(const capsid::NeutralValue& value) {
@@ -10659,7 +10783,8 @@ class WorkerRuntime {
         }
     }
 
-    void teardown_binding_stream(uint64_t stream_id, bool notify_endpoints) {
+    void teardown_binding_stream(uint64_t stream_id, bool notify_endpoints,
+                                 bool release_only = false) {
         capsid::BindingStreamRecord* rec_ptr = binding_streams_.find(stream_id);
         auto ep_it = active_binding_streams_.find(stream_id);
         if (rec_ptr == NULL && ep_it == active_binding_streams_.end()) {
@@ -10693,6 +10818,13 @@ class WorkerRuntime {
         if (notify_endpoints && !shutting_down_) {
             if (producer_ctx != NULL) {
                 auto notify_prod = [&]() {
+                    if (release_only) {
+                        if (JS_IsObject(ep.readable_source)) {
+                            call_js_method_ignore(producer_ctx, ep.readable_source, "detach", 0,
+                                                  NULL);
+                        }
+                        return;
+                    }
                     JSValue err = capsid::materialize_remote_error(
                         producer_ctx, reason,
                         stream_side_intrinsics(rec_copy, rec_copy.producer_side));
@@ -10725,6 +10857,13 @@ class WorkerRuntime {
             }
             if (consumer_ctx != NULL) {
                 auto notify_cons = [&]() {
+                    if (release_only) {
+                        if (JS_IsObject(ep.writable_sink)) {
+                            call_js_method_ignore(consumer_ctx, ep.writable_sink, "detach", 0,
+                                                  NULL);
+                        }
+                        return;
+                    }
                     JSValue err = capsid::materialize_remote_error(
                         consumer_ctx, reason,
                         stream_side_intrinsics(rec_copy, rec_copy.consumer_side));
@@ -11391,6 +11530,8 @@ class WorkerRuntime {
                             JS_NewString(ctx_, "binding result materialization failed"),
                             JS_PROP_C_W_E);
                         handler = call.user_reject;
+                    } else {
+                        commit_opened_proxies(cap_ctx);
                     }
                 }
             } else {

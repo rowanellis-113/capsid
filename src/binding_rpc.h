@@ -258,9 +258,11 @@ std::size_t estimate_neutral_value_bytes(const NeutralValue& value);
 bool valid_binding_method_name(const char* name, std::size_t len);
 bool valid_binding_method_name(const std::string& name);
 
-// T1/R2: Measure-and-reserve-BEFORE-copy extractors for HTTP proxy metadata,
-// header pairs, and RpcTarget method tables. On quota rejection, ZERO native
-// string copies are performed and output containers remain untouched.
+// T1/R2/U3/U5: Measure-and-reserve-BEFORE-copy extractors for HTTP proxy
+// metadata, header pairs, and RpcTarget method tables. Required fields fail
+// closed on missing/invalid values. On validation or quota rejection, performs
+// zero target container string copies, leaves output containers untouched, and
+// leaves ledger reservations unchanged.
 bool extract_neutral_http_request_meta(JSContext* ctx, JSValueConst info, NeutralHttpRequest* out,
                                        BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
                                        std::string* error, std::size_t* out_copies = nullptr);

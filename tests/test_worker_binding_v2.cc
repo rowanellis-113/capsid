@@ -2209,6 +2209,13 @@ export default () => ({
       mapHdr19: res.headers.get('x-m-19'),
     };
   },
+  async inspectBodyLen(v) {
+    const t = await v.text();
+    return { len: t.length, first: t.length > 0 ? t[0] : '', last: t.length > 0 ? t[t.length - 1] : '' };
+  },
+  echoObj(x) {
+    return x;
+  },
   echoFidelity(v) {
     return {
       echoed: v,
@@ -2272,10 +2279,10 @@ export default {
       // the 4 MiB per-request byte cap incrementally during clone!
       // Each pair carries ~120 KiB of headers (0 inline body); 40 concurrent
       // calls (~4.8 MiB) MUST hit the 4 MiB per-request byte quota, then refill.
-      const bigVal = 'h'.repeat(1000);
+      const bigVal = 'h'.repeat(7500);
       const makeHeavyHeaderReq = () => {
         const h = new Headers();
-        for (let i = 0; i < 60; ++i) {
+        for (let i = 0; i < 8; ++i) {
           h.set('x-pad-' + String(i).padStart(2, '0'), bigVal);
         }
         return new Request('https://r2.test/headers', { headers: h });
@@ -2351,11 +2358,32 @@ export default {
         bump,
       );
 
+      // U4: >64 KiB fixed bodies (promoted to stream via createFastBodyStream)
+      // MUST also run with zero business/builtin callbacks even when
+      // Object.create and own/prototype getters are hostile.
+      const bigFixedReq = new Request('https://u4.test/big-req', {
+        method: 'POST',
+        body: 'Q'.repeat(65537),
+      });
+      const bigFixedRes = new Response('P'.repeat(65537));
+      installHostileGetters(
+        bigFixedReq,
+        ['url', 'method', 'headers', '_headers', 'signal', '_signal',
+         'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
+        bump,
+      );
+      installHostileGetters(
+        bigFixedRes,
+        ['status', 'statusText', 'url', 'type', 'redirected', 'headers', '_headers',
+         '_headersState', 'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
+        bump,
+      );
+
       const origIsInt = Number.isInteger;
       const origObjCreate = Object.create;
       const origMapKeys = Map.prototype.keys;
       const origArrPush = Array.prototype.push;
-      let reqSnap, resSnap, mapSnap, usedRejected = false;
+      let reqSnap, resSnap, mapSnap, usedRejected = false, bigReqLen, bigResLen;
       try {
         Number.isInteger = () => { bump(); throw new Error('hostile-isInteger'); };
         Object.create = () => { bump(); throw new Error('hostile-create'); };
@@ -2369,11 +2397,20 @@ export default {
           () => false,
           (e) => Boolean(e && e.message && e.message.includes('already used')),
         );
+        const pBigReq = svc.inspectBodyLen(bigFixedReq);
+        const pBigRes = svc.inspectBodyLen(bigFixedRes);
         Number.isInteger = origIsInt;
         Object.create = origObjCreate;
         Map.prototype.keys = origMapKeys;
         Array.prototype.push = origArrPush;
-        [reqSnap, resSnap, mapSnap, usedRejected] = await Promise.all([pReq, pRes, pMap, pUsed]);
+        [reqSnap, resSnap, mapSnap, usedRejected, bigReqLen, bigResLen] = await Promise.all([
+          pReq,
+          pRes,
+          pMap,
+          pUsed,
+          pBigReq,
+          pBigRes,
+        ]);
       } finally {
         Number.isInteger = origIsInt;
         Object.create = origObjCreate;
@@ -2409,6 +2446,105 @@ export default {
         mutReqSnap.updatedHdr === 'v2' &&
         mutResSnap.hdr === 'base' &&
         mutResSnap.addedHdr === 'ok';
+
+      out.u4LargeFixedBodyZeroCallbackOk =
+        callbackCount === 0 &&
+        bigReqLen.len === 65537 &&
+        bigReqLen.first === 'Q' &&
+        bigReqLen.last === 'Q' &&
+        bigResLen.len === 65537 &&
+        bigResLen.first === 'P' &&
+        bigResLen.last === 'P';
+
+      // U2: A rejected composite RPC input MUST NOT consume caller HTTP bodies
+      // or cancel caller streams; consumption commits ONLY after full clone
+      // validation and enqueue succeed.
+      const draftRes = new Response('draft');
+      let draftResRejected = false;
+      try {
+        await svc.echoObj({ res: draftRes, bad: Symbol('x') });
+      } catch {
+        draftResRejected = true;
+      }
+      const draftResStillUnused = draftRes.bodyUsed === false;
+      const draftResText = await draftRes.text();
+
+      const draftReq = new Request('https://u2.test/req', { method: 'POST', body: 'req-draft' });
+      let draftReqRejected = false;
+      try {
+        await svc.echoObj({ req: draftReq, bad: Symbol('x') });
+      } catch {
+        draftReqRejected = true;
+      }
+      const draftReqStillUnused = draftReq.bodyUsed === false;
+      const draftReqText = await draftReq.text();
+
+      const bigDraftRes = new Response('L'.repeat(65537));
+      let bigDraftRejected = false;
+      try {
+        await svc.echoObj({ res: bigDraftRes, bad: Symbol('x') });
+      } catch {
+        bigDraftRejected = true;
+      }
+      const bigDraftStillUnused = bigDraftRes.bodyUsed === false;
+      const bigDraftText = await bigDraftRes.text();
+
+      const dupRes = new Response('dup');
+      let dupRejectedUsed = false;
+      try {
+        await svc.echoObj([dupRes, dupRes]);
+      } catch (e) {
+        dupRejectedUsed = Boolean(e && e.message && e.message.includes('already used'));
+      }
+      const dupStillUnused = dupRes.bodyUsed === false;
+      const dupText = await dupRes.text();
+
+      const draftStream = new ReadableStream({
+        start(c) {
+          c.enqueue(new Uint8Array([11, 22, 33]));
+          c.close();
+        },
+      });
+      let draftStreamRejected = false;
+      try {
+        await svc.echoObj({ s: draftStream, bad: Symbol('x') });
+      } catch {
+        draftStreamRejected = true;
+      }
+      const draftStreamUnlocked = draftStream.locked === false;
+      const draftStreamBytes = new Uint8Array(await new Response(draftStream).arrayBuffer());
+
+      const onceRes = new Response('once');
+      const onceLen = await svc.inspectBodyLen(onceRes);
+      const onceMarkedUsed = onceRes.bodyUsed === true;
+      let onceSecondRejected = false;
+      try {
+        await svc.inspectBodyLen(onceRes);
+      } catch (e) {
+        onceSecondRejected = Boolean(e && e.message && e.message.includes('already used'));
+      }
+
+      out.u2RejectedPreserveOk =
+        draftResRejected &&
+        draftResStillUnused &&
+        draftResText === 'draft' &&
+        draftReqRejected &&
+        draftReqStillUnused &&
+        draftReqText === 'req-draft' &&
+        bigDraftRejected &&
+        bigDraftStillUnused &&
+        bigDraftText.length === 65537 &&
+        dupRejectedUsed &&
+        dupStillUnused &&
+        dupText === 'dup' &&
+        draftStreamRejected &&
+        draftStreamUnlocked &&
+        draftStreamBytes.length === 3 &&
+        draftStreamBytes[0] === 11 &&
+        draftStreamBytes[2] === 33 &&
+        onceLen.len === 4 &&
+        onceMarkedUsed &&
+        onceSecondRejected;
 
       // T4: Bidirectional scalar string (embedded NUL) & record (empty + NUL key) fidelity.
       const sentPayload = {
@@ -2522,7 +2658,7 @@ export default {
     config.worker_path = worker_path;
     config.strict_sandbox = 0;
     config.process_memory_limit = 0;
-    config.request_timeout_ms = 5000;
+    config.request_timeout_ms = 15000;
     capsid_worker* worker = nullptr;
     require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn r2/r4/r5 worker");
     capsid::host::EffectiveBinding b;
@@ -2539,7 +2675,7 @@ export default {
 
     auto wait_until = [&](const char* stage, auto predicate) {
         const auto started = std::chrono::steady_clock::now();
-        const auto deadline = started + std::chrono::seconds(15);
+        const auto deadline = started + std::chrono::seconds(20);
         int events_seen = 0;
         int last_ev_type = -1;
         std::uint64_t last_req_id = 0;
@@ -2558,6 +2694,10 @@ export default {
                                            ev.payload.size);
                     require(false, std::string("unexpected worker error in stage=") + stage +
                                        " req=" + std::to_string(ev.request_id) + ": " + emsg);
+                }
+                if (ev.type == CAPSID_EVENT_REQUEST_TIMEOUT) {
+                    require(false, std::string("unexpected request timeout in stage=") + stage +
+                                       " req=" + std::to_string(ev.request_id));
                 }
                 require(ev.type != CAPSID_EVENT_EXIT,
                         std::string("unexpected worker exit in stage=") + stage);
@@ -2582,7 +2722,7 @@ export default {
 
     wait_until("ready", [](const capsid_event& ev) { return ev.type == CAPSID_EVENT_READY; });
 
-    // Request 1: R2 + R4/T3 + T4 + R5/T2 timeout burst (with lazy incoming header x-lazy-in).
+    // Request 1: R2 + R4/T3/U4 + U2 + T4 + R5/T2 timeout burst (with lazy incoming header x-lazy-in).
     const capsid_header hdrs[1] = {{
         {reinterpret_cast<const std::uint8_t*>("x-lazy-in"), 9},
         {reinterpret_cast<const std::uint8_t*>("lazy-ok"), 7},
@@ -2591,15 +2731,16 @@ export default {
         capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/r2-r4", hdrs, 1),
         "begin r2-r4");
     std::string body1;
-    wait_until("req1:r2-r4-t2-t3-t4", [&](const capsid_event& ev) {
+    wait_until("req1:r2-r4-t2-t3-t4-u2-u4", [&](const capsid_event& ev) {
         if (ev.request_id == 1 && ev.type == CAPSID_EVENT_RESPONSE_BODY) {
             body1.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
         }
         return ev.request_id == 1 && ev.type == CAPSID_EVENT_RESPONSE_END;
     });
-    require(body1 == "{\"r2HeaderQuotaOk\":true,\"r4ZeroCallbackOk\":true,\"t4FidelityOk\":true,"
-                     "\"r5TimeoutBurstOk\":true}",
-            "R2/R4/T2/T3/T4/R5 regressions failed: " + body1);
+    require(body1 == "{\"r2HeaderQuotaOk\":true,\"r4ZeroCallbackOk\":true,"
+                     "\"u4LargeFixedBodyZeroCallbackOk\":true,\"u2RejectedPreserveOk\":true,"
+                     "\"t4FidelityOk\":true,\"r5TimeoutBurstOk\":true}",
+            "R2/R4/T2/T3/T4/R5/U2/U4 regressions failed: " + body1);
 
     // Concurrent Requests 2 & 3: R5 48-handle burst multi-turn fairness proof.
     require_result(
@@ -2642,6 +2783,163 @@ export default {
     require(exit.clean(), "r2/r4/r5 worker did not exit cleanly");
 }
 
+// U1: When a request hits its request deadline while awaiting a Binding call,
+// a catch block that immediately attempts a follow-up Binding call during
+// timeout job drain MUST fail closed immediately (without enqueuing an orphan
+// call or poisoning the worker), and subsequent requests MUST continue cleanly.
+void test_audit_u1_post_timeout_binding_call_no_poison(const char* worker_path) {
+    const std::string binding_src = R"JS(
+let afterTimeoutHits = 0;
+export default () => ({
+  slowNever() {
+    return new Promise(() => {});
+  },
+  afterTimeoutPing(tag) {
+    afterTimeoutHits++;
+    return 'hit:' + tag;
+  },
+  getAfterTimeoutHits() {
+    return afterTimeoutHits;
+  },
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+
+export default {
+  async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === '/timeout-catch') {
+      try {
+        await svc.slowNever();
+      } catch {
+        try {
+          await svc.afterTimeoutPing('late');
+        } catch {
+          // Expected: post-timeout Binding call rejected immediately.
+        }
+      }
+      return new Response('late-after-timeout');
+    }
+    if (path === '/healthy') {
+      const hits = await svc.getAfterTimeoutHits();
+      return new Response('hits=' + hits);
+    }
+    return new Response('404', { status: 404 });
+  }
+};
+)JS";
+
+    capsid_worker_config config;
+    capsid_worker_config_init(&config);
+    config.worker_path = worker_path;
+    config.strict_sandbox = 0;
+    config.process_memory_limit = 0;
+    config.request_timeout_ms = 200;
+    capsid_worker* worker = nullptr;
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn u1 worker");
+    capsid::host::EffectiveBinding b;
+    b.id = "svc";
+    b.package.source = binding_src;
+    b.request.config_json = "{}";
+    b.profiles = {"network-client"};
+    std::string err;
+    require(capsid::host::load_effective_bindings_into_worker(worker, {b}, &err), err);
+    require_result(capsid_worker_load_bundle_named(
+                       worker, reinterpret_cast<const std::uint8_t*>(app_src.data()),
+                       app_src.size(), "file:///u1-timeout.js"),
+                   "load u1 bundle");
+
+    auto poll_step = [&](int timeout_ms, capsid_event* out_ev) -> bool {
+        const capsid_result flush = capsid_worker_flush(worker);
+        require(flush == CAPSID_OK || flush == CAPSID_WOULD_BLOCK, "u1 flush");
+        *out_ev = {};
+        out_ev->struct_size = sizeof(*out_ev);
+        const capsid_result r = capsid_worker_next_event(worker, out_ev);
+        if (r == CAPSID_OK) {
+            return true;
+        }
+        require(r == CAPSID_WOULD_BLOCK, "u1 next_event");
+        capsid_pollfd pfd = {};
+        pfd.fd = capsid_worker_fd(worker);
+        pfd.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+        require(capsid::win32::capsid_poll(&pfd, 1, timeout_ms) >= 0, "u1 poll");
+        return false;
+    };
+
+    // Wait for READY.
+    bool ready = false;
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!ready && std::chrono::steady_clock::now() < ready_deadline) {
+        capsid_event ev;
+        if (poll_step(20, &ev)) {
+            require(ev.type != CAPSID_EVENT_EXIT && ev.type != CAPSID_EVENT_ERROR,
+                    "u1 unexpected failure before ready");
+            if (ev.type == CAPSID_EVENT_READY) {
+                ready = true;
+            }
+        }
+    }
+    require(ready, "u1 worker never became ready");
+
+    // Request 1: times out at 200 ms, catches cancellation, and tries a second Binding call.
+    require_result(capsid_worker_begin_bodyless_request(
+                       worker, 1, "GET", "https://u1.test/timeout-catch", nullptr, 0),
+                   "u1 begin req1");
+    bool req1_timed_out = false;
+    const auto req1_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!req1_timed_out && std::chrono::steady_clock::now() < req1_deadline) {
+        capsid_event ev;
+        if (poll_step(20, &ev)) {
+            require(ev.type != CAPSID_EVENT_EXIT,
+                    "u1 worker unexpectedly exited (poisoned) on post-timeout Binding call");
+            if (ev.request_id == 1 && ev.type == CAPSID_EVENT_REQUEST_TIMEOUT) {
+                req1_timed_out = true;
+            }
+        }
+    }
+    require(req1_timed_out, "u1 req1 did not emit CAPSID_EVENT_REQUEST_TIMEOUT");
+
+    // Wait >150 ms (past 100 ms poison grace) to verify reclaim succeeded with zero poison/exit.
+    const auto settle_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(160);
+    while (std::chrono::steady_clock::now() < settle_until) {
+        capsid_event ev;
+        if (poll_step(20, &ev)) {
+            require(ev.type != CAPSID_EVENT_EXIT,
+                    "u1 worker poisoned and exited after req1 timeout reclaim");
+            require(ev.type != CAPSID_EVENT_ERROR,
+                    "u1 unexpected error during post-timeout settle");
+        }
+    }
+
+    // Request 2: worker must still be healthy and the post-timeout call must never have run.
+    require_result(capsid_worker_begin_bodyless_request(worker, 2, "GET", "https://u1.test/healthy",
+                                                        nullptr, 0),
+                   "u1 begin req2");
+    std::string body2;
+    bool req2_done = false;
+    const auto req2_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!req2_done && std::chrono::steady_clock::now() < req2_deadline) {
+        capsid_event ev;
+        if (poll_step(20, &ev)) {
+            require(ev.type != CAPSID_EVENT_EXIT && ev.type != CAPSID_EVENT_ERROR &&
+                        ev.type != CAPSID_EVENT_REQUEST_TIMEOUT,
+                    "u1 req2 failed after req1 timeout");
+            if (ev.request_id == 2 && ev.type == CAPSID_EVENT_RESPONSE_BODY) {
+                body2.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
+            } else if (ev.request_id == 2 && ev.type == CAPSID_EVENT_RESPONSE_END) {
+                req2_done = true;
+            }
+        }
+    }
+    require(req2_done && body2 == "hits=0", "u1 req2 unexpected response: " + body2);
+
+    const auto exit = capsid_test::shutdown_and_wait(worker, 3000);
+    capsid_worker_destroy(worker);
+    require(exit.clean(), "u1 worker did not exit cleanly");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2660,5 +2958,6 @@ int main(int argc, char** argv) {
     test_audit_f2_late_dispose_cpu_loop(argv[1]);
     test_audit_r1_async_dispose_cpu_loop(argv[1]);
     test_audit_r2_r4_r5_regressions(argv[1]);
+    test_audit_u1_post_timeout_binding_call_no_poison(argv[1]);
     return 0;
 }

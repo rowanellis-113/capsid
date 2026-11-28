@@ -1107,6 +1107,21 @@ export function getPrivateBodyStreamForBinding(value) {
   return slot !== undefined ? slot.bodyStream : null;
 }
 
+// U2: Deferred inline-body consumption committed ONLY after the entire
+// composite RPC input validates and commits (failed clones leave the caller's
+// Request/Response readable with bodyUsed === false).
+export function commitHttpBodyConsumedForBinding(value) {
+  if (!bindingHttpTrackingEnabled || !isObjectValue(value)) {
+    return;
+  }
+  const slot =
+    weakMapGet.call(requestPrivateSlots, value) ?? weakMapGet.call(responsePrivateSlots, value);
+  if (slot !== undefined) {
+    slot.bodyConsumed = true;
+    safeSetOwnDataProp(value, '_bodyConsumed', true);
+  }
+}
+
 export function tryBridgeOwnedHeaderPairs(headers) {
   const state = getHeaderState(headers);
   if (state === undefined) {
@@ -1120,12 +1135,12 @@ function createFastBodyStream(kind, data) {
     intrinsicSimpleQueueCtor !== null &&
     intrinsicReadableStreamCtor.prototype === intrinsicReadableStreamProto
   ) {
-    const stream = Object.create(intrinsicReadableStreamProto);
+    const stream = objectCreate(intrinsicReadableStreamProto);
     stream._state = 'readable';
     stream._reader = undefined;
     stream._storedError = undefined;
     stream._disturbed = false;
-    const controller = Object.create(intrinsicDefaultControllerProto);
+    const controller = objectCreate(intrinsicDefaultControllerProto);
     controller._controlledReadableStream = stream;
     controller._queue = new intrinsicSimpleQueueCtor();
     controller._queueTotalSize = 0;
@@ -1186,7 +1201,11 @@ function materializeFastBodyFromSlot(target, slot) {
   slot.bodyFastData = null;
   safeSetOwnDataProp(target, '_bodyExposed', true);
   safeSetOwnDataProp(target, '_noBody', false);
-  safeSetOwnDataProp(target, '_bodySize', kind === 2 ? data.byteLength : -1);
+  safeSetOwnDataProp(
+    target,
+    '_bodySize',
+    kind === 2 ? emptyBodyIntrinsics.typedLength.call(data) : -1,
+  );
   safeSetOwnDataProp(target, '_bodyStream', stream);
   safeSetOwnDataProp(target, '_bodyFastKind', 0);
   safeSetOwnDataProp(target, '_bodyFastData', null);
@@ -1274,13 +1293,13 @@ export function snapshotRequestForBinding(req, checkReadableTransferable, extrac
   let bodyKind = 0; // 0 = none, 1 = inline bytes, 2 = stream
   let inlineBytes = null;
   let bodyStream = null;
+  let needsCommitConsume = false;
   if (slot.bodyFastKind === 1 && typeof slot.bodyFastData === 'string') {
     const encoded = textEncoderEncode.call(sharedTextEncoder, slot.bodyFastData);
     if (encoded.byteLength <= 65536) {
       bodyKind = 1;
       inlineBytes = encoded;
-      slot.bodyConsumed = true;
-      safeSetOwnDataProp(req, '_bodyConsumed', true);
+      needsCommitConsume = true;
     } else {
       bodyKind = 2;
       bodyStream = materializeFastBodyFromSlot(req, slot);
@@ -1290,8 +1309,7 @@ export function snapshotRequestForBinding(req, checkReadableTransferable, extrac
     if (view !== null && view.byteLength <= 65536) {
       bodyKind = 1;
       inlineBytes = view;
-      slot.bodyConsumed = true;
-      safeSetOwnDataProp(req, '_bodyConsumed', true);
+      needsCommitConsume = true;
     } else {
       bodyKind = 2;
       bodyStream = materializeFastBodyFromSlot(req, slot);
@@ -1321,6 +1339,7 @@ export function snapshotRequestForBinding(req, checkReadableTransferable, extrac
     bodyKind,
     inlineBytes,
     bodyStream,
+    needsCommitConsume,
   };
 }
 
@@ -1375,13 +1394,13 @@ export function snapshotResponseForBinding(res, checkReadableTransferable, extra
   let bodyKind = 0; // 0 = none, 1 = inline bytes, 2 = stream
   let inlineBytes = null;
   let bodyStream = null;
+  let needsCommitConsume = false;
   if (slot.bodyFastKind === 1 && typeof slot.bodyFastData === 'string') {
     const encoded = textEncoderEncode.call(sharedTextEncoder, slot.bodyFastData);
     if (encoded.byteLength <= 65536) {
       bodyKind = 1;
       inlineBytes = encoded;
-      slot.bodyConsumed = true;
-      safeSetOwnDataProp(res, '_bodyConsumed', true);
+      needsCommitConsume = true;
     } else {
       bodyKind = 2;
       bodyStream = materializeFastBodyFromSlot(res, slot);
@@ -1391,8 +1410,7 @@ export function snapshotResponseForBinding(res, checkReadableTransferable, extra
     if (view !== null && view.byteLength <= 65536) {
       bodyKind = 1;
       inlineBytes = view;
-      slot.bodyConsumed = true;
-      safeSetOwnDataProp(res, '_bodyConsumed', true);
+      needsCommitConsume = true;
     } else {
       bodyKind = 2;
       bodyStream = materializeFastBodyFromSlot(res, slot);
@@ -1421,6 +1439,7 @@ export function snapshotResponseForBinding(res, checkReadableTransferable, extra
     bodyKind,
     inlineBytes,
     bodyStream,
+    needsCommitConsume,
   };
 }
 
