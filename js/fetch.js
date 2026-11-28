@@ -1098,28 +1098,85 @@ export function isGenuineResponse(value) {
   );
 }
 
-export function getPrivateBodyStreamForBinding(value) {
-  if (!bindingHttpTrackingEnabled || !isObjectValue(value)) {
-    return null;
+function getPrivateBodySlot(target) {
+  if (!bindingHttpTrackingEnabled || !isObjectValue(target)) {
+    return undefined;
   }
-  const slot =
-    weakMapGet.call(requestPrivateSlots, value) ?? weakMapGet.call(responsePrivateSlots, value);
+  return (
+    weakMapGet.call(requestPrivateSlots, target) ?? weakMapGet.call(responsePrivateSlots, target)
+  );
+}
+
+export function getPrivateBodyStreamForBinding(value) {
+  const slot = getPrivateBodySlot(value);
   return slot !== undefined ? slot.bodyStream : null;
+}
+
+function createConsumedFastBodyStream() {
+  if (
+    intrinsicSimpleQueueCtor !== null &&
+    intrinsicReadableStreamCtor.prototype === intrinsicReadableStreamProto
+  ) {
+    const stream = objectCreate(intrinsicReadableStreamProto);
+    stream._state = 'closed';
+    stream._reader = consumedReaderSentinel;
+    stream._storedError = undefined;
+    stream._disturbed = true;
+    const controller = objectCreate(intrinsicDefaultControllerProto);
+    controller._controlledReadableStream = stream;
+    controller._queue = new intrinsicSimpleQueueCtor();
+    controller._queueTotalSize = 0;
+    controller._started = true;
+    controller._closeRequested = true;
+    controller._pullAgain = false;
+    controller._pulling = false;
+    controller._strategySizeAlgorithm = undefined;
+    controller._strategyHWM = 0;
+    controller._capsidFastKind = 0;
+    controller._capsidFastData = null;
+    controller._capsidFastPulled = true;
+    controller._pullAlgorithm = undefined;
+    controller._cancelAlgorithm = undefined;
+    stream._readableStreamController = controller;
+    return stream;
+  }
+  const StreamCtor = intrinsicReadableStreamCtor || globalThis.ReadableStream;
+  const stream = new StreamCtor({
+    start(controller) {
+      controller.close();
+    },
+  });
+  stream._disturbed = true;
+  stream._reader = consumedReaderSentinel;
+  return stream;
 }
 
 // U2: Deferred inline-body consumption committed ONLY after the entire
 // composite RPC input validates and commits (failed clones leave the caller's
-// Request/Response readable with bodyUsed === false).
+// Request/Response readable with bodyUsed === false). On commit, drop the
+// inline payload and replace it with a closed, locked, disturbed stream so
+// `.body`, `.bodyUsed`, `.text()`, `.clone()`, frozen sources, and re-transfer
+// all observe one consistent consumed state.
 export function commitHttpBodyConsumedForBinding(value) {
-  if (!bindingHttpTrackingEnabled || !isObjectValue(value)) {
+  const slot = getPrivateBodySlot(value);
+  if (slot === undefined) {
     return;
   }
-  const slot =
-    weakMapGet.call(requestPrivateSlots, value) ?? weakMapGet.call(responsePrivateSlots, value);
-  if (slot !== undefined) {
-    slot.bodyConsumed = true;
-    safeSetOwnDataProp(value, '_bodyConsumed', true);
+  slot.bodyConsumed = true;
+  if (slot.bodyFastKind !== 0) {
+    const consumedStream = createConsumedFastBodyStream();
+    slot.noBody = false;
+    slot.bodyFastKind = 0;
+    slot.bodyFastData = null;
+    slot.bodyStream = consumedStream;
+    safeSetOwnDataProp(value, '_bodyExposed', true);
+    safeSetOwnDataProp(value, '_noBody', false);
+    safeSetOwnDataProp(value, '_bodySize', 0);
+    safeSetOwnDataProp(value, '_bodyFastKind', 0);
+    safeSetOwnDataProp(value, '_bodyFastData', null);
+    safeSetOwnDataProp(value, '_bodyStream', consumedStream);
   }
+  safeSetOwnDataProp(value, '_bodyConsumed', true);
 }
 
 export function tryBridgeOwnedHeaderPairs(headers) {
@@ -1296,7 +1353,7 @@ export function snapshotRequestForBinding(req, checkReadableTransferable, extrac
   let needsCommitConsume = false;
   if (slot.bodyFastKind === 1 && typeof slot.bodyFastData === 'string') {
     const encoded = textEncoderEncode.call(sharedTextEncoder, slot.bodyFastData);
-    if (encoded.byteLength <= 65536) {
+    if (applyIntrinsic(emptyBodyIntrinsics.typedLength, encoded, []) <= 65536) {
       bodyKind = 1;
       inlineBytes = encoded;
       needsCommitConsume = true;
@@ -1306,7 +1363,7 @@ export function snapshotRequestForBinding(req, checkReadableTransferable, extrac
     }
   } else if (slot.bodyFastKind === 2 && slot.bodyFastData !== null) {
     const view = extractBytes(slot.bodyFastData);
-    if (view !== null && view.byteLength <= 65536) {
+    if (view !== null && applyIntrinsic(emptyBodyIntrinsics.typedLength, view, []) <= 65536) {
       bodyKind = 1;
       inlineBytes = view;
       needsCommitConsume = true;
@@ -1397,7 +1454,7 @@ export function snapshotResponseForBinding(res, checkReadableTransferable, extra
   let needsCommitConsume = false;
   if (slot.bodyFastKind === 1 && typeof slot.bodyFastData === 'string') {
     const encoded = textEncoderEncode.call(sharedTextEncoder, slot.bodyFastData);
-    if (encoded.byteLength <= 65536) {
+    if (applyIntrinsic(emptyBodyIntrinsics.typedLength, encoded, []) <= 65536) {
       bodyKind = 1;
       inlineBytes = encoded;
       needsCommitConsume = true;
@@ -1407,7 +1464,7 @@ export function snapshotResponseForBinding(res, checkReadableTransferable, extra
     }
   } else if (slot.bodyFastKind === 2 && slot.bodyFastData !== null) {
     const view = extractBytes(slot.bodyFastData);
-    if (view !== null && view.byteLength <= 65536) {
+    if (view !== null && applyIntrinsic(emptyBodyIntrinsics.typedLength, view, []) <= 65536) {
       bodyKind = 1;
       inlineBytes = view;
       needsCommitConsume = true;
@@ -1735,18 +1792,25 @@ export function hasHeader(headers, normalizedName) {
 }
 
 export function consumeFastResponseBody(response) {
-  if (response._bodyConsumed || objectHasOwn(response, 'body')) {
-    return null;
+  const slot = getPrivateBodySlot(response);
+  if (slot !== undefined) {
+    if (slot.bodyConsumed || objectHasOwn(response, 'body')) {
+      return null;
+    }
+    if (slot.bodyFastKind !== 0 && !response._bodyExposed && slot.bodyStream === null) {
+      return slot.bodyFastData;
+    }
+  } else {
+    if (response._bodyConsumed || objectHasOwn(response, 'body')) {
+      return null;
+    }
+    if (response._bodyFastKind !== 0 && !response._bodyExposed && response._bodyStream === null) {
+      return response._bodyFastData;
+    }
   }
-  if (response._bodyFastKind !== 0 && !response._bodyExposed && response._bodyStream === null) {
-    return response._bodyFastData;
-  }
-  if (
-    response._bodyFastKind === 0 &&
-    response._bodyStream !== null &&
-    intrinsicReadableStreamProto !== null
-  ) {
-    const stream = response._bodyStream;
+  const fastKind = slot !== undefined ? slot.bodyFastKind : response._bodyFastKind;
+  const stream = slot !== undefined ? slot.bodyStream : response._bodyStream;
+  if (fastKind === 0 && stream !== null && intrinsicReadableStreamProto !== null) {
     const ctrl =
       stream !== null && typeof stream === 'object' ? stream._readableStreamController : undefined;
     if (
@@ -1778,8 +1842,10 @@ export function consumeFastResponseBody(response) {
       stream._disturbed = true;
       stream._state = 'closed';
       stream._reader = consumedReaderSentinel;
-      response._bodyConsumed = true;
-      syncPrivateBodyConsumed(response, true);
+      if (slot !== undefined) {
+        slot.bodyConsumed = true;
+      }
+      safeSetOwnDataProp(response, '_bodyConsumed', true);
       return data;
     }
   }
@@ -1787,26 +1853,35 @@ export function consumeFastResponseBody(response) {
 }
 
 export function getFastStreamResponseBody(response) {
-  if (
-    response._bodyFastKind !== 0 ||
-    response._bodyStream === null ||
-    objectHasOwn(response, 'body')
-  ) {
+  const slot = getPrivateBodySlot(response);
+  const fastKind = slot !== undefined ? slot.bodyFastKind : response._bodyFastKind;
+  const stream = slot !== undefined ? slot.bodyStream : response._bodyStream;
+  if (fastKind !== 0 || stream === null || objectHasOwn(response, 'body')) {
     return null;
   }
-  return response._bodyStream instanceof ReadableStream ? response._bodyStream : null;
+  return stream instanceof ReadableStream ? stream : null;
 }
 
 export function isNullFastResponseBody(response) {
+  const slot = getPrivateBodySlot(response);
+  const fastKind = slot !== undefined ? slot.bodyFastKind : response._bodyFastKind;
+  const stream = slot !== undefined ? slot.bodyStream : response._bodyStream;
   return (
-    response._bodyFastKind === 0 &&
-    !response._bodyExposed &&
-    response._bodyStream === null &&
-    !objectHasOwn(response, 'body')
+    fastKind === 0 && !response._bodyExposed && stream === null && !objectHasOwn(response, 'body')
   );
 }
 
 function materializeFastBody(target, exposed) {
+  const slot = getPrivateBodySlot(target);
+  if (slot !== undefined) {
+    if (exposed) {
+      safeSetOwnDataProp(target, '_bodyExposed', true);
+    }
+    if (slot.bodyStream === null && slot.bodyFastKind !== 0) {
+      return materializeFastBodyFromSlot(target, slot);
+    }
+    return slot.bodyStream;
+  }
   if (exposed) {
     target._bodyExposed = true;
   }
@@ -1815,11 +1890,10 @@ function materializeFastBody(target, exposed) {
     const data = target._bodyFastData;
     const stream = createFastBodyStream(kind, data);
     target._noBody = false;
-    target._bodySize = kind === 2 ? data.byteLength : -1;
+    target._bodySize = kind === 2 ? applyIntrinsic(emptyBodyIntrinsics.typedLength, data, []) : -1;
     target._bodyStream = stream;
     target._bodyFastKind = 0;
     target._bodyFastData = null;
-    syncPrivateBodySlot(target, false, stream, 0, null);
   }
   return target._bodyStream;
 }
@@ -1940,6 +2014,18 @@ function initBodyFields(target, body, hState) {
 }
 
 function consumeBodyGuard(target) {
+  const slot = getPrivateBodySlot(target);
+  if (slot !== undefined) {
+    if (slot.noBody) {
+      return null;
+    }
+    if (target.bodyUsed) {
+      return Promise.reject(new TypeError('Already read'));
+    }
+    slot.bodyConsumed = true;
+    safeSetOwnDataProp(target, '_bodyConsumed', true);
+    return null;
+  }
   if (target._noBody) {
     return null;
   }
@@ -1947,7 +2033,6 @@ function consumeBodyGuard(target) {
     return Promise.reject(new TypeError('Already read'));
   }
   target._bodyConsumed = true;
-  syncPrivateBodyConsumed(target, true);
   return null;
 }
 
@@ -2513,6 +2598,13 @@ class Request {
   }
 
   get body() {
+    const slot = getPrivateBodySlot(this);
+    if (slot !== undefined) {
+      if (slot.bodyFastKind !== 0) {
+        return materializeFastBodyFromSlot(this, slot);
+      }
+      return slot.bodyStream;
+    }
     if (this._bodyFastKind !== 0) {
       return materializeFastBody(this, true);
     }
@@ -2528,6 +2620,16 @@ class Request {
   }
 
   get bodyUsed() {
+    const slot = getPrivateBodySlot(this);
+    if (slot !== undefined) {
+      if (slot.bodyConsumed) return true;
+      const stream = slot.bodyStream;
+      return (
+        stream !== null &&
+        stream !== undefined &&
+        bodyProperty(stream, '_disturbed')?.value === true
+      );
+    }
     if (this._bodyConsumed) return true;
     const stream = this._bodyStream;
     return (
@@ -2565,17 +2667,21 @@ class Request {
     if (this.bodyUsed) {
       throw new TypeError('Already read');
     }
+    const slot = getPrivateBodySlot(this);
+    const fastKind = slot !== undefined ? slot.bodyFastKind : this._bodyFastKind;
+    const fastData = slot !== undefined ? slot.bodyFastData : this._bodyFastData;
+    const bodyStream = slot !== undefined ? slot.bodyStream : this._bodyStream;
     let body2 = null;
-    if (this._bodyFastKind !== 0) {
+    if (fastKind !== 0) {
       // Request construction snapshots fixed bytes exactly once.
-      body2 = this._bodyFastData;
-    } else if (this._bodyStream instanceof ReadableStream) {
-      const [body1, teeBody] = this._bodyStream.tee();
-      this._bodyStream = body1;
+      body2 = fastData;
+    } else if (bodyStream instanceof ReadableStream) {
+      const [body1, teeBody] = bodyStream.tee();
+      safeSetOwnDataProp(this, '_bodyStream', body1);
       syncPrivateBodySlot(this, false, body1, 0, null);
       body2 = teeBody;
     } else {
-      body2 = this._bodyStream;
+      body2 = bodyStream;
     }
     const cloned = new Request(this.url, {
       body: body2,
@@ -3025,6 +3131,13 @@ class Response {
   }
 
   get body() {
+    const slot = getPrivateBodySlot(this);
+    if (slot !== undefined) {
+      if (slot.bodyFastKind !== 0) {
+        return materializeFastBodyFromSlot(this, slot);
+      }
+      return slot.bodyStream;
+    }
     if (this._bodyFastKind !== 0) {
       return materializeFastBody(this, true);
     }
@@ -3040,6 +3153,16 @@ class Response {
   }
 
   get bodyUsed() {
+    const slot = getPrivateBodySlot(this);
+    if (slot !== undefined) {
+      if (slot.bodyConsumed) return true;
+      const stream = slot.bodyStream;
+      return (
+        stream !== null &&
+        stream !== undefined &&
+        bodyProperty(stream, '_disturbed')?.value === true
+      );
+    }
     if (this._bodyConsumed) return true;
     const stream = this._bodyStream;
     return (
@@ -3114,22 +3237,28 @@ class Response {
       );
       return wrapped;
     }
+    const slot = getPrivateBodySlot(this);
+    const fastKind = slot !== undefined ? slot.bodyFastKind : this._bodyFastKind;
+    const fastData = slot !== undefined ? slot.bodyFastData : this._bodyFastData;
+    const bodyStream = slot !== undefined ? slot.bodyStream : this._bodyStream;
     let body2 = null;
-    if (this._bodyFastKind !== 0) {
+    if (fastKind !== 0) {
       // Response construction snapshots fixed bytes exactly once.
-      body2 = this._bodyFastData;
-    } else if (this._bodyStream !== null) {
-      if (this._bodyStream.locked) {
+      body2 = fastData;
+    } else if (bodyStream !== null) {
+      if (bodyStream.locked) {
         throw new bodyTypeError('This ReadableStream is currently locked to a reader,');
       }
-      if (this._bodyStream instanceof ReadableStream) {
-        const [body1, teeBody] = this._bodyStream.tee();
-        this._bodyStream = body1;
+      if (bodyStream instanceof ReadableStream) {
+        const [body1, teeBody] = bodyStream.tee();
+        safeSetOwnDataProp(this, '_bodyStream', body1);
         syncPrivateBodySlot(this, false, body1, 0, null);
         body2 = teeBody;
       } else {
-        body2 = this._bodyStream;
+        body2 = bodyStream;
       }
+    } else if (this.bodyUsed) {
+      throw new bodyTypeError('Already read');
     }
     const cloned = new Response(body2, {
       status: this.status,

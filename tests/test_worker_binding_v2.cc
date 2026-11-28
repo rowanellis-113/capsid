@@ -2213,6 +2213,16 @@ export default () => ({
     const t = await v.text();
     return { len: t.length, first: t.length > 0 ? t[0] : '', last: t.length > 0 ? t[t.length - 1] : '' };
   },
+  async inspectBodyDelivery(v) {
+    const mode = v._bodyFastKind === 2 ? 'inline' : (v._bodyStream !== null ? 'stream' : 'none');
+    const buf = new Uint8Array(await v.arrayBuffer());
+    return {
+      mode,
+      len: buf.length,
+      first: buf.length > 0 ? buf[0] : -1,
+      last: buf.length > 0 ? buf[buf.length - 1] : -1,
+    };
+  },
   echoObj(x) {
     return x;
   },
@@ -2249,7 +2259,7 @@ export default () => ({
 });
 )JS";
 
-    const std::string app_src = R"JS(
+    const std::string app_src = std::string(R"JS(
 import svc from 'capsid:binding/svc';
 
 function installHostileGetters(obj, keys, bump) {
@@ -2358,37 +2368,74 @@ export default {
         bump,
       );
 
-      // U4: >64 KiB fixed bodies (promoted to stream via createFastBodyStream)
-      // MUST also run with zero business/builtin callbacks even when
-      // Object.create and own/prototype getters are hostile.
-      const bigFixedReq = new Request('https://u4.test/big-req', {
+      // U4: Both sides of the 64 KiB inline/stream threshold (65,536 inline vs
+      // 65,537 stream) for Request & Response in both text and binary forms MUST
+      // run with zero business/builtin callbacks even when Object.create,
+      // TypedArray.prototype.byteLength, Number.isInteger, Map.prototype.keys,
+      // Array.prototype.push, and own getters are hostile.
+      const makeBytes = (len, first, last) => {
+        const a = new Uint8Array(len);
+        a.fill(42);
+        a[0] = first;
+        a[len - 1] = last;
+        return a;
+      };
+      const reqText64k = new Request('https://u4.test/req-t-64k', {
         method: 'POST',
-        body: 'Q'.repeat(65537),
+        body: 'A' + 'x'.repeat(65534) + 'B',
       });
-      const bigFixedRes = new Response('P'.repeat(65537));
-      installHostileGetters(
-        bigFixedReq,
-        ['url', 'method', 'headers', '_headers', 'signal', '_signal',
-         'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
-        bump,
-      );
-      installHostileGetters(
-        bigFixedRes,
-        ['status', 'statusText', 'url', 'type', 'redirected', 'headers', '_headers',
-         '_headersState', 'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
-        bump,
-      );
+      const reqBin64k = new Request('https://u4.test/req-b-64k', {
+        method: 'POST',
+        body: makeBytes(65536, 19, 83),
+      });
+      const resText64k = new Response('C' + 'y'.repeat(65534) + 'D');
+      const resBin64k = new Response(makeBytes(65536, 21, 85));
+      const reqText64kPlus = new Request('https://u4.test/req-t-64kp', {
+        method: 'POST',
+        body: 'Q' + 'z'.repeat(65535) + 'R',
+      });
+      const reqBin64kPlus = new Request('https://u4.test/req-b-64kp', {
+        method: 'POST',
+        body: makeBytes(65537, 23, 87),
+      });
+      const resText64kPlus = new Response('P' + 'w'.repeat(65535) + 'S');
+      const resBin64kPlus = new Response(makeBytes(65537, 25, 89));
 
+      const reqKeys = [
+        'url', 'method', 'headers', '_headers', 'signal', '_signal',
+        'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed',
+      ];
+      const resKeys = [
+        'status', 'statusText', 'url', 'type', 'redirected', 'headers', '_headers',
+        '_headersState', 'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed',
+      ];
+      for (const r of [reqText64k, reqBin64k, reqText64kPlus, reqBin64kPlus]) {
+        installHostileGetters(r, reqKeys, bump);
+      }
+      for (const r of [resText64k, resBin64k, resText64kPlus, resBin64kPlus]) {
+        installHostileGetters(r, resKeys, bump);
+      }
+
+      const typedArrayProto = Object.getPrototypeOf(Uint8Array.prototype);
+      const origByteLengthDesc = Object.getOwnPropertyDescriptor(typedArrayProto, 'byteLength');
       const origIsInt = Number.isInteger;
       const origObjCreate = Object.create;
       const origMapKeys = Map.prototype.keys;
       const origArrPush = Array.prototype.push;
-      let reqSnap, resSnap, mapSnap, usedRejected = false, bigReqLen, bigResLen;
+      let reqSnap, resSnap, mapSnap, usedRejected = false;
+      let dReqT64, dReqB64, dResT64, dResB64, dReqT64P, dReqB64P, dResT64P, dResB64P;
       try {
         Number.isInteger = () => { bump(); throw new Error('hostile-isInteger'); };
         Object.create = () => { bump(); throw new Error('hostile-create'); };
         Map.prototype.keys = () => { bump(); throw new Error('hostile-map-keys'); };
         Array.prototype.push = () => { bump(); throw new Error('hostile-arr-push'); };
+        Object.defineProperty(typedArrayProto, 'byteLength', {
+          configurable: true,
+          get() {
+            bump();
+            throw new Error('hostile-typedarray-byteLength');
+          },
+        });
 
         const pReq = svc.inspectReqSnapshot(incomingReq);
         const pRes = svc.inspectResSnapshot(emptyRes);
@@ -2397,21 +2444,49 @@ export default {
           () => false,
           (e) => Boolean(e && e.message && e.message.includes('already used')),
         );
-        const pBigReq = svc.inspectBodyLen(bigFixedReq);
-        const pBigRes = svc.inspectBodyLen(bigFixedRes);
+        const pReqT64 = svc.inspectBodyDelivery(reqText64k);
+        const pReqB64 = svc.inspectBodyDelivery(reqBin64k);
+        const pResT64 = svc.inspectBodyDelivery(resText64k);
+        const pResB64 = svc.inspectBodyDelivery(resBin64k);
+        const pReqT64P = svc.inspectBodyDelivery(reqText64kPlus);
+        const pReqB64P = svc.inspectBodyDelivery(reqBin64kPlus);
+        const pResT64P = svc.inspectBodyDelivery(resText64kPlus);
+        const pResB64P = svc.inspectBodyDelivery(resBin64kPlus);
+
+        Object.defineProperty(typedArrayProto, 'byteLength', origByteLengthDesc);
         Number.isInteger = origIsInt;
         Object.create = origObjCreate;
         Map.prototype.keys = origMapKeys;
         Array.prototype.push = origArrPush;
-        [reqSnap, resSnap, mapSnap, usedRejected, bigReqLen, bigResLen] = await Promise.all([
+        [
+          reqSnap,
+          resSnap,
+          mapSnap,
+          usedRejected,
+          dReqT64,
+          dReqB64,
+          dResT64,
+          dResB64,
+          dReqT64P,
+          dReqB64P,
+          dResT64P,
+          dResB64P,
+        ] = await Promise.all([
           pReq,
           pRes,
           pMap,
           pUsed,
-          pBigReq,
-          pBigRes,
+          pReqT64,
+          pReqB64,
+          pResT64,
+          pResB64,
+          pReqT64P,
+          pReqB64P,
+          pResT64P,
+          pResB64P,
         ]);
       } finally {
+        Object.defineProperty(typedArrayProto, 'byteLength', origByteLengthDesc);
         Number.isInteger = origIsInt;
         Object.create = origObjCreate;
         Map.prototype.keys = origMapKeys;
@@ -2447,18 +2522,54 @@ export default {
         mutResSnap.hdr === 'base' &&
         mutResSnap.addedHdr === 'ok';
 
+      const checkDeliv = (d, mode, len, first, last) =>
+        Boolean(d && d.mode === mode && d.len === len && d.first === first && d.last === last);
       out.u4LargeFixedBodyZeroCallbackOk =
         callbackCount === 0 &&
-        bigReqLen.len === 65537 &&
-        bigReqLen.first === 'Q' &&
-        bigReqLen.last === 'Q' &&
-        bigResLen.len === 65537 &&
-        bigResLen.first === 'P' &&
-        bigResLen.last === 'P';
+        checkDeliv(dReqT64, 'inline', 65536, 65, 66) &&
+        checkDeliv(dReqB64, 'inline', 65536, 19, 83) &&
+        checkDeliv(dResT64, 'inline', 65536, 67, 68) &&
+        checkDeliv(dResB64, 'inline', 65536, 21, 85) &&
+        checkDeliv(dReqT64P, 'stream', 65537, 81, 82) &&
+        checkDeliv(dReqB64P, 'stream', 65537, 23, 87) &&
+        checkDeliv(dResT64P, 'stream', 65537, 80, 83) &&
+        checkDeliv(dResB64P, 'stream', 65537, 25, 89);
+)JS") + R"JS(
+      // U2: (a) A rejected composite RPC input MUST NOT consume caller HTTP
+      // bodies (including frozen sources) or cancel caller streams;
+      // (b) After a successful transfer, `.bodyUsed`, `.body` (locked/disturbed
+      // and cannot re-read bytes), `.text()`, `.clone()`, frozen sources, and
+      // re-transfer MUST all observe one consistent consumed state.
+      const verifyConsumedLocally = async (src) => {
+        if (src.bodyUsed !== true) return false;
+        if (src.body === null || src.body.locked !== true) return false;
+        let readerLocked = false;
+        try {
+          src.body.getReader();
+        } catch {
+          readerLocked = true;
+        }
+        let textRejected = false;
+        try {
+          await src.text();
+        } catch (e) {
+          textRejected = Boolean(e && e.message && e.message.includes('Already read'));
+        }
+        let cloneRejected = false;
+        try {
+          src.clone();
+        } catch {
+          cloneRejected = true;
+        }
+        let retransferRejected = false;
+        try {
+          await svc.inspectBodyLen(src);
+        } catch (e) {
+          retransferRejected = Boolean(e && e.message && e.message.includes('already used'));
+        }
+        return readerLocked && textRejected && cloneRejected && retransferRejected;
+      };
 
-      // U2: A rejected composite RPC input MUST NOT consume caller HTTP bodies
-      // or cancel caller streams; consumption commits ONLY after full clone
-      // validation and enqueue succeed.
       const draftRes = new Response('draft');
       let draftResRejected = false;
       try {
@@ -2478,6 +2589,16 @@ export default {
       }
       const draftReqStillUnused = draftReq.bodyUsed === false;
       const draftReqText = await draftReq.text();
+
+      const frozenDraftRes = Object.freeze(new Response('frozen-draft'));
+      let frozenDraftRejected = false;
+      try {
+        await svc.echoObj({ res: frozenDraftRes, bad: Symbol('x') });
+      } catch {
+        frozenDraftRejected = true;
+      }
+      const frozenDraftStillUnused = frozenDraftRes.bodyUsed === false;
+      const frozenDraftText = await frozenDraftRes.text();
 
       const bigDraftRes = new Response('L'.repeat(65537));
       let bigDraftRejected = false;
@@ -2514,15 +2635,23 @@ export default {
       const draftStreamUnlocked = draftStream.locked === false;
       const draftStreamBytes = new Uint8Array(await new Response(draftStream).arrayBuffer());
 
-      const onceRes = new Response('once');
-      const onceLen = await svc.inspectBodyLen(onceRes);
-      const onceMarkedUsed = onceRes.bodyUsed === true;
-      let onceSecondRejected = false;
-      try {
-        await svc.inspectBodyLen(onceRes);
-      } catch (e) {
-        onceSecondRejected = Boolean(e && e.message && e.message.includes('already used'));
-      }
+      const onceRes = new Response('abc');
+      const onceResLen = await svc.inspectBodyLen(onceRes);
+      const onceResConsistent = await verifyConsumedLocally(onceRes);
+
+      const onceReq = new Request('https://u2.test/once-req', { method: 'POST', body: 'abc' });
+      const onceReqLen = await svc.inspectBodyLen(onceReq);
+      const onceReqConsistent = await verifyConsumedLocally(onceReq);
+
+      const frozenRes = Object.freeze(new Response('abc'));
+      const frozenResLen = await svc.inspectBodyLen(frozenRes);
+      const frozenResConsistent = await verifyConsumedLocally(frozenRes);
+
+      const frozenReq = Object.freeze(
+        new Request('https://u2.test/frozen-req', { method: 'POST', body: 'abc' }),
+      );
+      const frozenReqLen = await svc.inspectBodyLen(frozenReq);
+      const frozenReqConsistent = await verifyConsumedLocally(frozenReq);
 
       out.u2RejectedPreserveOk =
         draftResRejected &&
@@ -2531,6 +2660,9 @@ export default {
         draftReqRejected &&
         draftReqStillUnused &&
         draftReqText === 'req-draft' &&
+        frozenDraftRejected &&
+        frozenDraftStillUnused &&
+        frozenDraftText === 'frozen-draft' &&
         bigDraftRejected &&
         bigDraftStillUnused &&
         bigDraftText.length === 65537 &&
@@ -2542,9 +2674,14 @@ export default {
         draftStreamBytes.length === 3 &&
         draftStreamBytes[0] === 11 &&
         draftStreamBytes[2] === 33 &&
-        onceLen.len === 4 &&
-        onceMarkedUsed &&
-        onceSecondRejected;
+        onceResLen.len === 3 &&
+        onceResConsistent &&
+        onceReqLen.len === 3 &&
+        onceReqConsistent &&
+        frozenResLen.len === 3 &&
+        frozenResConsistent &&
+        frozenReqLen.len === 3 &&
+        frozenReqConsistent;
 
       // T4: Bidirectional scalar string (embedded NUL) & record (empty + NUL key) fidelity.
       const sentPayload = {
@@ -2807,6 +2944,11 @@ export default () => ({
     const std::string app_src = R"JS(
 import svc from 'capsid:binding/svc';
 
+let followUpAttempts = 0;
+let followUpResolved = 0;
+let followUpErrName = '';
+let followUpErrMsg = '';
+
 export default {
   async fetch(req) {
     const path = new URL(req.url).pathname;
@@ -2814,17 +2956,26 @@ export default {
       try {
         await svc.slowNever();
       } catch {
+        followUpAttempts++;
         try {
           await svc.afterTimeoutPing('late');
-        } catch {
-          // Expected: post-timeout Binding call rejected immediately.
+          followUpResolved++;
+        } catch (err) {
+          followUpErrName = err && typeof err.name === 'string' ? err.name : String(err);
+          followUpErrMsg = err && typeof err.message === 'string' ? err.message : '';
         }
       }
       return new Response('late-after-timeout');
     }
     if (path === '/healthy') {
       const hits = await svc.getAfterTimeoutHits();
-      return new Response('hits=' + hits);
+      return new Response(JSON.stringify({
+        hits,
+        followUpAttempts,
+        followUpResolved,
+        followUpErrName,
+        followUpErrMsg,
+      }));
     }
     return new Response('404', { status: 404 });
   }
@@ -2933,7 +3084,10 @@ export default {
             }
         }
     }
-    require(req2_done && body2 == "hits=0", "u1 req2 unexpected response: " + body2);
+    require(req2_done && body2 == "{\"hits\":0,\"followUpAttempts\":1,\"followUpResolved\":0,"
+                                  "\"followUpErrName\":\"InvalidStateError\","
+                                  "\"followUpErrMsg\":\"binding calls require an active request\"}",
+            "u1 req2 unexpected response: " + body2);
 
     const auto exit = capsid_test::shutdown_and_wait(worker, 3000);
     capsid_worker_destroy(worker);
