@@ -1085,16 +1085,15 @@
   },
 };</pre>
 
-      <pre class="stage-code is-hidden" id="code-panel-binding"><span class="tok-c">// Dual-Runtime Trusted Binding — secrets &amp; sockets stay in isolated Binding heap</span>
-<span class="tok-k">import</span> orders <span class="tok-k">from</span> <span class="tok-s">"capsid:binding/orders"</span>;
+      <pre class="stage-code is-hidden" id="code-panel-binding"><span class="tok-c">// Untrusted app calls a Host-installed Binding — zero secrets in user JS</span>
+<span class="tok-k">import</span> vault <span class="tok-k">from</span> <span class="tok-s">"capsid:binding/vault"</span>;
 
 <span class="tok-k">export default</span> {
   <span class="tok-k">async</span> <span class="tok-f">fetch</span>(req) {
-    <span class="tok-k">const</span> s = <span class="tok-k">await</span> orders.<span class="tok-f">open</span>(<span class="tok-s">"acme"</span>, { timeoutMs: <span class="tok-n">2000</span> });
+    <span class="tok-k">const</span> s = <span class="tok-k">await</span> vault.<span class="tok-f">open</span>(<span class="tok-k">null</span>, { timeoutMs: <span class="tok-n">1000</span> });
     <span class="tok-k">try</span> {
-      <span class="tok-k">const</span> rows = <span class="tok-k">await</span> s.<span class="tok-f">query</span>(<span class="tok-k">await</span> req.<span class="tok-f">json</span>()); <span class="tok-c">// credit-backed stream proxy</span>
-      <span class="tok-k">return new</span> <span class="tok-t">Response</span>(rows);
-    } <span class="tok-k">finally</span> { s.<span class="tok-f">dispose</span>(); } <span class="tok-c">// RpcTarget stub (+ lease &amp; GC fallback)</span>
+      <span class="tok-k">return</span> <span class="tok-t">Response</span>.<span class="tok-f">json</span>({ sig: <span class="tok-k">await</span> s.<span class="tok-f">sign</span>(<span class="tok-k">await</span> req.<span class="tok-f">text</span>()) });
+    } <span class="tok-k">finally</span> { s.<span class="tok-f">dispose</span>(); } <span class="tok-c">// RpcTarget (+ lease &amp; GC fallback)</span>
   },
 };</pre>
 
@@ -1318,6 +1317,46 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
         <div class="ef-fact">
           <strong>Zero-Binding Fast Path</strong>
           <span>Workers declaring zero Bindings allocate no Binding runtime, scheduler, or extra Linux sandbox profile — preserving the single-runtime footprint and latency baseline.</span>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="qs-term">
+          <div class="qs-term-bar">
+            <span class="qs-term-title"><span class="dot-s"></span>1. Create Binding &middot; bindings/vault/manifest.json + index.js</span>
+          </div>
+          <pre class="qs-code"><span class="tok-c">// manifest.json (Host-approved maximum modules &amp; sandbox profiles)</span>
+{ "apiVersion": "capsid/binding-v1",
+  "permissions": { "modules": ["capsid:hashing", "capsid:internal/core"] } }
+
+<span class="tok-c">// index.js (isolated Binding Runtime — holds valueFrom secrets)</span>
+<span class="tok-k">import</span> { createHash } <span class="tok-k">from</span> <span class="tok-s">"capsid:hashing"</span>;
+
+<span class="tok-k">class</span> <span class="tok-t">Signer</span> <span class="tok-k">extends</span> <span class="tok-t">RpcTarget</span> {
+  <span class="tok-f">constructor</span>(k) { <span class="tok-k">super</span>({ leaseMs: <span class="tok-n">5000</span> }); <span class="tok-k">this</span>.k = k; }
+  <span class="tok-f">sign</span>(t) { <span class="tok-k">return</span> <span class="tok-f">createHash</span>(<span class="tok-s">"sha256"</span>).<span class="tok-f">update</span>(`${<span class="tok-k">this</span>.k}:${t}`).<span class="tok-f">digest</span>(); }
+}
+<span class="tok-k">export default</span> ({ secrets }) =&gt; ({ <span class="tok-f">open</span>: () =&gt; <span class="tok-k">new</span> <span class="tok-t">Signer</span>(secrets.signingKey) });</pre>
+        </div>
+
+        <div class="qs-term">
+          <div class="qs-term-bar">
+            <span class="qs-term-title"><span class="dot-s"></span>2. Wire &amp; Call &middot; app/capsid.json + bundle.mjs</span>
+          </div>
+          <pre class="qs-code"><span class="tok-c">// capsid.json (App wires Binding &amp; secret reference — never plaintext)</span>
+{ "apiVersion": "capsid/app-v2",
+  "bindings": { "vault": { "secrets": { "signingKey": { "valueFrom": "signing-key" } } } } }
+
+<span class="tok-c">// bundle.mjs (untrusted User Runtime — receives frozen RpcTarget stub)</span>
+<span class="tok-k">import</span> vault <span class="tok-k">from</span> <span class="tok-s">"capsid:binding/vault"</span>;
+
+<span class="tok-k">export default</span> {
+  <span class="tok-k">async</span> <span class="tok-f">fetch</span>(req) {
+    <span class="tok-k">const</span> s = <span class="tok-k">await</span> vault.<span class="tok-f">open</span>(<span class="tok-k">null</span>, { timeoutMs: <span class="tok-n">1000</span> });
+    <span class="tok-k">try</span> { <span class="tok-k">return</span> <span class="tok-t">Response</span>.<span class="tok-f">json</span>({ sig: <span class="tok-k">await</span> s.<span class="tok-f">sign</span>(<span class="tok-k">await</span> req.<span class="tok-f">text</span>()) }); }
+    <span class="tok-k">finally</span> { s.<span class="tok-f">dispose</span>(); }
+  },
+};</pre>
         </div>
       </div>
     </div>

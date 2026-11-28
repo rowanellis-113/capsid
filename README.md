@@ -141,36 +141,56 @@ Capsid solves this **inside the same OS-sandboxed worker** with **Trusted Bindin
 - **Process union &ne; User authority:** The Host approves each Binding's maximum modules and versioned Linux sandbox profiles (`network-client`, `filesystem-read/write`, `sqlite`, `wasi`); the App can only narrow resources and pass `valueFrom` secret references (automatically redacted from authenticated logs). Unforgeable native origin tags ensure a Binding's DB socket or write path is never reachable from User JS.
 - **Web-native proxies only — real handles never cross:** User code interacts over a fair, 3-tier quota-bounded asynchronous bridge supporting `{ signal, timeoutMs }` cancellation, typed remote errors, bidirectional credit-based `ReadableStream`/`WritableStream` proxies, controlled `Request`/`Response` proxies (inline `<= 64 KiB` fast path + streaming bodies, immutable headers, `Request.signal`), and native-branded **`RpcTarget` remote object handles** (stateful sessions/cursors with bounded leases, explicit `.dispose()` / `Symbol.dispose`, GC-finalizer fallback, and strict cross-request ownership fencing).
 
-```js
-// Host-trusted Binding (bindings/orders/index.js) — holds secrets & native authority
-class OrderSession extends RpcTarget {
-  constructor(db, tenant) { super({ leaseMs: 5000 }); this.db = db; this.tenant = tenant; }
-  async query(filter, call) { return this.db.streamRows(this.tenant, filter, { signal: call.signal }); }
-  [Symbol.dispose]() { this.db.release(this.tenant); }
+**Create a Binding (`bindings/vault/manifest.json` + `index.js`)** — holds secrets &amp; granted `capsid:*` modules in its own heap:
+
+```json
+{
+  "apiVersion": "capsid/binding-v1",
+  "permissions": { "modules": ["capsid:hashing", "capsid:internal/core"] }
 }
-export default ({ config, secrets }) => ({
-  open(tenant) { return new OrderSession(connect(config, secrets.dbPassword), tenant); },
-});
 ```
 
 ```js
-// Untrusted Application (app/bundle.mjs) — zero secrets, zero ambient sockets
-import orders from "capsid:binding/orders";
+import { createHash } from "capsid:hashing";
+
+class Signer extends RpcTarget {
+  constructor(key) { super({ leaseMs: 5000 }); this.key = key; }
+  sign(text) { return createHash("sha256").update(`${this.key}:${text}`).digest(); }
+}
+
+export default ({ secrets }) => ({
+  open() { return new Signer(secrets.signingKey); },
+});
+```
+
+**Wire &amp; call it (`app/capsid.json` + `app/bundle.mjs`)** — untrusted JS never sees `signingKey` or native handles:
+
+```json
+{
+  "apiVersion": "capsid/app-v2",
+  "bindings": { "vault": { "secrets": { "signingKey": { "valueFrom": "signing-key" } } } }
+}
+```
+
+```js
+import vault from "capsid:binding/vault";
 
 export default {
   async fetch(request) {
-    const session = await orders.open("acme", { timeoutMs: 2000 });
+    const signer = await vault.open(null, { timeoutMs: 1000 });
     try {
-      const rows = await session.query(await request.json()); // credit-backed ReadableStream proxy
-      return new Response(rows, { headers: { "content-type": "application/x-ndjson" } });
+      const sig = await signer.sign(await request.text());
+      return Response.json({ sig });
     } finally {
-      session.dispose(); // deterministic cleanup (+ lease, request-end & GC fallback)
+      signer.dispose(); // deterministic cleanup (+ lease, request-end & GC fallback)
     }
   },
 };
 ```
 
-[Binding RPC v2 guide](docs/guides/use-binding-rpc-v2.md) &middot; [RPC v2 design](docs/design/binding-rpc-v2.md) &middot; [Binding v1 model](docs/design/bindings-v1.md) &middot; [Binding permissions](docs/reference/binding-permissions.md) &middot; [Runnable showcase](examples/binding-rpc-v2/README.md)
+Run with `capsid-host --app-dir ./app --bindings-dir ./bindings --secrets-dir ./secrets`.
+
+[Binding RPC v2 guide](docs/guides/use-binding-rpc-v2.md) &middot; [RPC v2 design](docs/design/binding-rpc-v2.md) &middot; [Binding v1 model](docs/design/bindings-v1.md) &middot; [Binding permissions](docs/reference/binding-permissions.md) &middot; [Full runnable example](examples/binding-rpc-v2/README.md)
 
 ### Install
 
