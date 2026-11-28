@@ -832,19 +832,56 @@ export default {
       const checks = {
         rCancel: await checkAsync(() => r.cancel('stolen')),
         rProtoCancel: await checkAsync(() => savedProtoCancel.call(r, 'proto')),
-        rGetReader: checkSync(() => r.getReader()),
-        rCtorReader: checkSync(() => new ReadableStreamDefaultReader(r)),
-        rTee: checkSync(() => r.tee()),
-        rPipeTo: await checkAsync(() => r.pipeTo(new WritableStream())),
-        rRetransfer: await checkAsync(() => svc.upload(r)),
+        rGetReader: checkSync(() => r.getReader()) && r.locked === false,
+        rCtorIdentity: ReadableStreamDefaultReader.prototype.constructor === ReadableStreamDefaultReader,
+        wCtorIdentity: WritableStreamDefaultWriter.prototype.constructor === WritableStreamDefaultWriter,
+        rCtorReader: checkSync(() => new ReadableStreamDefaultReader(r)) && r.locked === false,
+        rProtoCtorReader:
+          checkSync(() => new ReadableStreamDefaultReader.prototype.constructor(r)) &&
+          r.locked === false,
+        rByobProtoCtor:
+          typeof ReadableStreamBYOBReader !== 'function' ||
+          (ReadableStreamBYOBReader.prototype.constructor === ReadableStreamBYOBReader &&
+            checkSync(() => new ReadableStreamBYOBReader.prototype.constructor(r)) &&
+            r.locked === false),
+        rTee: checkSync(() => r.tee()) && r.locked === false,
+        rPipeTo: (await checkAsync(() => r.pipeTo(new WritableStream()))) && r.locked === false,
+        rPipeThroughSelf:
+          checkSync(() => r.pipeThrough({ readable: new ReadableStream(), writable: new WritableStream() })) &&
+          r.locked === false,
+        wPipeThroughGetter:
+          checkSync(() =>
+            new ReadableStream().pipeThrough({
+              readable: new ReadableStream(),
+              get writable() {
+                return w;
+              },
+            }),
+          ) && w.locked === false,
+        wPipeThroughFlipFlop: (() => {
+          let gets = 0;
+          const decoy = new WritableStream();
+          const outStream = new ReadableStream({ start(c) { c.close(); } }).pipeThrough({
+            readable: new ReadableStream(),
+            get writable() {
+              gets++;
+              return gets === 1 ? decoy : w;
+            },
+          });
+          return Boolean(outStream) && gets === 1 && w.locked === false;
+        })(),
+        rRetransfer: (await checkAsync(() => svc.upload(r))) && r.locked === false,
         rdRead: await checkAsync(() => rd.read()),
         rdCancel: await checkAsync(() => rd.cancel('stolen-rd')),
         rdRelease: checkSync(() => rd.releaseLock()),
         wAbort: await checkAsync(() => w.abort('stolen-w')),
         wProtoAbort: await checkAsync(() => savedProtoAbort.call(w, 'proto-w')),
         wClose: await checkAsync(() => w.close()),
-        wGetWriter: checkSync(() => w.getWriter()),
-        wCtorWriter: checkSync(() => new WritableStreamDefaultWriter(w)),
+        wGetWriter: checkSync(() => w.getWriter()) && w.locked === false,
+        wCtorWriter: checkSync(() => new WritableStreamDefaultWriter(w)) && w.locked === false,
+        wProtoCtorWriter:
+          checkSync(() => new WritableStreamDefaultWriter.prototype.constructor(w)) &&
+          w.locked === false,
       };
       const allOk = Object.values(checks).every(Boolean);
       const wake = releaseHold;
@@ -955,6 +992,10 @@ export default () => ({
       isReq,
       url: req.url,
       method: req.method,
+      credentials: req.credentials,
+      redirect: req.redirect,
+      mode: req.mode,
+      referrer: req.referrer,
       hdr: req.headers.get('x-custom'),
       text,
     };
@@ -1027,16 +1068,21 @@ export default {
     }
     if (path === '/m4c') {
       const out = {};
-      // 1. User -> Binding inline Request + bodyUsed protection on reuse.
+      // 1. User -> Binding inline Request + metadata contract (R7) + bodyUsed protection.
       const r1 = new Request('https://api.test/items?k=1', {
         method: 'POST',
+        credentials: 'include',
+        redirect: 'manual',
+        mode: 'cors',
         headers: { 'x-custom': 'abc' },
         body: 'hello-inline',
       });
       const e1 = await svc.echoRequest(r1);
       out.inlineReq = e1.isReq && e1.url === 'https://api.test/items?k=1' &&
-                      e1.method === 'POST' && e1.hdr === 'abc' && e1.text === 'hello-inline' &&
-                      r1.bodyUsed === true;
+                      e1.method === 'POST' && e1.credentials === 'include' &&
+                      e1.redirect === 'manual' && e1.mode === 'cors' &&
+                      e1.referrer === null && e1.hdr === 'abc' &&
+                      e1.text === 'hello-inline' && r1.bodyUsed === true;
       let reuseRejected = false;
       try { await svc.echoRequest(r1); } catch (e) {
         reuseRejected = e.message.includes('already used');
@@ -2034,6 +2080,423 @@ export default {
     capsid_worker_destroy(worker);
 }
 
+// R1/F2: Malicious async [Symbol.asyncDispose]() CPU loop AFTER `await Promise.resolve()`
+// must inherit the original 100 ms absolute disposal deadline across the Promise
+// continuation boundary, interrupt promptly (<< 5 s request timeout), and poison/exit.
+void test_audit_r1_async_dispose_cpu_loop(const char* worker_path) {
+    const std::string binding_src = R"JS(
+class AsyncLoopTarget extends RpcTarget {
+  ping() { return 'ok'; }
+  async [Symbol.asyncDispose]() {
+    await Promise.resolve();
+    while (true) {}
+  }
+}
+export default () => ({
+  open() { return new AsyncLoopTarget(); }
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+export default {
+  async fetch() {
+    const h = await svc.open();
+    h.dispose();
+    await new Promise((r) => setTimeout(r, 3000));
+    return new Response('should-have-poisoned');
+  }
+};
+)JS";
+
+    capsid_worker_config config;
+    capsid_worker_config_init(&config);
+    config.worker_path = worker_path;
+    config.strict_sandbox = 0;
+    config.process_memory_limit = 0;
+    config.request_timeout_ms = 5000;
+    capsid_worker* worker = nullptr;
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn async-dispose worker");
+    capsid::host::EffectiveBinding b;
+    b.id = "svc";
+    b.package.source = binding_src;
+    b.request.config_json = "{}";
+    b.profiles = {"network-client"};
+    std::string err;
+    require(capsid::host::load_effective_bindings_into_worker(worker, {b}, &err), err);
+    require_result(capsid_worker_load_bundle_named(
+                       worker, reinterpret_cast<const std::uint8_t*>(app_src.data()),
+                       app_src.size(), "file:///async-dispose-loop.js"),
+                   "load async-dispose bundle");
+
+    bool ready = false;
+    bool exited = false;
+    std::chrono::steady_clock::time_point req_started;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline && !exited) {
+        const capsid_result flush = capsid_worker_flush(worker);
+        require(flush == CAPSID_OK || flush == CAPSID_WOULD_BLOCK, "flush");
+        capsid_event ev = {};
+        ev.struct_size = sizeof(ev);
+        const capsid_result r = capsid_worker_next_event(worker, &ev);
+        if (r == CAPSID_OK) {
+            if (ev.type == CAPSID_EVENT_READY && !ready) {
+                ready = true;
+                req_started = std::chrono::steady_clock::now();
+                require_result(capsid_worker_begin_bodyless_request(
+                                   worker, 1, "GET", "https://v2.test/async-dispose", nullptr, 0),
+                               "begin async-dispose");
+            } else if (ev.type == CAPSID_EVENT_EXIT) {
+                exited = true;
+            }
+            continue;
+        }
+        require(r == CAPSID_WOULD_BLOCK, "next_event");
+        capsid_pollfd pfd = {};
+        pfd.fd = capsid_worker_fd(worker);
+        pfd.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+        require(capsid::win32::capsid_poll(&pfd, 1, 20) >= 0, "poll");
+    }
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - req_started)
+                                .count();
+    require(ready && exited, "async [Symbol.asyncDispose]() CPU loop did not interrupt and exit");
+    require(elapsed_ms < 2000,
+            "async disposal took too long (ms=" + std::to_string(elapsed_ms) +
+                "), indicating 100 ms disposal deadline did not propagate across await");
+    capsid_worker_destroy(worker);
+}
+
+// R2 (HTTP header byte quota) + R4 (zero-callback private Fetch snapshot on
+// lazy incoming Request, empty Response, and rejected used Response) + R5
+// (real-worker multi-turn proof that ordinary RPC runs BEFORE a >32 handle
+// disposal backlog finishes clearing).
+void test_audit_r2_r4_r5_regressions(const char* worker_path) {
+    const std::string binding_src = R"JS(
+let disposedCount = 0;
+let barrierWaiters = [];
+class TrackedHandle extends RpcTarget {
+  ping() { return 'ok'; }
+  [Symbol.dispose]() { disposedCount++; }
+}
+export default () => ({
+  countHeaderBytes(pair) {
+    let n = 0;
+    for (const [k, v] of pair.a.headers) n += k.length + v.length;
+    for (const [k, v] of pair.b.headers) n += k.length + v.length;
+    return n;
+  },
+  inspectReqSnapshot(req) {
+    return {
+      isReq: req instanceof Request,
+      url: req.url,
+      method: req.method,
+      hdr: req.headers.get('x-lazy-in'),
+      hasSignal: Boolean(req.signal),
+      referrer: req.referrer,
+    };
+  },
+  inspectResSnapshot(res) {
+    return {
+      isRes: res instanceof Response,
+      status: res.status,
+      hasBody: res.body !== null,
+      hdr: res.headers.get('x-empty'),
+    };
+  },
+  openTracked() { return new TrackedHandle(); },
+  barrier() {
+    return new Promise((resolve) => {
+      barrierWaiters.push(resolve);
+      if (barrierWaiters.length === 2) {
+        const w = barrierWaiters;
+        barrierWaiters = [];
+        w[0](true);
+        w[1](true);
+      }
+    });
+  },
+  observeDuringBurst() { return { disposedAtCall: disposedCount }; },
+  resetDisposed() { disposedCount = 0; barrierWaiters = []; return true; },
+  slowNever() { return new Promise(() => {}); },
+  ping(tag) { return 'pong:' + tag; },
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+
+function installHostileGetters(obj, keys, bump) {
+  for (const key of keys) {
+    Object.defineProperty(obj, key, {
+      configurable: true,
+      get() {
+        bump();
+        throw new Error('hostile-getter-' + key);
+      },
+      set() {
+        bump();
+        throw new Error('hostile-setter-' + key);
+      },
+    });
+  }
+}
+
+export default {
+  async fetch(incomingReq) {
+    const path = new URL(incomingReq.url).pathname;
+
+    if (path === '/r2-r4') {
+      const out = {};
+
+      // R2: Variable-length HTTP headers on empty-body Requests count toward
+      // the 4 MiB per-request byte cap incrementally during clone!
+      // Each pair carries ~120 KiB of headers (0 inline body); 40 concurrent
+      // calls (~4.8 MiB) MUST hit the 4 MiB per-request byte quota, then refill.
+      const bigVal = 'h'.repeat(1000);
+      const makeHeavyHeaderReq = () => {
+        const h = new Headers();
+        for (let i = 0; i < 60; ++i) {
+          h.set('x-pad-' + String(i).padStart(2, '0'), bigVal);
+        }
+        return new Request('https://r2.test/headers', { headers: h });
+      };
+      const calls = [];
+      for (let i = 0; i < 40; ++i) {
+        calls.push(
+          svc.countHeaderBytes({ a: makeHeavyHeaderReq(), b: makeHeavyHeaderReq() }).then(
+            (n) => ({ ok: true, n }),
+            (e) => ({ ok: false, msg: e && e.message ? e.message : String(e) }),
+          ),
+        );
+      }
+      const results = await Promise.all(calls);
+      const acceptedCount = results.filter((r) => r.ok).length;
+      const rejectedByteQuota = results.filter((r) => !r.ok && r.msg.includes('byte quota')).length;
+      const refilled = await svc.countHeaderBytes({
+        a: makeHeavyHeaderReq(),
+        b: makeHeavyHeaderReq(),
+      });
+      out.r2HeaderQuotaOk =
+        acceptedCount > 0 && acceptedCount < 40 && rejectedByteQuota > 0 && refilled > 120000;
+
+      // R4: Side-effect-free private Fetch snapshot on:
+      //  (a) incoming Request with lazy _rawHeaders + lazy _signalState;
+      //  (b) empty-body Response(null, { status: 204 });
+      //  (c) rejected already-used Response.
+      // Business callback counter MUST stay strictly 0 across ALL three!
+      let callbackCount = 0;
+      const bump = () => { callbackCount++; };
+
+      installHostileGetters(
+        incomingReq,
+        ['url', 'method', 'headers', '_headers', '_rawHeaders', 'signal', '_signal', '_signalState',
+         'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
+        bump,
+      );
+      const reqSnap = await svc.inspectReqSnapshot(incomingReq);
+
+      const emptyRes = new Response(null, { status: 204, headers: { 'x-empty': 'yes' } });
+      installHostileGetters(
+        emptyRes,
+        ['status', 'statusText', 'url', 'type', 'redirected', 'headers', '_headers',
+         '_headersState', 'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
+        bump,
+      );
+      const resSnap = await svc.inspectResSnapshot(emptyRes);
+
+      const usedRes = new Response('already-read');
+      await usedRes.text();
+      installHostileGetters(
+        usedRes,
+        ['status', 'headers', '_headers', '_headersState', 'body', '_bodyStream',
+         '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
+        bump,
+      );
+      let usedRejected = false;
+      try {
+        await svc.inspectResSnapshot(usedRes);
+      } catch (e) {
+        usedRejected = Boolean(e && e.message && e.message.includes('already used'));
+      }
+
+      out.r4ZeroCallbackOk =
+        callbackCount === 0 &&
+        reqSnap.isReq === true &&
+        reqSnap.method === 'GET' &&
+        reqSnap.hdr === 'lazy-ok' &&
+        reqSnap.hasSignal === true &&
+        reqSnap.referrer === null &&
+        resSnap.isRes === true &&
+        resSnap.status === 204 &&
+        resSnap.hasBody === false &&
+        resSnap.hdr === 'yes' &&
+        usedRejected === true;
+
+      // R5 part B: >32 simultaneous timeoutMs expirations share the bounded
+      // control budget without starving ordinary RPC.
+      const expCalls = [];
+      for (let i = 0; i < 40; ++i) {
+        expCalls.push(svc.slowNever(null, { timeoutMs: 25 }).catch((e) => e.name));
+      }
+      await new Promise((r) => setTimeout(r, 45));
+      const alive = await svc.ping('after-timeout-burst');
+      const expNames = await Promise.all(expCalls);
+      out.r5TimeoutBurstOk =
+        alive === 'pong:after-timeout-burst' &&
+        expNames.length === 40 &&
+        expNames.every((n) => n === 'TimeoutError');
+
+      return new Response(JSON.stringify(out));
+    }
+
+    // R5 part A: Two concurrent requests open 24 + 24 = 48 handles (>32 single-turn
+    // control budget), synchronize through a Binding barrier so each request
+    // keeps its own RequestToken and resumes in the exact same libuv tick,
+    // queue all 48 disposals BEFORE the next scheduler turn, and immediately
+    // invoke svc.observeDuringBurst() to prove ordinary RPC runs BEFORE all 48
+    // disposals drain (backlog spans >= 2 turns).
+    if (path === '/r5-a') {
+      const hA = [];
+      for (let i = 0; i < 24; ++i) hA.push(await svc.openTracked());
+      await svc.barrier();
+      for (let i = 0; i < hA.length; ++i) hA[i].dispose();
+      const during = await svc.observeDuringBurst();
+      await new Promise((r) => setTimeout(r, 40));
+      const after = await svc.observeDuringBurst();
+      return new Response(JSON.stringify({
+        disposedAtCall: during.disposedAtCall,
+        finalDisposed: after.disposedAtCall,
+      }));
+    }
+
+    if (path === '/r5-b') {
+      const hB = [];
+      for (let i = 0; i < 24; ++i) hB.push(await svc.openTracked());
+      await svc.barrier();
+      for (let i = 0; i < hB.length; ++i) hB[i].dispose();
+      // Keep request B open while Turn 1 and Turn 2 drain the 48-handle disposal
+      // backlog through the scheduler's 32-unit per-turn control budget (instead
+      // of triggering synchronous request-end teardown before Turn 1 runs).
+      await new Promise((r) => setTimeout(r, 60));
+      return new Response('b-disposed');
+    }
+
+    return new Response('404', { status: 404 });
+  }
+};
+)JS";
+
+    capsid_worker_config config;
+    capsid_worker_config_init(&config);
+    config.worker_path = worker_path;
+    config.strict_sandbox = 0;
+    config.process_memory_limit = 0;
+    config.request_timeout_ms = 5000;
+    capsid_worker* worker = nullptr;
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn r2/r4/r5 worker");
+    capsid::host::EffectiveBinding b;
+    b.id = "svc";
+    b.package.source = binding_src;
+    b.request.config_json = "{}";
+    b.profiles = {"network-client"};
+    std::string err;
+    require(capsid::host::load_effective_bindings_into_worker(worker, {b}, &err), err);
+    require_result(capsid_worker_load_bundle_named(
+                       worker, reinterpret_cast<const std::uint8_t*>(app_src.data()),
+                       app_src.size(), "file:///r2-r4-r5.js"),
+                   "load r2/r4/r5 bundle");
+
+    auto wait_until = [&](auto predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const capsid_result flush = capsid_worker_flush(worker);
+            require(flush == CAPSID_OK || flush == CAPSID_WOULD_BLOCK, "flush");
+            capsid_event ev = {};
+            ev.struct_size = sizeof(ev);
+            const capsid_result r = capsid_worker_next_event(worker, &ev);
+            if (r == CAPSID_OK) {
+                if (ev.type == CAPSID_EVENT_ERROR) {
+                    const std::string emsg(reinterpret_cast<const char*>(ev.payload.data),
+                                           ev.payload.size);
+                    require(false, "unexpected worker error in r2/r4/r5 test: " + emsg);
+                }
+                require(ev.type != CAPSID_EVENT_EXIT, "unexpected worker exit in r2/r4/r5 test");
+                if (predicate(ev))
+                    return;
+                continue;
+            }
+            require(r == CAPSID_WOULD_BLOCK, "next_event");
+            capsid_pollfd pfd = {};
+            pfd.fd = capsid_worker_fd(worker);
+            pfd.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+            require(capsid::win32::capsid_poll(&pfd, 1, 20) >= 0, "poll");
+        }
+        require(false, "r2/r4/r5 test timed out");
+    };
+
+    wait_until([](const capsid_event& ev) { return ev.type == CAPSID_EVENT_READY; });
+
+    // Request 1: R2 + R4 + R5 timeout burst (with lazy incoming header x-lazy-in).
+    const capsid_header hdrs[1] = {{
+        {reinterpret_cast<const std::uint8_t*>("x-lazy-in"), 9},
+        {reinterpret_cast<const std::uint8_t*>("lazy-ok"), 7},
+    }};
+    require_result(
+        capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/r2-r4", hdrs, 1),
+        "begin r2-r4");
+    std::string body1;
+    wait_until([&](const capsid_event& ev) {
+        if (ev.request_id == 1 && ev.type == CAPSID_EVENT_RESPONSE_BODY) {
+            body1.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
+        }
+        return ev.request_id == 1 && ev.type == CAPSID_EVENT_RESPONSE_END;
+    });
+    require(body1 ==
+                "{\"r2HeaderQuotaOk\":true,\"r4ZeroCallbackOk\":true,\"r5TimeoutBurstOk\":true}",
+            "R2/R4/R5 regressions failed: " + body1);
+
+    // Concurrent Requests 2 & 3: R5 48-handle burst multi-turn fairness proof.
+    require_result(
+        capsid_worker_begin_bodyless_request(worker, 2, "GET", "https://v2.test/r5-a", nullptr, 0),
+        "begin r5-a");
+    require_result(
+        capsid_worker_begin_bodyless_request(worker, 3, "GET", "https://v2.test/r5-b", nullptr, 0),
+        "begin r5-b");
+    std::string bodyA, bodyB;
+    bool endA = false, endB = false;
+    wait_until([&](const capsid_event& ev) {
+        if (ev.request_id == 2 && ev.type == CAPSID_EVENT_RESPONSE_BODY) {
+            bodyA.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
+        } else if (ev.request_id == 2 && ev.type == CAPSID_EVENT_RESPONSE_END) {
+            endA = true;
+        } else if (ev.request_id == 3 && ev.type == CAPSID_EVENT_RESPONSE_BODY) {
+            bodyB.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
+        } else if (ev.request_id == 3 && ev.type == CAPSID_EVENT_RESPONSE_END) {
+            endB = true;
+        }
+        return endA && endB;
+    });
+    require(bodyB == "b-disposed", "r5-b unexpected body: " + bodyB);
+    // Parse disposedAtCall and finalDisposed from JSON response.
+    auto extract_int = [&](const std::string& json, const std::string& key) -> int {
+        const std::size_t pos = json.find("\"" + key + "\":");
+        require(pos != std::string::npos, "missing key " + key + " in " + json);
+        return std::atoi(json.c_str() + pos + key.size() + 3);
+    };
+    const int disposed_at_call = extract_int(bodyA, "disposedAtCall");
+    const int final_disposed = extract_int(bodyA, "finalDisposed");
+    require(disposed_at_call <= 32,
+            "ordinary RPC must dispatch BEFORE all 48 queued disposals drain (saw " +
+                std::to_string(disposed_at_call) + ", full=" + bodyA + ")");
+    require(final_disposed == 48, "all 48 disposals must complete on subsequent turns (saw " +
+                                      std::to_string(final_disposed) + ", full=" + bodyA + ")");
+
+    const auto exit = capsid_test::shutdown_and_wait(worker, 3000);
+    capsid_worker_destroy(worker);
+    require(exit.clean(), "r2/r4/r5 worker did not exit cleanly");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2050,5 +2513,7 @@ int main(int argc, char** argv) {
     test_m4d_malicious_dispose_cpu_loop(argv[1]);
     test_audit_f1_to_f10_regressions(argv[1]);
     test_audit_f2_late_dispose_cpu_loop(argv[1]);
+    test_audit_r1_async_dispose_cpu_loop(argv[1]);
+    test_audit_r2_r4_r5_regressions(argv[1]);
     return 0;
 }

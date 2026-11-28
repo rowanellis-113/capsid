@@ -146,7 +146,8 @@ all three tiers atomically.
 
 - `Request` crossing User ↔ Binding:
   - Captures immutable `url`, `method`, canonical `headers` pairs, `redirect`,
-    `credentials`, `mode`, `referrer`.
+    `credentials`, `mode` (Capsid's Fetch `Request` fixes `referrer` to `null`,
+    so reconstructed proxy `Request` objects expose default `referrer === null`).
   - Rejects `bodyUsed` or locked body stream fail-closed.
   - Fast inline body (`<= 64 KiB` unexposed `_bodyFastData`) transfers in one
     copy without consuming a stream slot; streaming bodies attach an M4B

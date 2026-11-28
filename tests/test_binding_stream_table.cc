@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -53,7 +54,7 @@ void test_open_credit_flow_and_close() {
     // Pop first frame and grant credit -> producer resumes!
     capsid::BindingStreamFrame frame;
     require(table.pop_frame(id, &frame) && frame.type == capsid::BindingStreamFrame::Type::kBytes &&
-                frame.bytes.size() == 600,
+                frame.size() == 600 && frame.credit_bytes == 600,
             "pop first frame");
     require(ledger.worker_counts().frames == 1 && ledger.worker_counts().bytes == 424,
             "ledger released popped frame");
@@ -68,7 +69,7 @@ void test_open_credit_flow_and_close() {
     require(table.find(id)->state == capsid::BindingStreamState::kHalfClosed, "half-closed");
     require(!table.enqueue_bytes(id, chunk.data(), 10, &err), "cannot enqueue after end");
     require(table.pop_frame(id, &frame) && frame.type == capsid::BindingStreamFrame::Type::kBytes &&
-                frame.bytes.size() == 424,
+                frame.size() == 424,
             "pop second data frame");
     require(table.pop_frame(id, &frame) && frame.type == capsid::BindingStreamFrame::Type::kEnd,
             "pop end frame");
@@ -89,9 +90,13 @@ void test_staged_native_accounting_and_credit_slicing() {
                               capsid::kBindingStreamInitialCreditBytes),
             "open writable stream");
 
-    // Stage a 150 KiB native write immediately into the ledger (3 frames).
-    const std::size_t total_len = 150U * 1024U;
-    std::vector<std::uint8_t> payload(total_len, 0x7A);
+    // Stage a 150 KiB native write split into 3 independent <=64 KiB backing blocks.
+    const std::size_t s1 = 64U * 1024U;
+    const std::size_t s2 = 64U * 1024U;
+    const std::size_t s3 = 22U * 1024U;
+    const std::size_t total_len = s1 + s2 + s3;
+    std::shared_ptr<const std::vector<std::uint8_t>> blk1(new std::vector<std::uint8_t>(s1, 0x7A));
+    std::shared_ptr<const std::vector<std::uint8_t>> blk2(new std::vector<std::uint8_t>(s2, 0x7B));
     std::string err;
     require(table.stage_pending(id, total_len, 3, &err), "stage 150 KiB");
     require(ledger.worker_counts().bytes == total_len && ledger.worker_counts().frames == 3,
@@ -105,20 +110,23 @@ void test_staged_native_accounting_and_credit_slicing() {
     require(ledger.worker_counts().bytes == total_len && ledger.worker_counts().frames == 3,
             "rejected stage did not mutate ledger");
 
-    // Admit slice 1 (64 KiB) -> credit becomes 0, NO double-charging in ledger!
-    const std::size_t s1 = 64U * 1024U;
-    require(table.admit_staged_bytes(id, payload.data(), s1, s1, 1, &err), "admit 64 KiB slice 1");
+    // Admit block 1 (64 KiB, completes blk1) -> credit becomes 0, NO double-charging!
+    require(table.admit_staged_shared_bytes(id, blk1, 0, s1, s1, 1, &err), "admit 64 KiB block 1");
+    blk1.reset();
     require(table.find(id)->credit_bytes == 0, "credit exhausted after 64 KiB");
     require(ledger.worker_counts().bytes == total_len && ledger.worker_counts().frames == 3,
             "admitting staged slice did not double-charge ledger");
-    require(!table.admit_staged_bytes(id, payload.data() + s1, s1, s1, 1, &err),
-            "slice 2 blocked at 0 credit");
+    require(!table.admit_staged_shared_bytes(id, blk2, 0, s2, s2, 1, &err),
+            "block 2 blocked at 0 credit");
 
-    // Consumer pops slice 1 and grants 64 KiB credit -> ledger drops by 64 KiB / 1 frame.
-    capsid::BindingStreamFrame frame;
-    require(table.pop_frame(id, &frame) && frame.bytes.size() == s1, "pop slice 1");
+    // Consumer pops block 1 and grants 64 KiB credit -> ledger drops by 64 KiB / 1 frame.
+    {
+        capsid::BindingStreamFrame frame;
+        require(table.pop_frame(id, &frame) && frame.size() == s1 && frame.credit_bytes == s1,
+                "pop block 1");
+    }
     require(ledger.worker_counts().bytes == total_len - s1 && ledger.worker_counts().frames == 2,
-            "pop released slice 1 bytes");
+            "pop released block 1 bytes");
     require(table.grant_credit(id, s1), "grant 64 KiB credit");
 
     // Cancel remaining staged bytes -> ledger returns cleanly to 0!
@@ -129,6 +137,151 @@ void test_staged_native_accounting_and_credit_slicing() {
             "cancel released remaining staged bytes and frames");
     require(table.close_and_erase(id) && table.empty() && ledger.empty(),
             "staged cleanup zero leak");
+}
+
+// R2/F3: Mid-block partial confirmation must keep the full backing allocation
+// accounted across all 3 ledger tiers until its final sub-slice pops and drops
+// the last shared_ptr reference; also covers enqueue_value, admit_staged_value,
+// and release_staged directly.
+void test_shared_backing_partial_delivery_and_value_staging() {
+    capsid::BindingRpcLedger ledger;
+    capsid::BindingStreamTable table(&ledger);
+
+    std::uint64_t id = 0;
+    capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
+    const std::size_t window = 16U * 1024U; // 16 KiB flow-control credit window
+    require(table.open_stream(capsid::BindingStreamKind::kReadable,
+                              capsid::BindingStreamSide::kBinding, 77, "svc", 0, &id, &qerr,
+                              window),
+            "open small-window stream");
+
+    const std::size_t blk0_len = 64U * 1024U;
+    const std::size_t blk1_len = 36U * 1024U;
+    const std::size_t total_len = blk0_len + blk1_len;
+    std::shared_ptr<const std::vector<std::uint8_t>> blk0(
+        new std::vector<std::uint8_t>(blk0_len, 0x33));
+    std::shared_ptr<const std::vector<std::uint8_t>> blk1(
+        new std::vector<std::uint8_t>(blk1_len, 0x44));
+    std::weak_ptr<const std::vector<std::uint8_t>> wp0(blk0);
+    std::weak_ptr<const std::vector<std::uint8_t>> wp1(blk1);
+
+    auto live_native_bytes = [&]() -> std::size_t {
+        return (wp0.expired() ? 0 : blk0_len) + (wp1.expired() ? 0 : blk1_len);
+    };
+    auto assert_all_tiers_equal = [&](std::size_t expected_bytes, const char* msg) {
+        require(ledger.worker_counts().bytes == expected_bytes &&
+                    ledger.binding_counts("svc").bytes == expected_bytes &&
+                    ledger.request_counts(77).bytes == expected_bytes,
+                msg);
+    };
+
+    std::string err;
+    require(table.stage_pending(id, total_len, 2, &err), "stage 100 KiB");
+    assert_all_tiers_equal(live_native_bytes(), "staged bytes match live backing RAM");
+
+    // Deliver blk0 in four 16 KiB sub-slices. During the first 3 partial
+    // deliveries, blk0 remains alive in staged storage, so ALL 3 ledger tiers
+    // MUST continue reporting the full 100 KiB (zero under-reporting!).
+    for (std::size_t slice = 0; slice < 3; ++slice) {
+        require(table.admit_staged_shared_bytes(id, blk0, slice * window, window, 0, 0, &err),
+                "admit intermediate 16 KiB sub-slice");
+        assert_all_tiers_equal(total_len, "intermediate admit holds full 100 KiB");
+        {
+            capsid::BindingStreamFrame f;
+            require(table.pop_frame(id, &f) && f.size() == window && f.credit_bytes == window &&
+                        f.accounted_bytes == 0 && f.data()[0] == 0x33,
+                    "pop intermediate sub-slice");
+        }
+        require(!wp0.expired(), "blk0 still alive mid-delivery");
+        assert_all_tiers_equal(live_native_bytes(),
+                               "post-pop mid-block ledger matches full live 100 KiB");
+        require(table.grant_credit(id, window), "refill 16 KiB credit");
+    }
+
+    // Fourth (final) sub-slice of blk0 transfers blk0's 64 KiB backing ownership
+    // into the queued frame; caller drops staged blk0 reference.
+    require(table.admit_staged_shared_bytes(id, blk0, 3 * window, window, blk0_len, 1, &err),
+            "admit final sub-slice of blk0");
+    blk0.reset();
+    require(!wp0.expired(), "queued frame keeps blk0 alive until popped");
+    assert_all_tiers_equal(total_len, "pre-pop final sub-slice still accounts 100 KiB");
+    {
+        capsid::BindingStreamFrame f;
+        require(table.pop_frame(id, &f) && f.size() == window && f.credit_bytes == window &&
+                    f.accounted_bytes == blk0_len,
+                "pop final sub-slice of blk0");
+    }
+    // Frame destroyed -> blk0 freed AT THE EXACT SAME STEP ledger dropped by 64 KiB!
+    require(wp0.expired() && !wp1.expired(), "blk0 freed on final sub-slice pop, blk1 alive");
+    assert_all_tiers_equal(live_native_bytes(), "ledger equals remaining 36 KiB blk1 exactly");
+    require(table.grant_credit(id, window), "refill credit for blk1");
+
+    // Deliver blk1 (36 KiB = 16 + 16 + 4 KiB).
+    for (std::size_t off = 0; off < blk1_len;) {
+        const std::size_t piece = (blk1_len - off < window) ? (blk1_len - off) : window;
+        const bool last = (off + piece == blk1_len);
+        require(table.admit_staged_shared_bytes(id, blk1, off, piece, last ? blk1_len : 0,
+                                                last ? 1 : 0, &err),
+                "admit blk1 slice");
+        if (last) {
+            blk1.reset();
+        }
+        {
+            capsid::BindingStreamFrame f;
+            require(table.pop_frame(id, &f) && f.size() == piece && f.credit_bytes == piece &&
+                        f.data()[0] == 0x44,
+                    "pop blk1 slice");
+        }
+        assert_all_tiers_equal(live_native_bytes(), "blk1 slice ledger matches live RAM");
+        if (!last) {
+            require(table.grant_credit(id, piece), "refill credit");
+        }
+        off += piece;
+    }
+    require(wp1.expired(), "blk1 freed after final slice");
+    assert_all_tiers_equal(0, "all tiers zero after draining all blocks");
+
+    // Direct coverage of enqueue_value, stage_pending + release_staged, and
+    // admit_staged_value on a value-mode stream.
+    require(table.grant_credit(id, window) || table.find(id)->credit_bytes > 0, "credit available");
+    capsid::NeutralValue v1;
+    v1.kind = capsid::NeutralValue::Kind::kString;
+    v1.string = "hello-value";
+    const std::size_t w1 = capsid::estimate_neutral_value_bytes(v1);
+    require(table.enqueue_value(id, std::move(v1), w1, &err), "enqueue_value");
+    assert_all_tiers_equal(w1, "enqueue_value accounted");
+    {
+        capsid::BindingStreamFrame f;
+        require(table.pop_frame(id, &f) && f.type == capsid::BindingStreamFrame::Type::kValue &&
+                    f.value.string == "hello-value" && f.credit_bytes == w1,
+                "pop enqueued value");
+    }
+    assert_all_tiers_equal(0, "enqueue_value released");
+
+    // Stage + release_staged rollback path (e.g. promise allocation failure).
+    require(table.stage_pending(id, 512, 2, &err), "stage for release_staged");
+    assert_all_tiers_equal(512, "staged 512B");
+    table.release_staged(id, 512, 2);
+    assert_all_tiers_equal(0, "release_staged returned ledger to 0");
+
+    // Stage + admit_staged_value path.
+    capsid::NeutralValue v2;
+    v2.kind = capsid::NeutralValue::Kind::kString;
+    v2.string = "staged-value";
+    const std::size_t w2 = capsid::estimate_neutral_value_bytes(v2);
+    require(table.stage_pending(id, w2, 1, &err), "stage value");
+    require(table.admit_staged_value(id, std::move(v2), w2, &err), "admit_staged_value");
+    assert_all_tiers_equal(w2, "admit_staged_value preserved exact weight");
+    {
+        capsid::BindingStreamFrame f;
+        require(table.pop_frame(id, &f) && f.type == capsid::BindingStreamFrame::Type::kValue &&
+                    f.value.string == "staged-value",
+                "pop staged value");
+    }
+    assert_all_tiers_equal(0, "staged value released");
+
+    require(table.close_and_erase(id) && table.empty() && ledger.empty(),
+            "value & shared-backing test completely clean");
 }
 
 void test_limits_error_cancel_and_request_teardown() {
@@ -195,7 +348,8 @@ void test_limits_error_cancel_and_request_teardown() {
 int main() {
     test_open_credit_flow_and_close();
     test_staged_native_accounting_and_credit_slicing();
+    test_shared_backing_partial_delivery_and_value_staging();
     test_limits_error_cancel_and_request_teardown();
-    std::cout << "test-binding-stream-table: PASS (3 suites)" << std::endl;
+    std::cout << "test-binding-stream-table: PASS (4 suites)" << std::endl;
     return 0;
 }

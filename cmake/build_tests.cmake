@@ -7592,6 +7592,7 @@ if(BUILD_TESTING)
             test-binding-rpc
             tests/test_binding_rpc.cc
             src/binding_rpc.cc
+            src/binding_rpc_ledger.cc
         )
         target_include_directories(test-binding-rpc PRIVATE
             include src
@@ -7610,6 +7611,7 @@ if(BUILD_TESTING)
         add_executable(
             test-binding-rpc-v2-core
             tests/test_binding_rpc_v2_core.cc
+            src/binding_handle_table.cc
             src/binding_rpc_ledger.cc
             src/binding_scheduler.cc
         )

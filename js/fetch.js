@@ -20,6 +20,8 @@ configureAbortExceptions(captureNativeException);
 const NativeHeaders = globalThis.Headers;
 const NativeRequest = globalThis.Request;
 const nativeFetch = globalThis.fetch;
+const IntrinsicAbortController = globalThis.AbortController;
+const abortControllerAbort = IntrinsicAbortController.prototype.abort;
 
 const bodyTypeError = globalThis.TypeError;
 const bodyRangeError = globalThis.RangeError;
@@ -166,8 +168,62 @@ const HEADER_MAP_THRESHOLD = 32; // 16 pairs in flat array before promoting to M
 const headerStates = new WeakMap();
 const iteratorStates = new WeakMap();
 const ordinaryFetchStreams = new WeakSet();
-const genuineRequests = new WeakSet();
-const genuineResponses = new WeakSet();
+// R4 + R6: Private Request/Response internal slot maps used by Binding RPC v2.
+// Stay unallocated and completely bypassed on zero-Binding workers.
+let bindingHttpTrackingEnabled = false;
+let requestPrivateSlots = null;
+let responsePrivateSlots = null;
+let bindingRequestBrandCount = 0;
+let bindingResponseBrandCount = 0;
+
+export function enableBindingHttpTracking() {
+  if (bindingHttpTrackingEnabled) {
+    return;
+  }
+  bindingHttpTrackingEnabled = true;
+  requestPrivateSlots = new WeakMap();
+  responsePrivateSlots = new WeakMap();
+}
+
+export function getBindingHttpTrackingStats() {
+  return {
+    enabled: bindingHttpTrackingEnabled,
+    requestsRegistered: bindingRequestBrandCount,
+    responsesRegistered: bindingResponseBrandCount,
+  };
+}
+
+function syncPrivateBodySlot(target, noBody, bodyStream, bodyFastKind, bodyFastData) {
+  if (!bindingHttpTrackingEnabled) {
+    return;
+  }
+  const slot =
+    weakMapGet.call(requestPrivateSlots, target) ?? weakMapGet.call(responsePrivateSlots, target);
+  if (slot !== undefined) {
+    slot.noBody = noBody;
+    slot.bodyStream = bodyStream;
+    slot.bodyFastKind = bodyFastKind;
+    slot.bodyFastData = bodyFastData;
+  }
+}
+
+function syncPrivateBodyConsumed(target, consumed) {
+  if (!bindingHttpTrackingEnabled) {
+    return;
+  }
+  const slot =
+    weakMapGet.call(requestPrivateSlots, target) ?? weakMapGet.call(responsePrivateSlots, target);
+  if (slot !== undefined) {
+    slot.bodyConsumed = consumed;
+  }
+}
+
+function safeSetOwnDataProp(obj, key, value) {
+  const desc = bodyProperty(obj, key);
+  if (desc !== undefined && desc.get === undefined && desc.set === undefined && desc.writable) {
+    obj[key] = value;
+  }
+}
 const readableLocked = Object.getOwnPropertyDescriptor(ReadableStream.prototype, 'locked').get;
 const headerInvocationMessage =
   'Illegal invocation: function called with incorrect `this` reference. See https://developers.cloudflare.com/workers/observability/errors/#illegal-invocation-errors for details.';
@@ -961,19 +1017,63 @@ function wrapNormalizedNativeHeaders(nativeHeaders) {
 }
 
 export function markResponseHeadersImmutable(response) {
-  const state =
-    response._headersState !== null ? response._headersState : getHeaderState(response.headers);
+  let state = null;
+  if (bindingHttpTrackingEnabled && isObjectValue(response)) {
+    const slot = weakMapGet.call(responsePrivateSlots, response);
+    if (slot !== undefined) {
+      state =
+        slot.headersState !== null
+          ? slot.headersState
+          : slot.headers !== null
+            ? getHeaderState(slot.headers)
+            : null;
+    }
+  }
+  if (state === null || state === undefined) {
+    state =
+      response._headersState !== null ? response._headersState : getHeaderState(response.headers);
+  }
   if (state !== undefined && state !== null) {
     state.immutable = true;
   }
 }
 
+export function finalizeProxyResponse(response, url, redirected) {
+  if (url) response.url = url;
+  if (redirected) response.redirected = true;
+  if (bindingHttpTrackingEnabled && isObjectValue(response)) {
+    const slot = weakMapGet.call(responsePrivateSlots, response);
+    if (slot !== undefined) {
+      slot.url = url || '';
+      slot.redirected = Boolean(redirected);
+    }
+  }
+  markResponseHeadersImmutable(response);
+}
+
 export function isGenuineRequest(value) {
-  return isObjectValue(value) && weakSetHas.call(genuineRequests, value);
+  return (
+    bindingHttpTrackingEnabled &&
+    isObjectValue(value) &&
+    weakMapGet.call(requestPrivateSlots, value) !== undefined
+  );
 }
 
 export function isGenuineResponse(value) {
-  return isObjectValue(value) && weakSetHas.call(genuineResponses, value);
+  return (
+    bindingHttpTrackingEnabled &&
+    isObjectValue(value) &&
+    weakMapGet.call(responsePrivateSlots, value) !== undefined
+  );
+}
+
+export function getPrivateBodyStreamForBinding(value) {
+  if (!bindingHttpTrackingEnabled || !isObjectValue(value)) {
+    return null;
+  }
+  const slot =
+    weakMapGet.call(requestPrivateSlots, value) ?? weakMapGet.call(responsePrivateSlots, value);
+  return slot !== undefined ? slot.bodyStream : null;
 }
 
 export function tryBridgeOwnedHeaderPairs(headers) {
@@ -984,9 +1084,325 @@ export function tryBridgeOwnedHeaderPairs(headers) {
   return bridgePairsFromState(state);
 }
 
+function createFastBodyStream(kind, data) {
+  if (
+    intrinsicSimpleQueueCtor !== null &&
+    intrinsicReadableStreamCtor.prototype === intrinsicReadableStreamProto
+  ) {
+    const stream = Object.create(intrinsicReadableStreamProto);
+    stream._state = 'readable';
+    stream._reader = undefined;
+    stream._storedError = undefined;
+    stream._disturbed = false;
+    const controller = Object.create(intrinsicDefaultControllerProto);
+    controller._controlledReadableStream = stream;
+    controller._queue = new intrinsicSimpleQueueCtor();
+    controller._queueTotalSize = 0;
+    controller._started = true;
+    controller._closeRequested = false;
+    controller._pullAgain = false;
+    controller._pulling = false;
+    controller._strategySizeAlgorithm = intrinsicDefaultSizeAlgorithm;
+    controller._strategyHWM = 0;
+    controller._capsidFastKind = kind;
+    controller._capsidFastData = data;
+    controller._capsidFastPulled = false;
+    controller._pullAlgorithm = synthesizedFastPull;
+    controller._cancelAlgorithm = synthesizedFastCancel;
+    stream._readableStreamController = controller;
+    return stream;
+  }
+  const StreamCtor = intrinsicReadableStreamCtor || globalThis.ReadableStream;
+  let fallbackController = null;
+  return new StreamCtor(
+    {
+      start(controller) {
+        fallbackController = controller;
+        controller._capsidFastKind = kind;
+        controller._capsidFastData = data;
+        controller._capsidFastPulled = false;
+      },
+      pull(controller) {
+        if (controller._capsidFastPulled) return;
+        controller._capsidFastPulled = true;
+        const raw = controller._capsidFastData;
+        const bytes =
+          controller._capsidFastKind === 1 ? textEncoderEncode.call(sharedTextEncoder, raw) : raw;
+        controller._capsidFastKind = 0;
+        controller._capsidFastData = null;
+        controller.enqueue(bytes);
+        controller.close();
+      },
+      cancel() {
+        if (fallbackController !== null) {
+          fallbackController._capsidFastPulled = true;
+          fallbackController._capsidFastKind = 0;
+          fallbackController._capsidFastData = null;
+        }
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
+function materializeFastBodyFromSlot(target, slot) {
+  const kind = slot.bodyFastKind;
+  const data = slot.bodyFastData;
+  const stream = createFastBodyStream(kind, data);
+  slot.noBody = false;
+  slot.bodyStream = stream;
+  slot.bodyFastKind = 0;
+  slot.bodyFastData = null;
+  safeSetOwnDataProp(target, '_bodyExposed', true);
+  safeSetOwnDataProp(target, '_noBody', false);
+  safeSetOwnDataProp(target, '_bodySize', kind === 2 ? data.byteLength : -1);
+  safeSetOwnDataProp(target, '_bodyStream', stream);
+  safeSetOwnDataProp(target, '_bodyFastKind', 0);
+  safeSetOwnDataProp(target, '_bodyFastData', null);
+  return stream;
+}
+
+function isSlotBodyUsed(slot) {
+  if (slot.bodyConsumed) {
+    return { ok: true, used: true };
+  }
+  const stream = slot.bodyStream;
+  if (stream !== null && stream !== undefined && isObjectValue(stream)) {
+    const desc = bodyProperty(stream, '_disturbed');
+    if (desc !== undefined && (desc.get !== undefined || desc.set !== undefined)) {
+      return { ok: false, used: true };
+    }
+    if (desc !== undefined && desc.value === true) {
+      return { ok: true, used: true };
+    }
+  }
+  return { ok: true, used: false };
+}
+
+// R4: Side-effect-free one-shot Request snapshot generated strictly from
+// Fetch's private slot table (never reads mutable properties or getters on
+// `req`, including lazy incoming headers, lazy signal state, or body slots).
+export function snapshotRequestForBinding(req, checkReadableTransferable, extractBytes) {
+  if (!bindingHttpTrackingEnabled || !isObjectValue(req)) {
+    return null;
+  }
+  const slot = weakMapGet.call(requestPrivateSlots, req);
+  if (slot === undefined) {
+    return null;
+  }
+  const usedCheck = isSlotBodyUsed(slot);
+  if (!usedCheck.ok) {
+    return { error: 'Request internal state was tampered with' };
+  }
+  if (usedCheck.used) {
+    return { error: 'Request body is already used' };
+  }
+  if (
+    typeof slot.url !== 'string' ||
+    typeof slot.method !== 'string' ||
+    typeof slot.credentials !== 'string' ||
+    typeof slot.redirect !== 'string' ||
+    (slot.mode !== null && slot.mode !== undefined && typeof slot.mode !== 'string')
+  ) {
+    return { error: 'Request metadata contains tampered properties' };
+  }
+
+  let headerPairs = [];
+  if (slot.headers === null && slot.rawHeaders !== null) {
+    const materialized = createHeadersFromIncomingPairs(slot.rawHeaders, slot.rawHeadersCanonical);
+    slot.headers = materialized;
+    slot.rawHeaders = null;
+    slot.rawHeadersCanonical = false;
+    safeSetOwnDataProp(req, '_headers', materialized);
+    safeSetOwnDataProp(req, '_rawHeaders', null);
+    safeSetOwnDataProp(req, '_rawHeadersCanonical', false);
+  }
+  if (slot.headers !== null && slot.headers !== undefined) {
+    const hState = getHeaderState(slot.headers);
+    if (hState === undefined) {
+      return { error: 'Request headers is not a genuine Headers object' };
+    }
+    headerPairs = bridgePairsFromState(hState);
+  }
+
+  if (slot.signal === null && slot.signalState !== null) {
+    const state = slot.signalState;
+    slot.signalState = null;
+    if (state.abortController === null) {
+      state.abortController = new IntrinsicAbortController();
+      if (state.cancelled) {
+        abortControllerAbort.call(state.abortController, state.cancelReason);
+      }
+    }
+    slot.signal = state.abortController.signal;
+    safeSetOwnDataProp(req, '_signal', slot.signal);
+    safeSetOwnDataProp(req, '_signalState', null);
+  }
+  const signal = slot.signal ?? null;
+
+  let bodyKind = 0; // 0 = none, 1 = inline bytes, 2 = stream
+  let inlineBytes = null;
+  let bodyStream = null;
+  if (slot.bodyFastKind === 1 && typeof slot.bodyFastData === 'string') {
+    const encoded = textEncoderEncode.call(sharedTextEncoder, slot.bodyFastData);
+    if (encoded.byteLength <= 65536) {
+      bodyKind = 1;
+      inlineBytes = encoded;
+      slot.bodyConsumed = true;
+      safeSetOwnDataProp(req, '_bodyConsumed', true);
+    } else {
+      bodyKind = 2;
+      bodyStream = materializeFastBodyFromSlot(req, slot);
+    }
+  } else if (slot.bodyFastKind === 2 && slot.bodyFastData !== null) {
+    const view = extractBytes(slot.bodyFastData);
+    if (view !== null && view.byteLength <= 65536) {
+      bodyKind = 1;
+      inlineBytes = view;
+      slot.bodyConsumed = true;
+      safeSetOwnDataProp(req, '_bodyConsumed', true);
+    } else {
+      bodyKind = 2;
+      bodyStream = materializeFastBodyFromSlot(req, slot);
+    }
+  } else if (slot.bodyStream !== null && slot.bodyStream !== undefined) {
+    const check = checkReadableTransferable(slot.bodyStream);
+    if (check === 1) return { error: 'Request body stream is locked' };
+    if (check === 2) return { error: 'Request body stream is disturbed' };
+    if (check === 3) {
+      return {
+        error: 'InvalidStateError: Cannot transfer Binding stream proxy outside its owning request',
+      };
+    }
+    if (check !== 0) return { error: 'Request body stream is not transferable' };
+    bodyKind = 2;
+    bodyStream = slot.bodyStream;
+  }
+
+  return {
+    url: slot.url,
+    method: slot.method,
+    credentials: slot.credentials,
+    redirect: slot.redirect,
+    mode: slot.mode ?? null,
+    headers: headerPairs,
+    signal,
+    bodyKind,
+    inlineBytes,
+    bodyStream,
+  };
+}
+
+// R4: Side-effect-free one-shot Response snapshot generated strictly from
+// Fetch's private slot table (never reads mutable properties or getters on
+// `res`, including lazy headers state or empty/null body paths).
+export function snapshotResponseForBinding(res, checkReadableTransferable, extractBytes) {
+  if (!bindingHttpTrackingEnabled || !isObjectValue(res)) {
+    return null;
+  }
+  const slot = weakMapGet.call(responsePrivateSlots, res);
+  if (slot === undefined) {
+    return null;
+  }
+  if (getResponseWebSocket(res) !== null) {
+    return { error: 'Response with attached WebSocket cannot cross Binding RPC' };
+  }
+  const usedCheck = isSlotBodyUsed(slot);
+  if (!usedCheck.ok) {
+    return { error: 'Response internal state was tampered with' };
+  }
+  if (usedCheck.used) {
+    return { error: 'Response body is already used' };
+  }
+  if (
+    typeof slot.status !== 'number' ||
+    !Number.isInteger(slot.status) ||
+    (slot.status !== 0 && (slot.status < 100 || slot.status > 599))
+  ) {
+    return { error: 'Response status was tampered with' };
+  }
+  if (
+    typeof slot.statusText !== 'string' ||
+    typeof slot.url !== 'string' ||
+    typeof slot.type !== 'string' ||
+    typeof slot.redirected !== 'boolean'
+  ) {
+    return { error: 'Response metadata contains tampered properties' };
+  }
+
+  let headerPairs = [];
+  if (slot.headers !== null && slot.headers !== undefined) {
+    const hState = getHeaderState(slot.headers);
+    if (hState === undefined) {
+      return { error: 'Response headers is not a genuine Headers object' };
+    }
+    headerPairs = bridgePairsFromState(hState);
+  } else if (slot.headersState !== null && slot.headersState !== undefined) {
+    headerPairs = bridgePairsFromState(slot.headersState);
+  }
+
+  let bodyKind = 0; // 0 = none, 1 = inline bytes, 2 = stream
+  let inlineBytes = null;
+  let bodyStream = null;
+  if (slot.bodyFastKind === 1 && typeof slot.bodyFastData === 'string') {
+    const encoded = textEncoderEncode.call(sharedTextEncoder, slot.bodyFastData);
+    if (encoded.byteLength <= 65536) {
+      bodyKind = 1;
+      inlineBytes = encoded;
+      slot.bodyConsumed = true;
+      safeSetOwnDataProp(res, '_bodyConsumed', true);
+    } else {
+      bodyKind = 2;
+      bodyStream = materializeFastBodyFromSlot(res, slot);
+    }
+  } else if (slot.bodyFastKind === 2 && slot.bodyFastData !== null) {
+    const view = extractBytes(slot.bodyFastData);
+    if (view !== null && view.byteLength <= 65536) {
+      bodyKind = 1;
+      inlineBytes = view;
+      slot.bodyConsumed = true;
+      safeSetOwnDataProp(res, '_bodyConsumed', true);
+    } else {
+      bodyKind = 2;
+      bodyStream = materializeFastBodyFromSlot(res, slot);
+    }
+  } else if (slot.bodyStream !== null && slot.bodyStream !== undefined) {
+    const check = checkReadableTransferable(slot.bodyStream);
+    if (check === 1) return { error: 'Response body stream is locked' };
+    if (check === 2) return { error: 'Response body stream is disturbed' };
+    if (check === 3) {
+      return {
+        error: 'InvalidStateError: Cannot transfer Binding stream proxy outside its owning request',
+      };
+    }
+    if (check !== 0) return { error: 'Response body stream is not transferable' };
+    bodyKind = 2;
+    bodyStream = slot.bodyStream;
+  }
+
+  return {
+    status: slot.status,
+    statusText: slot.statusText,
+    url: slot.url,
+    redirected: slot.redirected,
+    type: slot.type,
+    headers: headerPairs,
+    bodyKind,
+    inlineBytes,
+    bodyStream,
+  };
+}
+
 function finishFetchedResponse(response, url, redirected) {
   response.url = url;
   response.redirected = Boolean(redirected);
+  if (bindingHttpTrackingEnabled && isObjectValue(response)) {
+    const slot = weakMapGet.call(responsePrivateSlots, response);
+    if (slot !== undefined) {
+      slot.url = url;
+      slot.redirected = Boolean(redirected);
+    }
+  }
   markResponseHeadersImmutable(response);
   if (response.body !== null) weakSetAdd.call(ordinaryFetchStreams, response.body);
   return response;
@@ -1313,6 +1729,7 @@ export function consumeFastResponseBody(response) {
       stream._state = 'closed';
       stream._reader = consumedReaderSentinel;
       response._bodyConsumed = true;
+      syncPrivateBodyConsumed(response, true);
       return data;
     }
   }
@@ -1346,72 +1763,13 @@ function materializeFastBody(target, exposed) {
   if (target._bodyStream === null && target._bodyFastKind !== 0) {
     const kind = target._bodyFastKind;
     const data = target._bodyFastData;
-    let stream;
-    if (
-      intrinsicSimpleQueueCtor !== null &&
-      intrinsicReadableStreamCtor.prototype === intrinsicReadableStreamProto
-    ) {
-      stream = Object.create(intrinsicReadableStreamProto);
-      stream._state = 'readable';
-      stream._reader = undefined;
-      stream._storedError = undefined;
-      stream._disturbed = false;
-      const controller = Object.create(intrinsicDefaultControllerProto);
-      controller._controlledReadableStream = stream;
-      controller._queue = new intrinsicSimpleQueueCtor();
-      controller._queueTotalSize = 0;
-      controller._started = true;
-      controller._closeRequested = false;
-      controller._pullAgain = false;
-      controller._pulling = false;
-      controller._strategySizeAlgorithm = intrinsicDefaultSizeAlgorithm;
-      controller._strategyHWM = 0;
-      controller._capsidFastKind = kind;
-      controller._capsidFastData = data;
-      controller._capsidFastPulled = false;
-      controller._pullAlgorithm = synthesizedFastPull;
-      controller._cancelAlgorithm = synthesizedFastCancel;
-      stream._readableStreamController = controller;
-    } else {
-      const StreamCtor = intrinsicReadableStreamCtor || globalThis.ReadableStream;
-      let fallbackController = null;
-      stream = new StreamCtor(
-        {
-          start(controller) {
-            fallbackController = controller;
-            controller._capsidFastKind = kind;
-            controller._capsidFastData = data;
-            controller._capsidFastPulled = false;
-          },
-          pull(controller) {
-            if (controller._capsidFastPulled) return;
-            controller._capsidFastPulled = true;
-            const raw = controller._capsidFastData;
-            const bytes =
-              controller._capsidFastKind === 1
-                ? textEncoderEncode.call(sharedTextEncoder, raw)
-                : raw;
-            controller._capsidFastKind = 0;
-            controller._capsidFastData = null;
-            controller.enqueue(bytes);
-            controller.close();
-          },
-          cancel() {
-            if (fallbackController !== null) {
-              fallbackController._capsidFastPulled = true;
-              fallbackController._capsidFastKind = 0;
-              fallbackController._capsidFastData = null;
-            }
-          },
-        },
-        { highWaterMark: 0 },
-      );
-    }
+    const stream = createFastBodyStream(kind, data);
     target._noBody = false;
     target._bodySize = kind === 2 ? data.byteLength : -1;
     target._bodyStream = stream;
     target._bodyFastKind = 0;
     target._bodyFastData = null;
+    syncPrivateBodySlot(target, false, stream, 0, null);
   }
   return target._bodyStream;
 }
@@ -1434,6 +1792,7 @@ function initBodyFields(target, body, hState) {
     target._bodyStream = null;
     target._bodyFastKind = 0;
     target._bodyFastData = null;
+    syncPrivateBodySlot(target, true, null, 0, null);
     if (typeof body === 'string' && hState !== null && !headerStateHas(hState, 'content-type')) {
       headerStateSetNormalized(hState, 'content-type', 'text/plain;charset=UTF-8');
     }
@@ -1445,6 +1804,7 @@ function initBodyFields(target, body, hState) {
     target._bodyStream = null;
     target._bodyFastKind = 1;
     target._bodyFastData = body;
+    syncPrivateBodySlot(target, false, null, 1, body);
     if (hState !== null && !headerStateHas(hState, 'content-type')) {
       headerStateSetNormalized(hState, 'content-type', 'text/plain;charset=UTF-8');
     }
@@ -1456,6 +1816,7 @@ function initBodyFields(target, body, hState) {
     target._bodyStream = body;
     target._bodyFastKind = 0;
     target._bodyFastData = null;
+    syncPrivateBodySlot(target, false, body, 0, null);
     return;
   }
   if (
@@ -1472,14 +1833,17 @@ function initBodyFields(target, body, hState) {
     target._bodyStream = null;
     target._bodyFastKind = 2;
     target._bodyFastData = bytes;
+    syncPrivateBodySlot(target, false, null, 2, bytes);
     return;
   }
   if (body instanceof Blob) {
+    const stream = body.stream();
     target._noBody = false;
     target._bodySize = body.size;
-    target._bodyStream = body.stream();
+    target._bodyStream = stream;
     target._bodyFastKind = 0;
     target._bodyFastData = null;
+    syncPrivateBodySlot(target, false, stream, 0, null);
     if (body.type && hState !== null && !headerStateHas(hState, 'content-type')) {
       headerStateSetNormalized(hState, 'content-type', normalizeValueString(String(body.type)));
     }
@@ -1487,11 +1851,13 @@ function initBodyFields(target, body, hState) {
   }
   if (body instanceof FormData) {
     const blob = body._blob();
+    const stream = blob.stream();
     target._noBody = false;
     target._bodySize = blob.size;
-    target._bodyStream = blob.stream();
+    target._bodyStream = stream;
     target._bodyFastKind = 0;
     target._bodyFastData = null;
+    syncPrivateBodySlot(target, false, stream, 0, null);
     if (hState !== null && !headerStateHas(hState, 'content-type')) {
       headerStateSetNormalized(hState, 'content-type', normalizeValueString(String(blob.type)));
     }
@@ -1504,6 +1870,7 @@ function initBodyFields(target, body, hState) {
     target._bodyStream = null;
     target._bodyFastKind = 2;
     target._bodyFastData = encoded;
+    syncPrivateBodySlot(target, false, null, 2, encoded);
     if (hState !== null && !headerStateHas(hState, 'content-type')) {
       headerStateSetNormalized(
         hState,
@@ -1519,6 +1886,7 @@ function initBodyFields(target, body, hState) {
   target._bodyStream = null;
   target._bodyFastKind = 1;
   target._bodyFastData = str;
+  syncPrivateBodySlot(target, false, null, 1, str);
 }
 
 function consumeBodyGuard(target) {
@@ -1529,6 +1897,7 @@ function consumeBodyGuard(target) {
     return Promise.reject(new TypeError('Already read'));
   }
   target._bodyConsumed = true;
+  syncPrivateBodyConsumed(target, true);
   return null;
 }
 
@@ -1894,7 +2263,26 @@ function assignRequestSlots(
   req._bodyFastKind = 0;
   req._bodyFastData = null;
   req._bodyExposed = false;
-  weakSetAdd.call(genuineRequests, req);
+  if (bindingHttpTrackingEnabled) {
+    bindingRequestBrandCount++;
+    weakMapSet.call(requestPrivateSlots, req, {
+      url,
+      method,
+      credentials,
+      redirect,
+      mode,
+      headers,
+      rawHeaders,
+      rawHeadersCanonical,
+      signal,
+      signalState,
+      noBody,
+      bodyConsumed: false,
+      bodyFastKind: 0,
+      bodyFastData: null,
+      bodyStream,
+    });
+  }
 }
 
 class Request {
@@ -1992,6 +2380,14 @@ class Request {
       this._rawHeaders = null;
       this._rawHeadersCanonical = false;
       this._headers = createHeadersFromIncomingPairs(raw, canonical);
+      if (bindingHttpTrackingEnabled) {
+        const slot = weakMapGet.call(requestPrivateSlots, this);
+        if (slot !== undefined) {
+          slot.headers = this._headers;
+          slot.rawHeaders = null;
+          slot.rawHeadersCanonical = false;
+        }
+      }
     }
     return this._headers;
   }
@@ -2000,6 +2396,14 @@ class Request {
     this._rawHeaders = null;
     this._rawHeadersCanonical = false;
     this._headers = value;
+    if (bindingHttpTrackingEnabled) {
+      const slot = weakMapGet.call(requestPrivateSlots, this);
+      if (slot !== undefined) {
+        slot.headers = value;
+        slot.rawHeaders = null;
+        slot.rawHeadersCanonical = false;
+      }
+    }
   }
 
   get signal() {
@@ -2014,6 +2418,13 @@ class Request {
         }
       }
       this._signal = state.abortController.signal;
+      if (bindingHttpTrackingEnabled) {
+        const slot = weakMapGet.call(requestPrivateSlots, this);
+        if (slot !== undefined) {
+          slot.signal = this._signal;
+          slot.signalState = null;
+        }
+      }
       return this._signal;
     }
     return null;
@@ -2022,6 +2433,13 @@ class Request {
   set signal(value) {
     this._signalState = null;
     this._signal = value;
+    if (bindingHttpTrackingEnabled) {
+      const slot = weakMapGet.call(requestPrivateSlots, this);
+      if (slot !== undefined) {
+        slot.signal = value;
+        slot.signalState = null;
+      }
+    }
   }
 
   get body() {
@@ -2036,6 +2454,7 @@ class Request {
     this._bodyFastKind = 0;
     this._bodyFastData = null;
     this._bodyStream = value;
+    syncPrivateBodySlot(this, value === null || value === undefined, value, 0, null);
   }
 
   get bodyUsed() {
@@ -2047,7 +2466,9 @@ class Request {
   }
 
   set bodyUsed(value) {
-    this._bodyConsumed = Boolean(value);
+    const consumed = Boolean(value);
+    this._bodyConsumed = consumed;
+    syncPrivateBodyConsumed(this, consumed);
   }
 
   arrayBuffer() {
@@ -2081,6 +2502,7 @@ class Request {
     } else if (this._bodyStream instanceof ReadableStream) {
       const [body1, teeBody] = this._bodyStream.tee();
       this._bodyStream = body1;
+      syncPrivateBodySlot(this, false, body1, 0, null);
       body2 = teeBody;
     } else {
       body2 = this._bodyStream;
@@ -2369,7 +2791,23 @@ function assignResponseSlots(
   res._bodyFastKind = bodyFastKind;
   res._bodyFastData = bodyFastData;
   res._bodyExposed = false;
-  weakSetAdd.call(genuineResponses, res);
+  if (bindingHttpTrackingEnabled) {
+    bindingResponseBrandCount++;
+    weakMapSet.call(responsePrivateSlots, res, {
+      type,
+      status,
+      statusText,
+      headers,
+      headersState,
+      url,
+      redirected,
+      noBody,
+      bodyConsumed: false,
+      bodyFastKind,
+      bodyFastData,
+      bodyStream,
+    });
+  }
 }
 
 function constructResponseWithHeaders(
@@ -2488,6 +2926,12 @@ class Response {
       const headers = Object.create(headersPrototype);
       setHeaderState(headers, this._headersState);
       this._headers = headers;
+      if (bindingHttpTrackingEnabled) {
+        const slot = weakMapGet.call(responsePrivateSlots, this);
+        if (slot !== undefined) {
+          slot.headers = headers;
+        }
+      }
     }
     return this._headers;
   }
@@ -2495,6 +2939,13 @@ class Response {
   set headers(value) {
     this._headers = value;
     this._headersState = null;
+    if (bindingHttpTrackingEnabled) {
+      const slot = weakMapGet.call(responsePrivateSlots, this);
+      if (slot !== undefined) {
+        slot.headers = value;
+        slot.headersState = null;
+      }
+    }
   }
 
   get body() {
@@ -2509,6 +2960,7 @@ class Response {
     this._bodyFastKind = 0;
     this._bodyFastData = null;
     this._bodyStream = value;
+    syncPrivateBodySlot(this, value === null || value === undefined, value, 0, null);
   }
 
   get bodyUsed() {
@@ -2520,7 +2972,9 @@ class Response {
   }
 
   set bodyUsed(value) {
-    this._bodyConsumed = Boolean(value);
+    const consumed = Boolean(value);
+    this._bodyConsumed = consumed;
+    syncPrivateBodyConsumed(this, consumed);
   }
 
   get webSocket() {
@@ -2594,6 +3048,7 @@ class Response {
       if (this._bodyStream instanceof ReadableStream) {
         const [body1, teeBody] = this._bodyStream.tee();
         this._bodyStream = body1;
+        syncPrivateBodySlot(this, false, body1, 0, null);
         body2 = teeBody;
       } else {
         body2 = this._bodyStream;
@@ -2608,6 +3063,14 @@ class Response {
     cloned.redirected = this.redirected;
     cloned.type = this.type;
     cloned.url = this.url;
+    if (bindingHttpTrackingEnabled) {
+      const clonedSlot = weakMapGet.call(responsePrivateSlots, cloned);
+      if (clonedSlot !== undefined) {
+        clonedSlot.redirected = this.redirected;
+        clonedSlot.type = this.type;
+        clonedSlot.url = this.url;
+      }
+    }
     const hState = this._headersState !== null ? this._headersState : getHeaderState(this.headers);
     if (hState !== undefined && hState !== null && hState.immutable) {
       finishFetchedResponse(cloned, this.url, this.redirected);
@@ -2789,6 +3252,13 @@ async function fetchUpgradeRequest(request) {
     const response = new Response(body, responseInit);
     response.url = metadata.url;
     response.redirected = redirected || metadata.redirected;
+    if (bindingHttpTrackingEnabled) {
+      const slot = weakMapGet.call(responsePrivateSlots, response);
+      if (slot !== undefined) {
+        slot.url = metadata.url;
+        slot.redirected = redirected || metadata.redirected;
+      }
+    }
     return response;
   }
 }

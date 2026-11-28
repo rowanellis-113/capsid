@@ -80,7 +80,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "bd56acb039d00addf9979a9770c8e6c8b3a90cf95d9c51f488f3a77e8baad8d7",
+      "sha256": "20ec235e522448aca7214553c0f25184b9a6d1621d49c0c45033c6ef279cca9e",
       "review": "Binding RPC v2 (v0.4.0) design: fair shared-loop scheduler, 3-tier quota ledger, structured errors, AbortSignal/timeoutMs, bidirectional credit stream proxies, Request/Response proxies, and RpcTarget handles with leases and GC disposal."
     },
     {

@@ -247,6 +247,57 @@ void BindingRpcLedger::release_frame(std::uint64_t request_id, const std::string
     gc_entries(request_id, binding_id);
 }
 
+bool BindingRpcLedger::reserve_bytes(std::uint64_t request_id, const std::string& binding_id,
+                                     std::size_t bytes, BindingQuotaError* error) {
+    if (error != nullptr) {
+        *error = BindingQuotaError::kOk;
+    }
+    if (bytes == 0) {
+        return true;
+    }
+    if (would_exceed(worker_.bytes, bytes, limits_.max_bytes_per_worker)) {
+        if (error != nullptr) {
+            *error = BindingQuotaError::kWorkerByteLimit;
+        }
+        return false;
+    }
+    const BindingRpcCounts req = request_counts(request_id);
+    if (would_exceed(req.bytes, bytes, limits_.max_bytes_per_request)) {
+        if (error != nullptr) {
+            *error = BindingQuotaError::kRequestByteLimit;
+        }
+        return false;
+    }
+    const BindingRpcCounts bnd = binding_counts(binding_id);
+    if (would_exceed(bnd.bytes, bytes, limits_.max_bytes_per_binding)) {
+        if (error != nullptr) {
+            *error = BindingQuotaError::kBindingByteLimit;
+        }
+        return false;
+    }
+    worker_.bytes += bytes;
+    by_request_[request_id].bytes += bytes;
+    by_binding_[binding_id].bytes += bytes;
+    return true;
+}
+
+void BindingRpcLedger::release_bytes(std::uint64_t request_id, const std::string& binding_id,
+                                     std::size_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    decrement_clamped(&worker_.bytes, bytes);
+    std::map<std::uint64_t, BindingRpcCounts>::iterator rit = by_request_.find(request_id);
+    if (rit != by_request_.end()) {
+        decrement_clamped(&rit->second.bytes, bytes);
+    }
+    std::map<std::string, BindingRpcCounts>::iterator bit = by_binding_.find(binding_id);
+    if (bit != by_binding_.end()) {
+        decrement_clamped(&bit->second.bytes, bytes);
+    }
+    gc_entries(request_id, binding_id);
+}
+
 BindingRpcCounts BindingRpcLedger::request_counts(std::uint64_t request_id) const {
     std::map<std::uint64_t, BindingRpcCounts>::const_iterator it = by_request_.find(request_id);
     return it == by_request_.end() ? BindingRpcCounts() : it->second;

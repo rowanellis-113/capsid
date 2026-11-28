@@ -30,6 +30,7 @@ import {
   consumeFastResponseBody,
   getFastStreamResponseBody,
   isNullFastResponseBody,
+  getBindingHttpTrackingStats,
 } from './fetch.js';
 import 'txiki-polyfills/crypto/crypto.js';
 import { CryptoKey } from 'txiki-polyfills/crypto/crypto-key.js';
@@ -40,7 +41,7 @@ import 'txiki-polyfills/wasm.js';
 import './wasm.js';
 
 import core from 'tjs:internal/core';
-import { installBindingRpcBridge } from './binding-rpc-bridge.js';
+import { installBindingRpcBridge, getBindingBridgeInitCount } from './binding-rpc-bridge.js';
 import { transferWebSocket, isFetchChannelStream, getNativeDefaultStreamOps } from './websocket.js';
 import { profileGlobalNames } from './profile-manifest.js';
 
@@ -945,7 +946,20 @@ const cancelRequest = (id) => {
 };
 
 core.capsidInstallBridge(beginRequest, requestChunk, requestEnd, cancelRequest);
-installBindingRpcBridge(core);
+if (typeof core.capsidInstallBindingBridge === 'function') {
+  installBindingRpcBridge(core);
+}
+if (typeof core.capsidRegisterBindingInitStats === 'function') {
+  core.capsidRegisterBindingInitStats(() => {
+    const http = getBindingHttpTrackingStats();
+    return [
+      getBindingBridgeInitCount(),
+      http.enabled ? 1 : 0,
+      http.requestsRegistered,
+      http.responsesRegistered,
+    ];
+  });
+}
 
 const allowedGlobals = new Set(profileGlobalNames);
 for (const name of Object.getOwnPropertyNames(globalThis)) {

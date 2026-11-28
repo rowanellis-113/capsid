@@ -5,6 +5,7 @@
 // inputs all fail closed.
 
 #include "binding_rpc.h"
+#include "binding_rpc_ledger.h"
 extern "C" {
 #include "tjs.h"
 }
@@ -509,6 +510,144 @@ void test_remote_error_structured_and_tamper_proof() {
     capsid::free_binding_rpc_intrinsics(target.ctx(), &dst_intrinsics);
 }
 
+struct IncrementalCloneLedgerCtx {
+    capsid::BindingRpcLedger* ledger = nullptr;
+    std::uint64_t request_id = 1;
+    std::string binding_id = "svc";
+    std::size_t reserved = 0;
+    std::size_t calls = 0;
+};
+
+bool test_reserve_clone_bytes(std::size_t delta, std::string* error, void* opaque) {
+    IncrementalCloneLedgerCtx* ctx = static_cast<IncrementalCloneLedgerCtx*>(opaque);
+    ++ctx->calls;
+    capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
+    if (!ctx->ledger->reserve_bytes(ctx->request_id, ctx->binding_id, delta, &qerr)) {
+        if (error != nullptr) {
+            *error = capsid::binding_quota_error_message(qerr);
+        }
+        return false;
+    }
+    ctx->reserved += delta;
+    return true;
+}
+
+void test_neutral_byte_estimation_and_incremental_reservation() {
+    // 1. Direct coverage of estimate_neutral_value_bytes across all kinds,
+    // including variable-length HTTP Request/Response metadata, headers, and
+    // RpcHandleProxy method tables (R2/F3).
+    capsid::NeutralValue undef_v;
+    require(capsid::estimate_neutral_value_bytes(undef_v) == 1, "undefined weight");
+    capsid::NeutralValue num_v;
+    num_v.kind = capsid::NeutralValue::Kind::kNumber;
+    require(capsid::estimate_neutral_value_bytes(num_v) == 8, "number weight");
+    capsid::NeutralValue str_v;
+    str_v.kind = capsid::NeutralValue::Kind::kString;
+    str_v.string = "hello";
+    require(capsid::estimate_neutral_value_bytes(str_v) == 6, "string weight");
+    capsid::NeutralValue big_v;
+    big_v.kind = capsid::NeutralValue::Kind::kBigInt;
+    big_v.bigint = "1234567890";
+    require(capsid::estimate_neutral_value_bytes(big_v) == 18, "bigint weight");
+    capsid::NeutralValue bytes_v;
+    bytes_v.kind = capsid::NeutralValue::Kind::kBytes;
+    bytes_v.bytes.assign(128, 0xAB);
+    require(capsid::estimate_neutral_value_bytes(bytes_v) == 128, "bytes weight");
+
+    capsid::NeutralValue req_short;
+    req_short.kind = capsid::NeutralValue::Kind::kRequestProxy;
+    req_short.request.url = "https://a.test/";
+    req_short.request.method = "GET";
+    req_short.request.credentials = "same-origin";
+    req_short.request.redirect = "follow";
+    req_short.request.headers.push_back(std::make_pair(std::string("x-k"), std::string("v")));
+
+    capsid::NeutralValue req_long = req_short;
+    req_long.request.url += std::string(100, 'u');
+    req_long.request.has_mode = true;
+    req_long.request.mode = "cors";
+    req_long.request.headers.push_back(
+        std::make_pair(std::string("x-long-header"), std::string(500, 'h')));
+    req_long.request.body_kind = 1;
+    req_long.request.inline_bytes.assign(200, 0x11);
+    const std::size_t w_req_short = capsid::estimate_neutral_value_bytes(req_short);
+    const std::size_t w_req_long = capsid::estimate_neutral_value_bytes(req_long);
+    const std::size_t expected_req_delta = 100 + 4 + (13 + 500 + 16) + 200;
+    require(w_req_long - w_req_short == expected_req_delta,
+            "HTTP Request header/url/mode/inline delta mismatch");
+
+    capsid::NeutralValue res_short;
+    res_short.kind = capsid::NeutralValue::Kind::kResponseProxy;
+    res_short.response.status = 200;
+    res_short.response.status_text = "OK";
+    res_short.response.type = "default";
+    capsid::NeutralValue res_long = res_short;
+    res_long.response.url = "https://cdn.test/object";
+    res_long.response.headers.push_back(
+        std::make_pair(std::string("set-cookie"), std::string(300, 'c')));
+    res_long.response.body_kind = 2; // stream proxy
+    const std::size_t w_res_short = capsid::estimate_neutral_value_bytes(res_short);
+    const std::size_t w_res_long = capsid::estimate_neutral_value_bytes(res_long);
+    const std::size_t expected_res_delta = res_long.response.url.size() + (10 + 300 + 16) + 16;
+    require(w_res_long - w_res_short == expected_res_delta,
+            "HTTP Response header/url/stream delta mismatch");
+
+    capsid::NeutralValue handle_v;
+    handle_v.kind = capsid::NeutralValue::Kind::kRpcHandleProxy;
+    handle_v.handle_methods.push_back("alpha");
+    handle_v.handle_methods.push_back("betaLongMethod");
+    require(capsid::estimate_neutral_value_bytes(handle_v) == 32 + (5 + 16) + (14 + 16),
+            "RpcHandleProxy method name weights mismatch");
+
+    // 2. Incremental byte reservation during structured clone enforces 3-tier
+    // byte limits BEFORE completing native allocation and matches estimated
+    // weight byte-for-byte.
+    RuntimeFixture rt;
+    capsid::BindingRpcLimits limits;
+    limits.max_bytes_per_request = 160;
+    limits.max_bytes_per_binding = 320;
+    limits.max_bytes_per_worker = 640;
+    capsid::BindingRpcLedger ledger(limits);
+
+    IncrementalCloneLedgerCtx ok_ctx;
+    ok_ctx.ledger = &ledger;
+    capsid::BindingCloneHooks hooks;
+    hooks.reserve_bytes = test_reserve_clone_bytes;
+    hooks.opaque = &ok_ctx;
+
+    JSValue fit_js = rt.eval("({ tag: 'ok', arr: [1, 2, 'abc'], raw: new Uint8Array(40) })");
+    capsid::NeutralValue fit_nv;
+    std::string err;
+    require(capsid::neutral_from_js_ex(rt.ctx(), fit_js, &fit_nv, &err, &hooks),
+            ("fitting object rejected: " + err).c_str());
+    JS_FreeValue(rt.ctx(), fit_js);
+    const std::size_t est_fit = capsid::estimate_neutral_value_bytes(fit_nv);
+    require(ok_ctx.reserved == est_fit,
+            "incremental reserved bytes must equal estimate_neutral_value_bytes");
+    require(ledger.request_counts(1).bytes == est_fit &&
+                ledger.binding_counts("svc").bytes == est_fit &&
+                ledger.worker_counts().bytes == est_fit,
+            "all three ledger tiers reflect exact reserved bytes");
+    ledger.release_bytes(1, "svc", ok_ctx.reserved);
+    require(ledger.empty(), "ledger empty after releasing fit clone bytes");
+
+    // Oversized object aborts mid-clone when incremental reservation crosses 160B.
+    IncrementalCloneLedgerCtx fail_ctx;
+    fail_ctx.ledger = &ledger;
+    hooks.opaque = &fail_ctx;
+    JSValue big_js =
+        rt.eval("({ a: new Uint8Array(100), b: new Uint8Array(100), c: new Uint8Array(100) })");
+    capsid::NeutralValue big_nv;
+    err.clear();
+    require(!capsid::neutral_from_js_ex(rt.ctx(), big_js, &big_nv, &err, &hooks),
+            "oversized incremental clone must fail closed");
+    JS_FreeValue(rt.ctx(), big_js);
+    require(err.find("byte quota") != std::string::npos, "expected byte quota diagnostic");
+    require(fail_ctx.reserved <= 160, "incremental reservation never exceeded 160B cap");
+    ledger.release_bytes(1, "svc", fail_ctx.reserved);
+    require(ledger.empty(), "ledger empty after rollback of failed mid-clone reservation");
+}
+
 } // namespace
 
 int main() {
@@ -523,5 +662,6 @@ int main() {
     test_call_ids_use_full_width_biguint64();
     test_neutral_to_js_propagates_conversion_errors();
     test_remote_error_structured_and_tamper_proof();
+    test_neutral_byte_estimation_and_incremental_reservation();
     return 0;
 }

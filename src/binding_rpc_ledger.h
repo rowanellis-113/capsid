@@ -107,6 +107,13 @@ class BindingRpcLedger {
                        BindingQuotaError* error = nullptr);
     void release_frame(std::uint64_t request_id, const std::string& binding_id, std::size_t bytes);
 
+    // Reserve/release payload bytes incrementally across all three tiers
+    // without mutating frame count (used during structured clone so native
+    // payload growth is bounded before allocation completes).
+    bool reserve_bytes(std::uint64_t request_id, const std::string& binding_id, std::size_t bytes,
+                       BindingQuotaError* error = nullptr);
+    void release_bytes(std::uint64_t request_id, const std::string& binding_id, std::size_t bytes);
+
     BindingRpcCounts worker_counts() const { return worker_; }
     BindingRpcCounts request_counts(std::uint64_t request_id) const;
     BindingRpcCounts binding_counts(const std::string& binding_id) const;

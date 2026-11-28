@@ -19,9 +19,56 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <vector>
 
 namespace capsid {
+
+// F2/R1: Absolute 100 ms disposal deadline state shared across synchronous
+// cleanup and asynchronous Promise/timer continuations captured by Binding
+// async context hooks. Uses explicit `now_ns` so unit tests verify deadline
+// inheritance and expiry deterministically with a controllable clock.
+constexpr std::uint64_t kBindingDisposalBudgetNs = UINT64_C(100000000);
+
+struct BindingDisposalState {
+    std::uint64_t deadline_ns = 0;
+    bool interrupted = false;
+
+    std::uint64_t enter_scope(std::uint64_t now_ns,
+                              std::uint64_t budget_ns = kBindingDisposalBudgetNs) {
+        const std::uint64_t prev = deadline_ns;
+        const std::uint64_t max_u64 = (std::numeric_limits<std::uint64_t>::max)();
+        const std::uint64_t target =
+            (max_u64 - now_ns >= budget_ns) ? (now_ns + budget_ns) : max_u64;
+        deadline_ns = (prev != 0 && prev < target) ? prev : target;
+        interrupted = false;
+        return prev;
+    }
+
+    bool check_interrupt(std::uint64_t now_ns) {
+        if (deadline_ns != 0 && !interrupted && now_ns >= deadline_ns) {
+            interrupted = true;
+            return true;
+        }
+        return false;
+    }
+
+    std::uint64_t capture_deadline() const { return deadline_ns; }
+
+    std::uint64_t enter_async(std::uint64_t captured_deadline_ns) {
+        const std::uint64_t prev = deadline_ns;
+        deadline_ns = captured_deadline_ns;
+        interrupted = false;
+        return prev;
+    }
+
+    bool leave_async(std::uint64_t prev_deadline_ns) {
+        const bool tripped = interrupted;
+        deadline_ns = prev_deadline_ns;
+        interrupted = false;
+        return tripped;
+    }
+};
 
 struct BindingSchedulerConfig {
     std::size_t max_dispatches_per_turn = 16;
@@ -33,6 +80,10 @@ struct BindingSchedulerConfig {
 class BindingScheduler {
   public:
     typedef void (*TurnCallback)(void* opaque);
+    // F10/R5: Control-stage pump callback invoked under one shared per-turn
+    // control budget (`max_control_frames_per_turn`). Decrements `*budget` for
+    // every dequeued/expired unit and returns true if backlog remains.
+    typedef bool (*ControlStageCallback)(std::size_t* budget, void* opaque);
 
     explicit BindingScheduler(const BindingSchedulerConfig& config = BindingSchedulerConfig());
     ~BindingScheduler();
@@ -77,6 +128,13 @@ class BindingScheduler {
     // Arm the immediate loop wake handle (no-op if not attached or detached).
     void wake();
 
+    // Executes up to `config_.max_control_frames_per_turn` control units across
+    // `stage_count` stages using a rotating start cursor. Calls `wake()`
+    // whenever any stage reports remaining backlog and returns total units
+    // consumed during this turn.
+    std::size_t run_control_stages(const ControlStageCallback* stages, std::size_t stage_count,
+                                   void* opaque);
+
     // Clear all queues (used on worker shutdown / teardown).
     void clear_queues();
 
@@ -100,6 +158,7 @@ class BindingScheduler {
     BindingSchedulerConfig config_;
     std::vector<std::deque<std::uint64_t>> call_queues_;
     std::size_t rr_cursor_ = 0;
+    std::size_t control_stage_cursor_ = 0;
     std::size_t total_queued_calls_ = 0;
     std::deque<std::uint64_t> result_queue_;
     std::deque<std::uint64_t> control_queue_;

@@ -117,8 +117,13 @@ bool BindingStreamTable::enqueue_bytes(std::uint64_t stream_id, const std::uint8
     BindingStreamFrame frame;
     frame.type = BindingStreamFrame::Type::kBytes;
     if (size > 0 && data != nullptr) {
-        frame.bytes.assign(data, data + size);
+        std::shared_ptr<std::vector<std::uint8_t>> owned(
+            new std::vector<std::uint8_t>(data, data + size));
+        frame.shared_bytes = std::move(owned);
+        frame.byte_offset = 0;
+        frame.byte_length = size;
     }
+    frame.credit_bytes = size;
     frame.accounted_bytes = size;
     rec->queue.push_back(std::move(frame));
     ++rec->queued_frames;
@@ -173,6 +178,7 @@ bool BindingStreamTable::enqueue_value(std::uint64_t stream_id, NeutralValue val
     BindingStreamFrame frame;
     frame.type = BindingStreamFrame::Type::kValue;
     frame.value = std::move(value);
+    frame.credit_bytes = weight;
     frame.accounted_bytes = weight;
     rec->queue.push_back(std::move(frame));
     ++rec->queued_frames;
@@ -248,13 +254,15 @@ void BindingStreamTable::release_staged(std::uint64_t stream_id, std::size_t byt
         for (std::size_t i = 1; i < rel_frames; ++i) {
             ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, 0);
         }
+    } else if (rel_bytes > 0) {
+        ledger_->release_bytes(rec->owner_request_id, rec->owner_binding_id, rel_bytes);
     }
 }
 
-bool BindingStreamTable::admit_staged_bytes(std::uint64_t stream_id, const std::uint8_t* data,
-                                            std::size_t size, std::size_t staged_bytes_consumed,
-                                            std::size_t staged_frames_consumed,
-                                            std::string* error) {
+bool BindingStreamTable::admit_staged_shared_bytes(
+    std::uint64_t stream_id, const std::shared_ptr<const std::vector<std::uint8_t>>& backing,
+    std::size_t offset, std::size_t length, std::size_t staged_bytes_transferred,
+    std::size_t staged_frames_consumed, std::string* error) {
     BindingStreamRecord* rec = find(stream_id);
     if (rec == nullptr || rec->state != BindingStreamState::kOpen) {
         if (error != nullptr) {
@@ -262,28 +270,41 @@ bool BindingStreamTable::admit_staged_bytes(std::uint64_t stream_id, const std::
         }
         return false;
     }
-    if (size > kBindingStreamMaxChunkBytes) {
+    if (length > kBindingStreamMaxChunkBytes) {
         if (error != nullptr) {
             *error = "binding stream chunk exceeds maximum frame size";
         }
         return false;
     }
-    if (size > rec->credit_bytes) {
+    if (length > rec->credit_bytes) {
         if (error != nullptr) {
             *error = "insufficient stream credit";
         }
         return false;
     }
-    if (staged_bytes_consumed < size || staged_bytes_consumed > rec->staged_bytes ||
+    if (length > 0 && (!backing || offset > backing->size() || length > backing->size() - offset)) {
+        if (error != nullptr) {
+            *error = "staged stream byte slice out of bounds";
+        }
+        return false;
+    }
+    if (staged_bytes_transferred > rec->staged_bytes ||
         staged_frames_consumed > rec->staged_frames) {
         if (error != nullptr) {
             *error = "staged stream accounting underflow";
         }
         return false;
     }
-    // Transfer byte ownership from staged -> queued. If slicing produces an
-    // extra frame beyond staged_frames_consumed (e.g. a smaller credit window
-    // forced finer slicing), reserve one 0-byte frame slot in the ledger first.
+    if (staged_bytes_transferred > 0 && (!backing || staged_bytes_transferred != backing->size())) {
+        if (error != nullptr) {
+            *error = "staged backing transfer size mismatch";
+        }
+        return false;
+    }
+    // Transfer frame ownership from staged -> queued. When partial sub-slicing
+    // emits an intermediate frame (`staged_frames_consumed == 0`), reserve one
+    // 0-byte frame slot in the ledger while keeping the full backing block
+    // accounted in `staged_bytes` until its final sub-slice transfers ownership.
     if (staged_frames_consumed == 0) {
         if (rec->queued_frames + rec->staged_frames >= kBindingStreamMaxQueuedFrames) {
             if (error != nullptr) {
@@ -303,27 +324,21 @@ bool BindingStreamTable::admit_staged_bytes(std::uint64_t stream_id, const std::
             ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, 0);
         }
     }
-    if (staged_bytes_consumed > size) {
-        // Release any unused staged byte delta cleanly without dropping a frame.
-        // Callers normally pass staged_bytes_consumed == size.
-        const std::size_t excess = staged_bytes_consumed - size;
-        BindingQuotaError qerr = BindingQuotaError::kOk;
-        ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, staged_bytes_consumed);
-        (void)ledger_->reserve_frame(rec->owner_request_id, rec->owner_binding_id,
-                                     staged_bytes_consumed - excess, &qerr);
-    }
-    rec->staged_bytes -= staged_bytes_consumed;
+    rec->staged_bytes -= staged_bytes_transferred;
     rec->staged_frames -= staged_frames_consumed;
     BindingStreamFrame frame;
     frame.type = BindingStreamFrame::Type::kBytes;
-    if (size > 0 && data != nullptr) {
-        frame.bytes.assign(data, data + size);
+    if (length > 0 && backing) {
+        frame.shared_bytes = backing;
+        frame.byte_offset = offset;
+        frame.byte_length = length;
     }
-    frame.accounted_bytes = size;
+    frame.credit_bytes = length;
+    frame.accounted_bytes = staged_bytes_transferred;
     rec->queue.push_back(std::move(frame));
     ++rec->queued_frames;
-    rec->queued_bytes += size;
-    rec->credit_bytes -= size;
+    rec->queued_bytes += staged_bytes_transferred;
+    rec->credit_bytes -= length;
     return true;
 }
 
@@ -360,6 +375,7 @@ bool BindingStreamTable::admit_staged_value(std::uint64_t stream_id, NeutralValu
     BindingStreamFrame frame;
     frame.type = BindingStreamFrame::Type::kValue;
     frame.value = std::move(value);
+    frame.credit_bytes = weight;
     frame.accounted_bytes = weight;
     rec->queue.push_back(std::move(frame));
     ++rec->queued_frames;
@@ -506,6 +522,8 @@ void BindingStreamTable::release_queued_frames(BindingStreamRecord* rec) {
         for (std::size_t i = 1; i < rec->staged_frames; ++i) {
             ledger_->release_frame(rec->owner_request_id, rec->owner_binding_id, 0);
         }
+    } else if (rec->staged_bytes > 0) {
+        ledger_->release_bytes(rec->owner_request_id, rec->owner_binding_id, rec->staged_bytes);
     }
     rec->staged_bytes = 0;
     rec->staged_frames = 0;

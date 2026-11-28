@@ -2232,6 +2232,149 @@ void test_load_binding_abi_validation() {
             "null worker with a valid descriptor accepted");
 }
 
+// R6: Zero-Binding workers must NOT initialize the Binding RPC JS bridge,
+// must NOT enable Fetch private Binding HTTP tracking, and must NOT register
+// Request/Response brands on the zero-Binding hot path, whereas a Binding-
+// enabled worker positive control initializes the bridge once and tracks
+// Request/Response constructions accurately.
+void test_zero_binding_bridge_purity_and_counts(const char* worker_path) {
+    auto run_diag_case = [&](bool with_binding, std::string* out_body, std::string* out_stderr) {
+        int sockets[2];
+        require(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0, "socketpair diag");
+        int err_pipe[2];
+        require(pipe(err_pipe) == 0, "pipe stderr diag");
+
+        posix_spawn_file_actions_t actions;
+        require(posix_spawn_file_actions_init(&actions) == 0, "actions init");
+        posix_spawn_file_actions_addclose(&actions, sockets[0]);
+        posix_spawn_file_actions_adddup2(&actions, sockets[1], 3);
+        posix_spawn_file_actions_addclose(&actions, sockets[1]);
+        posix_spawn_file_actions_addclose(&actions, err_pipe[0]);
+        posix_spawn_file_actions_adddup2(&actions, err_pipe[1], STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, err_pipe[1]);
+
+        std::vector<std::string> env_store;
+        for (char** e = environ; e != NULL && *e != NULL; ++e) {
+            if (std::strncmp(*e, "CAPSID_PERF_DIAG=", 17) != 0) {
+                env_store.push_back(*e);
+            }
+        }
+        env_store.push_back("CAPSID_PERF_DIAG=1");
+        std::vector<char*> child_env;
+        for (size_t i = 0; i < env_store.size(); ++i) {
+            child_env.push_back(const_cast<char*>(env_store[i].c_str()));
+        }
+        child_env.push_back(NULL);
+
+        char fd_text[16];
+        std::snprintf(fd_text, sizeof(fd_text), "%d", 3);
+        char* arguments[] = {
+            const_cast<char*>(worker_path),
+            const_cast<char*>("--ipc-fd"),
+            fd_text,
+            NULL,
+        };
+        pid_t pid = -1;
+        require(posix_spawn(&pid, worker_path, &actions, NULL, arguments, child_env.data()) == 0,
+                "posix_spawn diag worker");
+        posix_spawn_file_actions_destroy(&actions);
+        close(sockets[1]);
+        close(err_pipe[1]);
+
+        const int fd = sockets[0];
+        send_hello(fd);
+        if (with_binding) {
+            capsid::protocol::Frame bf;
+            bf.type = capsid::protocol::kLoadBinding;
+            bf.flags = capsid::protocol::kFlagStart | capsid::protocol::kFlagEnd;
+            bf.request_id = 0;
+            bf.payload = binding_blob("svc", "export default () => ({ ok() { return 1; } });");
+            send_frame(fd, bf);
+        }
+
+        const std::string app =
+            "export default {\n"
+            "  async fetch() {\n"
+            "    for (let i = 0; i < 5; ++i) {\n"
+            "      new Request('https://r6.test/' + i);\n"
+            "      new Response('body-' + i);\n"
+            "    }\n"
+            "    const ctorOk =\n"
+            "      ReadableStreamDefaultReader.prototype.constructor === ReadableStreamDefaultReader &&\n"
+            "      WritableStreamDefaultWriter.prototype.constructor === WritableStreamDefaultWriter;\n"
+            "    return new Response(ctorOk ? 'ok' : 'bad-ctor');\n"
+            "  }\n"
+            "};\n";
+        send_bundle(fd, app);
+
+        capsid::protocol::Parser parser;
+        capsid::protocol::Frame frame;
+        require(read_frame(fd, &parser, &frame, 5000) == ReadResult::kFrame &&
+                    frame.type == capsid::protocol::kReady,
+                "diag worker READY");
+
+        // Send 1 GET request so Fetch Request/Response constructors execute.
+        capsid::protocol::Frame req_head;
+        req_head.type = capsid::protocol::kRequestHead;
+        req_head.flags = capsid::protocol::kFlagRequestEnd;
+        req_head.request_id = 1;
+        append_string16(&req_head.payload, "GET");
+        append_string32(&req_head.payload, "https://r6.test/");
+        capsid::protocol::append_u16(&req_head.payload, 0); // headers
+        send_frame(fd, req_head);
+
+        out_body->clear();
+        for (;;) {
+            require(read_frame(fd, &parser, &frame, 5000) == ReadResult::kFrame, "diag response");
+            if (frame.type == capsid::protocol::kResponseBody) {
+                out_body->append(reinterpret_cast<const char*>(frame.payload.data()),
+                                 frame.payload.size());
+            } else if (frame.type == capsid::protocol::kResponseEnd) {
+                break;
+            }
+        }
+
+        // Close IPC fd cleanly so WorkerRuntime::shutdown() flushes BINDING_INIT_DIAG.
+        close(fd);
+        out_stderr->clear();
+        char buf[1024];
+        for (;;) {
+            const ssize_t n = read(err_pipe[0], buf, sizeof(buf));
+            if (n > 0) {
+                out_stderr->append(buf, static_cast<size_t>(n));
+            } else if (n < 0 && errno == EINTR) {
+                continue;
+            } else {
+                break;
+            }
+        }
+        close(err_pipe[0]);
+        int status = 0;
+        waitpid(pid, &status, 0);
+    };
+
+    std::string zero_body, zero_err;
+    run_diag_case(false, &zero_body, &zero_err);
+    require(zero_body == "ok", "zero-binding worker diag request failed: " + zero_body);
+    require(zero_err.find("BINDING_INIT_DIAG bridge_init=0 http_tracking=0 req_brands=0 "
+                          "res_brands=0") != std::string::npos,
+            "zero-binding worker executed bridge init or Fetch brand registration: " + zero_err);
+
+    std::string bnd_body, bnd_err;
+    run_diag_case(true, &bnd_body, &bnd_err);
+    require(bnd_body == "ok", "binding-enabled positive control request failed: " + bnd_body);
+    require(bnd_err.find("BINDING_INIT_DIAG bridge_init=1 http_tracking=1") != std::string::npos,
+            "binding-enabled positive control missing bridge init diag: " + bnd_err);
+    const size_t req_pos = bnd_err.find("req_brands=");
+    const size_t res_pos = bnd_err.find("res_brands=");
+    require(req_pos != std::string::npos && res_pos != std::string::npos,
+            "binding-enabled diag missing brand counts: " + bnd_err);
+    const int req_brands = std::atoi(bnd_err.c_str() + req_pos + 11);
+    const int res_brands = std::atoi(bnd_err.c_str() + res_pos + 11);
+    require(req_brands >= 6 && res_brands >= 6,
+            "binding-enabled positive control brand counts too low: " + bnd_err);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2241,6 +2384,7 @@ int main(int argc, char** argv) {
              "binding-lifecycle fixture");
     }
     test_zero_binding_ready_baseline(argv[1], argv[2]);
+    test_zero_binding_bridge_purity_and_counts(argv[1]);
     test_undeclared_binding_import_fails(argv[1], argv[3]);
     test_load_binding_after_bundle_is_rejected(argv[1], argv[2]);
     test_binding_ready_proof(argv[1], argv[2]);

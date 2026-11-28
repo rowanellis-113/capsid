@@ -13,9 +13,11 @@
 
 #include "quickjs.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -24,6 +26,11 @@ namespace capsid {
 namespace {
 
 constexpr double kMaxBindingTimeoutMs = 31536000000.0; // 1 year; avoids ns overflow
+
+std::size_t saturating_add(std::size_t a, std::size_t b) {
+    const std::size_t max_val = (std::numeric_limits<std::size_t>::max)();
+    return (b > max_val - a) ? max_val : (a + b);
+}
 
 struct CloneContext {
     JSContext* ctx;
@@ -34,6 +41,14 @@ struct CloneContext {
     JSValue object_proto;                      // Object.prototype, referenced
     const BindingCloneHooks* hooks;
 };
+
+bool charge_clone_bytes(CloneContext* context, std::size_t delta, std::string* error) {
+    if (delta == 0 || context == NULL || context->hooks == NULL ||
+        context->hooks->reserve_bytes == NULL) {
+        return true;
+    }
+    return context->hooks->reserve_bytes(delta, error, context->hooks->opaque);
+}
 
 bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::string* error,
                  CloneContext* context);
@@ -185,8 +200,8 @@ bool learn_class_ids(JSContext* ctx, CloneContext* context) {
     return true;
 }
 
-bool clone_string(JSContext* ctx, JSValueConst value, std::string* target, std::string* error,
-                  CloneContext* context) {
+bool clone_string(JSContext* ctx, JSValueConst value, std::size_t weight_overhead,
+                  std::string* target, std::string* error, CloneContext* context) {
     const char* text = JS_ToCString(ctx, value);
     if (text == NULL) {
         return fail_closed(error, "unprintable string");
@@ -195,6 +210,10 @@ bool clone_string(JSContext* ctx, JSValueConst value, std::string* target, std::
     if (size > kMaxBindingCloneBytes - context->bytes) {
         JS_FreeCString(ctx, text);
         return fail_closed(error, "clone byte limit exceeded");
+    }
+    if (!charge_clone_bytes(context, saturating_add(size, weight_overhead), error)) {
+        JS_FreeCString(ctx, text);
+        return false;
     }
     target->assign(text, size);
     JS_FreeCString(ctx, text);
@@ -223,14 +242,23 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
     }
 
     if (JS_IsUndefined(value)) {
+        if (!charge_clone_bytes(context, 1, error)) {
+            return false;
+        }
         out->kind = NeutralValue::Kind::kUndefined;
         return true;
     }
     if (JS_IsNull(value)) {
+        if (!charge_clone_bytes(context, 1, error)) {
+            return false;
+        }
         out->kind = NeutralValue::Kind::kNull;
         return true;
     }
     if (JS_IsBool(value)) {
+        if (!charge_clone_bytes(context, 1, error)) {
+            return false;
+        }
         out->kind = NeutralValue::Kind::kBool;
         out->bool_value = JS_ToBool(ctx, value) != 0;
         return true;
@@ -240,18 +268,18 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
         if (JS_ToFloat64(ctx, &out->number, value) != 0) {
             return fail_closed(error, "unrepresentable number");
         }
-        return true;
+        return charge_clone_bytes(context, 8, error);
     }
     if (JS_IsBigInt(value)) {
         out->kind = NeutralValue::Kind::kBigInt;
-        if (!clone_string(ctx, value, &out->bigint, error, context)) {
+        if (!clone_string(ctx, value, 8, &out->bigint, error, context)) {
             return false;
         }
         return true;
     }
     if (JS_IsString(value)) {
         out->kind = NeutralValue::Kind::kString;
-        return clone_string(ctx, value, &out->string, error, context);
+        return clone_string(ctx, value, 1, &out->string, error, context);
     }
     if (JS_IsSymbol(value)) {
         return fail_closed(error, "symbol values are not cloneable");
@@ -261,7 +289,7 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
         if (JS_GetDateValue(ctx, value, &out->date_ms) != 0) {
             return fail_closed(error, "date value is unreadable");
         }
-        return true;
+        return charge_clone_bytes(context, 8, error);
     }
     if (JS_IsError(value)) {
         return fail_closed(error, "Error values are not cloneable");
@@ -289,6 +317,9 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
         if (size > kMaxBindingCloneBytes - context->bytes) {
             return fail_closed(error, "clone byte limit exceeded");
         }
+        if (!charge_clone_bytes(context, size, error)) {
+            return false;
+        }
         out->bytes.assign(data, data + size);
         context->bytes += size;
         return true;
@@ -302,6 +333,9 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
         }
         if (typed_size > kMaxBindingCloneBytes - context->bytes) {
             return fail_closed(error, "clone byte limit exceeded");
+        }
+        if (!charge_clone_bytes(context, typed_size, error)) {
+            return false;
         }
         out->bytes.assign(typed, typed + typed_size);
         context->bytes += typed_size;
@@ -362,8 +396,12 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
             return fail_closed(error, "array length is unreadable");
         }
         JS_FreeValue(ctx, length_value);
+        if (!charge_clone_bytes(context, 8, error)) {
+            context->ancestors.erase(identity);
+            return false;
+        }
         ++context->depth;
-        out->array.reserve(length);
+        out->array.reserve((std::min)(static_cast<std::size_t>(length), kMaxBindingCloneNodes));
         for (uint32_t index = 0; index < length; ++index) {
             JSAtom atom = JS_NewAtomUInt32(ctx, index);
             JSPropertyDescriptor descriptor;
@@ -411,6 +449,11 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
         context->ancestors.erase(identity);
         return fail_closed(error, "object properties are unreadable");
     }
+    if (!charge_clone_bytes(context, 8, error)) {
+        JS_FreePropertyEnum(ctx, tab, count);
+        context->ancestors.erase(identity);
+        return false;
+    }
     ++context->depth;
     for (uint32_t index = 0; index < count; ++index) {
         const char* key = JS_AtomToCString(ctx, tab[index].atom);
@@ -427,6 +470,12 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
             --context->depth;
             context->ancestors.erase(identity);
             return fail_closed(error, "clone byte limit exceeded");
+        }
+        if (!charge_clone_bytes(context, key_string.size(), error)) {
+            JS_FreePropertyEnum(ctx, tab, count);
+            --context->depth;
+            context->ancestors.erase(identity);
+            return false;
         }
         context->bytes += key_string.size();
         JSPropertyDescriptor descriptor;
@@ -1482,6 +1531,44 @@ bool neutral_from_js(JSContext* ctx, JSValueConst value, NeutralValue* out, std:
     return neutral_from_js_ex(ctx, value, out, error, NULL);
 }
 
+std::size_t estimate_neutral_request_bytes(const NeutralHttpRequest& request) {
+    std::size_t total = 64;
+    total = saturating_add(total, request.url.size());
+    total = saturating_add(total, request.method.size());
+    total = saturating_add(total, request.credentials.size());
+    total = saturating_add(total, request.redirect.size());
+    if (request.has_mode) {
+        total = saturating_add(total, request.mode.size());
+    }
+    for (std::size_t i = 0; i < request.headers.size(); ++i) {
+        total = saturating_add(total, request.headers[i].first.size());
+        total = saturating_add(total, request.headers[i].second.size());
+        total = saturating_add(total, 16);
+    }
+    total = saturating_add(total, request.inline_bytes.size());
+    if (request.body_kind == 2) {
+        total = saturating_add(total, 16);
+    }
+    return total;
+}
+
+std::size_t estimate_neutral_response_bytes(const NeutralHttpResponse& response) {
+    std::size_t total = 64;
+    total = saturating_add(total, response.status_text.size());
+    total = saturating_add(total, response.url.size());
+    total = saturating_add(total, response.type.size());
+    for (std::size_t i = 0; i < response.headers.size(); ++i) {
+        total = saturating_add(total, response.headers[i].first.size());
+        total = saturating_add(total, response.headers[i].second.size());
+        total = saturating_add(total, 16);
+    }
+    total = saturating_add(total, response.inline_bytes.size());
+    if (response.body_kind == 2) {
+        total = saturating_add(total, 16);
+    }
+    return total;
+}
+
 std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
     switch (value.kind) {
     case NeutralValue::Kind::kUndefined:
@@ -1492,23 +1579,23 @@ std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
     case NeutralValue::Kind::kDate:
         return 8;
     case NeutralValue::Kind::kBigInt:
-        return value.bigint.size() + 8;
+        return saturating_add(value.bigint.size(), 8);
     case NeutralValue::Kind::kString:
-        return value.string.size() + 1;
+        return saturating_add(value.string.size(), 1);
     case NeutralValue::Kind::kBytes:
         return value.bytes.size();
     case NeutralValue::Kind::kArray: {
         std::size_t total = 8;
         for (std::size_t i = 0; i < value.array.size(); ++i) {
-            total += estimate_neutral_value_bytes(value.array[i]);
+            total = saturating_add(total, estimate_neutral_value_bytes(value.array[i]));
         }
         return total;
     }
     case NeutralValue::Kind::kObject: {
         std::size_t total = 8;
         for (std::size_t i = 0; i < value.object.size(); ++i) {
-            total +=
-                value.object[i].first.size() + estimate_neutral_value_bytes(value.object[i].second);
+            total = saturating_add(total, value.object[i].first.size());
+            total = saturating_add(total, estimate_neutral_value_bytes(value.object[i].second));
         }
         return total;
     }
@@ -1516,11 +1603,17 @@ std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
     case NeutralValue::Kind::kWritableStreamProxy:
         return 16;
     case NeutralValue::Kind::kRequestProxy:
-        return 64 + value.request.inline_bytes.size();
+        return estimate_neutral_request_bytes(value.request);
     case NeutralValue::Kind::kResponseProxy:
-        return 64 + value.response.inline_bytes.size();
-    case NeutralValue::Kind::kRpcHandleProxy:
-        return 32 + value.handle_methods.size() * 16;
+        return estimate_neutral_response_bytes(value.response);
+    case NeutralValue::Kind::kRpcHandleProxy: {
+        std::size_t total = 32;
+        for (std::size_t i = 0; i < value.handle_methods.size(); ++i) {
+            total = saturating_add(total, value.handle_methods[i].size());
+            total = saturating_add(total, 16);
+        }
+        return total;
+    }
     }
     return 1;
 }

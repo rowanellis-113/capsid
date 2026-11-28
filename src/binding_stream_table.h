@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -54,10 +55,30 @@ struct BindingStreamFrame {
     };
 
     Type type = Type::kBytes;
-    std::vector<std::uint8_t> bytes;
+    // Zero-copy shared backing buffer for kBytes frames so sub-slices share a
+    // single accounted native allocation without duplicating bytes.
+    std::shared_ptr<const std::vector<std::uint8_t>> shared_bytes;
+    std::size_t byte_offset = 0;
+    std::size_t byte_length = 0;
     NeutralValue value;
     RemoteErrorInfo error;
+    // Logical payload bytes consumed from the flow-control credit window
+    // (refilled via grant_credit when the consumer drains this frame).
+    std::size_t credit_bytes = 0;
+    // Actual native backing allocation bytes released from BindingRpcLedger
+    // when this frame is popped or dropped. For sub-slices sharing a backing
+    // block, backing bytes transfer from staged_bytes -> queued_bytes on the
+    // final sub-slice of the block so live native RAM is never under-reported
+    // during partial delivery.
     std::size_t accounted_bytes = 0;
+
+    const std::uint8_t* data() const {
+        if (!shared_bytes || byte_length == 0 || byte_offset >= shared_bytes->size()) {
+            return nullptr;
+        }
+        return shared_bytes->data() + byte_offset;
+    }
+    std::size_t size() const { return byte_length; }
 };
 
 struct BindingStreamRecord {
@@ -127,12 +148,19 @@ class BindingStreamTable {
     // failure or cancellation before credit admission).
     void release_staged(std::uint64_t stream_id, std::size_t bytes, std::size_t frames);
 
-    // Moves up to `size` bytes (strictly <= credit_bytes) and `frames_consumed`
-    // (typically 1) from staged accounting into the active frame queue without
-    // double-charging the 3-tier ledger.
-    bool admit_staged_bytes(std::uint64_t stream_id, const std::uint8_t* data, std::size_t size,
-                            std::size_t staged_bytes_consumed, std::size_t staged_frames_consumed,
-                            std::string* error = nullptr);
+    // Admits a zero-copy slice `[offset, offset + length)` of a shared staged
+    // backing buffer into the active frame queue (strictly `length <=
+    // credit_bytes`) without copying or double-charging the 3-tier ledger.
+    // `staged_bytes_transferred` moves backing-block byte accounting from
+    // `staged_bytes` to `queued_bytes` ONLY when the final sub-slice of that
+    // backing block is admitted (0 on intermediate sub-slices while the backing
+    // block remains live in staged storage).
+    bool admit_staged_shared_bytes(std::uint64_t stream_id,
+                                   const std::shared_ptr<const std::vector<std::uint8_t>>& backing,
+                                   std::size_t offset, std::size_t length,
+                                   std::size_t staged_bytes_transferred,
+                                   std::size_t staged_frames_consumed,
+                                   std::string* error = nullptr);
 
     // Moves a staged NeutralValue chunk into the active frame queue (strictly
     // <= credit_bytes) without double-charging the 3-tier ledger.

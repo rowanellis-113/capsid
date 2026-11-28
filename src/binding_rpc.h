@@ -103,6 +103,10 @@ struct BindingCloneHooks {
     BindingCloneHookResult (*try_capture)(JSContext* ctx, JSValueConst value, NeutralValue* out,
                                           std::string* error, void* opaque) = nullptr;
     JSValue (*materialize)(JSContext* ctx, const NeutralValue& value, void* opaque) = nullptr;
+    // Incremental byte-quota reservation invoked before retaining native bytes
+    // during clone so queued payloads cannot bypass 3-tier byte caps while
+    // cloning.
+    bool (*reserve_bytes)(std::size_t delta, std::string* error, void* opaque) = nullptr;
     void* opaque = nullptr;
 };
 
@@ -239,8 +243,11 @@ bool neutral_from_js_ex(JSContext* ctx, JSValueConst value, NeutralValue* out, s
 JSValue neutral_to_js(JSContext* ctx, const NeutralValue& value);
 JSValue neutral_to_js_ex(JSContext* ctx, const NeutralValue& value, const BindingCloneHooks* hooks);
 
-// Estimates the byte weight of a neutral value for stream credit & ledger
-// accounting.
+// Estimates the overflow-checked byte weight of a neutral value (including all
+// variable-length HTTP request/response metadata, headers, inline bodies, and
+// handle method tables) for stream credit & 3-tier ledger accounting.
+std::size_t estimate_neutral_request_bytes(const NeutralHttpRequest& request);
+std::size_t estimate_neutral_response_bytes(const NeutralHttpResponse& response);
 std::size_t estimate_neutral_value_bytes(const NeutralValue& value);
 
 // Internal Binding RPC identifiers are never Number/Int64 values: IDs above

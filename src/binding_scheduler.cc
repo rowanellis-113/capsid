@@ -174,6 +174,28 @@ void BindingScheduler::wake() {
     update_idle_state();
 }
 
+std::size_t BindingScheduler::run_control_stages(const ControlStageCallback* stages,
+                                                 std::size_t stage_count, void* opaque) {
+    if (stages == nullptr || stage_count == 0) {
+        return 0;
+    }
+    const std::size_t initial_budget = config_.max_control_frames_per_turn;
+    std::size_t budget = initial_budget;
+    const std::size_t start_stage = control_stage_cursor_ % stage_count;
+    control_stage_cursor_ = (start_stage + 1) % stage_count;
+    bool backlog_remaining = false;
+    for (std::size_t i = 0; i < stage_count; ++i) {
+        const ControlStageCallback stage = stages[(start_stage + i) % stage_count];
+        if (stage != nullptr && stage(&budget, opaque)) {
+            backlog_remaining = true;
+        }
+    }
+    if (backlog_remaining) {
+        wake();
+    }
+    return initial_budget >= budget ? (initial_budget - budget) : initial_budget;
+}
+
 void BindingScheduler::clear_queues() {
     for (std::size_t i = 0; i < call_queues_.size(); ++i) {
         call_queues_[i].clear();
