@@ -907,7 +907,7 @@ function createEmptyHeaders() {
   return headers;
 }
 
-function createHeadersFromIncomingPairs(rawPairs, canonical = false) {
+export function createHeadersFromIncomingPairs(rawPairs, canonical = false) {
   const headers = Object.create(headersPrototype);
   const state = createHeaderState();
   setHeaderState(headers, state);

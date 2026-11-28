@@ -40,6 +40,8 @@ struct NeutralValue {
         kBytes,
         kArray,
         kObject,
+        kReadableStreamProxy,
+        kWritableStreamProxy,
     };
 
     Kind kind = Kind::kUndefined;
@@ -52,6 +54,20 @@ struct NeutralValue {
     std::vector<NeutralValue> array; // kArray
     // kObject: insertion-ordered, duplicate keys rejected at clone time.
     std::vector<std::pair<std::string, NeutralValue>> object;
+    std::uint64_t stream_id = 0;     // kReadableStreamProxy / kWritableStreamProxy
+};
+
+enum class BindingCloneHookResult {
+    kUnhandled = 0,
+    kCaptured = 1,
+    kFailed = 2,
+};
+
+struct BindingCloneHooks {
+    BindingCloneHookResult (*try_capture)(JSContext* ctx, JSValueConst value, NeutralValue* out,
+                                          std::string* error, void* opaque) = nullptr;
+    JSValue (*materialize)(JSContext* ctx, const NeutralValue& value, void* opaque) = nullptr;
+    void* opaque = nullptr;
 };
 
 // Intrinsic constructors, prototypes, and brand-checked native getters
@@ -175,9 +191,16 @@ void binding_signal_remove_abort_listener(JSContext* ctx, JSValueConst signal,
 // JS -> neutral. Fails closed with a static diagnostic; `out` is not
 // touched on failure.
 bool neutral_from_js(JSContext* ctx, JSValueConst value, NeutralValue* out, std::string* error);
+bool neutral_from_js_ex(JSContext* ctx, JSValueConst value, NeutralValue* out, std::string* error,
+                        const BindingCloneHooks* hooks);
 
 // neutral -> JS in the caller's context. The caller owns the result.
 JSValue neutral_to_js(JSContext* ctx, const NeutralValue& value);
+JSValue neutral_to_js_ex(JSContext* ctx, const NeutralValue& value, const BindingCloneHooks* hooks);
+
+// Estimates the byte weight of a neutral value for stream credit & ledger
+// accounting.
+std::size_t estimate_neutral_value_bytes(const NeutralValue& value);
 
 // Internal Binding RPC identifiers are never Number/Int64 values: IDs above
 // 2^63 must survive the JS callback-data round trip exactly and zero is

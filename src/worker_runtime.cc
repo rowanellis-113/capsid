@@ -8,6 +8,7 @@
 #include "binding_rpc.h"
 #include "binding_rpc_ledger.h"
 #include "binding_scheduler.h"
+#include "binding_stream_table.h"
 #include "build_identity.h"
 #include "capability_policy.h"
 #include "channel_io.h"
@@ -95,6 +96,7 @@ void tjs__execute_jobs(JSContext* ctx);
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -710,6 +712,56 @@ class WorkerRuntime {
         std::shared_ptr<const capsid::ChannelMessage> active_message;
         std::deque<ConnectionEvent> events;
     };
+    // Binding RPC v2 (M4B/M4C): tamper-proof JS helpers captured once during
+    // bootstrap via one-shot core.capsidInstallBindingBridge and deleted from
+    // core before untrusted code runs.
+    struct BindingJsBridge {
+        JSValue is_readable_stream = JS_UNDEFINED;
+        JSValue is_writable_stream = JS_UNDEFINED;
+        JSValue check_readable_transferable = JS_UNDEFINED;
+        JSValue check_writable_transferable = JS_UNDEFINED;
+        JSValue extract_bytes = JS_UNDEFINED;
+        JSValue attach_readable_source = JS_UNDEFINED;
+        JSValue create_readable_proxy = JS_UNDEFINED;
+        JSValue attach_writable_source = JS_UNDEFINED;
+        JSValue create_writable_proxy = JS_UNDEFINED;
+        JSValue is_request = JS_UNDEFINED;
+        JSValue is_response = JS_UNDEFINED;
+        JSValue inspect_request = JS_UNDEFINED;
+        JSValue create_proxy_request = JS_UNDEFINED;
+        JSValue inspect_response = JS_UNDEFINED;
+        JSValue create_proxy_response = JS_UNDEFINED;
+        JSValue dispose_late_value = JS_UNDEFINED;
+    };
+
+    static void free_binding_js_bridge(JSContext* ctx, BindingJsBridge* bridge) {
+        if (ctx == NULL || bridge == NULL) {
+            return;
+        }
+        JSValue* fields[] = {
+            &bridge->is_readable_stream,
+            &bridge->is_writable_stream,
+            &bridge->check_readable_transferable,
+            &bridge->check_writable_transferable,
+            &bridge->extract_bytes,
+            &bridge->attach_readable_source,
+            &bridge->create_readable_proxy,
+            &bridge->attach_writable_source,
+            &bridge->create_writable_proxy,
+            &bridge->is_request,
+            &bridge->is_response,
+            &bridge->inspect_request,
+            &bridge->create_proxy_request,
+            &bridge->inspect_response,
+            &bridge->create_proxy_response,
+            &bridge->dispose_late_value,
+        };
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+            JS_FreeValue(ctx, *fields[i]);
+            *fields[i] = JS_UNDEFINED;
+        }
+    }
+
     // §5.1: one QuickJS runtime/context per Binding, created only when
     // bindings exist. Each attaches to the User runtime's loop
     // (shared_loop) and is pumped by it; heaps, globals, module loaders and
@@ -732,6 +784,7 @@ class WorkerRuntime {
         JSValue abort_controller_ctor;
         JSValue abort;
         capsid::BindingRpcIntrinsics intrinsics;
+        BindingJsBridge js_bridge;
         std::vector<std::string> method_names; // Runtime-neutral bytes
     };
 
@@ -781,9 +834,64 @@ class WorkerRuntime {
             self->binding_interrupted_call_id_ = 0;
         }
     };
+    struct PendingStreamWrite {
+        JSValue resolve = JS_UNDEFINED;
+        JSValue reject = JS_UNDEFINED;
+        bool is_bytes = false;
+        std::vector<std::uint8_t> bytes;
+        capsid::NeutralValue value;
+        std::size_t accounted_bytes = 0;
+    };
+
+    struct ActiveBindingStream {
+        // Producer-side JS handles (live in producer_ctx)
+        JSValue readable_source = JS_UNDEFINED; // { pull, cancel }
+        JSValue writable_proxy_ctrl = JS_UNDEFINED; // { stream, error }
+        JSValue on_chunk_cb = JS_UNDEFINED;
+        JSValue on_end_cb = JS_UNDEFINED;
+        JSValue on_error_cb = JS_UNDEFINED;
+        std::deque<PendingStreamWrite> pending_writes;
+        bool close_waiting = false;
+        JSValue close_resolve = JS_UNDEFINED;
+        JSValue close_reject = JS_UNDEFINED;
+
+        // Consumer-side JS handles (live in consumer_ctx)
+        JSValue readable_proxy_ctrl = JS_UNDEFINED; // { enqueue, close, error }
+        JSValue pull_resolve = JS_UNDEFINED;
+        JSValue pull_reject = JS_UNDEFINED;
+        JSValue writable_sink = JS_UNDEFINED; // { write, close, abort }
+        bool sink_write_inflight = false;
+        bool sink_close_inflight = false;
+        std::size_t last_sink_write_bytes = 0;
+        JSValue on_write_done_cb = JS_UNDEFINED;
+        JSValue on_write_err_cb = JS_UNDEFINED;
+        JSValue on_close_done_cb = JS_UNDEFINED;
+        JSValue on_close_err_cb = JS_UNDEFINED;
+    };
+
+    struct UserRequestTokenGuard {
+        WorkerRuntime* self;
+        RequestToken* saved;
+        UserRequestTokenGuard(WorkerRuntime* owner, uint64_t request_id)
+            : self(owner), saved(owner->current_token_) {
+            auto it = owner->http_tokens_by_request_id_.find(request_id);
+            if (it != owner->http_tokens_by_request_id_.end() && it->second != NULL &&
+                !it->second->terminal) {
+                owner->current_token_ = it->second;
+            }
+        }
+        ~UserRequestTokenGuard() { self->current_token_ = saved; }
+    };
+
     capsid::BindingRpcIntrinsics user_binding_intrinsics_;
+    BindingJsBridge user_binding_bridge_;
+    BindingJsBridge pending_binding_bridge_;
     capsid::BindingRpcLedger binding_ledger_;
     capsid::BindingScheduler binding_scheduler_;
+    capsid::BindingStreamTable binding_streams_;
+    std::map<uint64_t, ActiveBindingStream> active_binding_streams_;
+    std::deque<uint64_t> stream_work_queue_;
+    std::unordered_set<uint64_t> stream_work_set_;
     std::map<uint64_t, PendingBindingCall> pending_binding_calls_;
     uint64_t next_binding_call_id_ = 1;
     // Binding Runtime interrupt authority: the call id currently executing
@@ -795,7 +903,8 @@ class WorkerRuntime {
 
   public:
     WorkerRuntime(int fd, int network_namespace_fd, const CapsidWorkerIo* io)
-        : fd_(fd), network_namespace_fd_(network_namespace_fd), io_(io), runtime_(NULL), ctx_(NULL),
+        : binding_streams_(&binding_ledger_), fd_(fd),
+          network_namespace_fd_(network_namespace_fd), io_(io), runtime_(NULL), ctx_(NULL),
           poll_started_(false), deadline_timer_initialized_(false), deadline_timer_started_(false),
           poll_events_(0), pump_in_progress_(false), diag_samples_(0), flush_syscall_samples_(0),
           flush_syscall_total_(0), bridge_calls_(0), bridge_us_(0), diag_enabled_(false),
@@ -828,7 +937,8 @@ class WorkerRuntime {
             }
             free_bridge_functions();
         }
-        // §7.6: free every pending binding call before the runtimes go.
+        // §7.6: free every pending binding call and stream before runtimes go.
+        teardown_all_binding_streams();
         for (std::map<uint64_t, PendingBindingCall>::iterator it = pending_binding_calls_.begin();
              it != pending_binding_calls_.end(); ++it) {
             self_finish_binding_call(it->second);
@@ -845,6 +955,7 @@ class WorkerRuntime {
         }
         binding_tables_.clear();
         if (ctx_) {
+            free_binding_js_bridge(ctx_, &user_binding_bridge_);
             capsid::free_binding_rpc_intrinsics(ctx_, &user_binding_intrinsics_);
         }
         if (runtime_) {
@@ -1877,6 +1988,7 @@ class WorkerRuntime {
             table->abort_controller_ctor = JS_UNDEFINED;
             JS_FreeValue(table->ctx, table->abort);
             table->abort = JS_UNDEFINED;
+            free_binding_js_bridge(table->ctx, &table->js_bridge);
             capsid::free_binding_rpc_intrinsics(table->ctx, &table->intrinsics);
         }
         if (table->runtime != NULL) {
@@ -2367,6 +2479,7 @@ class WorkerRuntime {
     bool is_timer_idle() const {
         return responses_.empty() && retained_refs_ == 0 && !reclaim_pending_ && !poisoned_ &&
                pending_memory_metrics_ == 0 && pending_binding_calls_.empty() &&
+               binding_streams_.empty() && stream_work_queue_.empty() &&
                !binding_scheduler_.has_pending_work() && connections_.empty() &&
                pending_connections_.empty() && channel_controls_.empty() &&
                (!channels_ || channels_->idle());
@@ -2501,7 +2614,9 @@ class WorkerRuntime {
                                      js_fetch_response_body_limit, 0) ||
                 !self->define_native(ctx, core, "capsidFixedResponseBodyLimit",
                                      js_fixed_response_body_limit, 0) ||
-                !self->define_native(ctx, core, "capsidInstallBridge", js_install_bridge, 4)) {
+                !self->define_native(ctx, core, "capsidInstallBridge", js_install_bridge, 4) ||
+                !self->define_native(ctx, core, "capsidInstallBindingBridge",
+                                     js_install_binding_bridge, 1)) {
                 if (!JS_HasException(ctx)) {
                     JS_ThrowInternalError(ctx, "failed to install Capsid binding bootstrap");
                 }
@@ -2520,6 +2635,11 @@ class WorkerRuntime {
             }
             const int bootstrap_result =
                 TJS_EvalBytecode(ctx, capsid__bootstrap, capsid__bootstrap_size, true);
+            {
+                JSAtom hook_atom = JS_NewAtom(ctx, "capsidInstallBindingBridge");
+                JS_DeleteProperty(ctx, core, hook_atom, 0);
+                JS_FreeAtom(ctx, hook_atom);
+            }
             if (bootstrap_result != 0) {
                 return bootstrap_result;
             }
@@ -2554,13 +2674,22 @@ class WorkerRuntime {
                                  js_fetch_response_body_limit, 0) ||
             !self->define_native(ctx, core, "capsidFixedResponseBodyLimit",
                                  js_fixed_response_body_limit, 0) ||
-            !self->define_native(ctx, core, "capsidInstallBridge", js_install_bridge, 4)) {
+            !self->define_native(ctx, core, "capsidInstallBridge", js_install_bridge, 4) ||
+            !self->define_native(ctx, core, "capsidInstallBindingBridge", js_install_binding_bridge,
+                                 1)) {
             if (!JS_HasException(ctx)) {
                 JS_ThrowInternalError(ctx, "failed to install Capsid native bridge");
             }
             return -1;
         }
-        return TJS_EvalBytecode(ctx, capsid__bootstrap, capsid__bootstrap_size, true);
+        const int user_bootstrap_result =
+            TJS_EvalBytecode(ctx, capsid__bootstrap, capsid__bootstrap_size, true);
+        {
+            JSAtom hook_atom = JS_NewAtom(ctx, "capsidInstallBindingBridge");
+            JS_DeleteProperty(ctx, core, hook_atom, 0);
+            JS_FreeAtom(ctx, hook_atom);
+        }
+        return user_bootstrap_result;
     }
 
     // Fills the diagnostic message a denied fetch reports to the app.
@@ -4806,6 +4935,54 @@ class WorkerRuntime {
         g_worker->request_chunk_ = JS_DupValue(ctx, argv[1]);
         g_worker->request_end_ = JS_DupValue(ctx, argv[2]);
         g_worker->cancel_request_ = JS_DupValue(ctx, argv[3]);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue js_install_binding_bridge(JSContext* ctx, JSValueConst, int argc,
+                                             JSValueConst* argv) {
+        if (!g_worker || argc < 1 || !JS_IsObject(argv[0])) {
+            return JS_ThrowInternalError(ctx, "invalid Binding RPC bridge installation");
+        }
+        BindingJsBridge* target = g_worker->bootstrapping_binding_runtime_
+                                      ? &g_worker->pending_binding_bridge_
+                                      : &g_worker->user_binding_bridge_;
+        free_binding_js_bridge(ctx, target);
+        struct Entry {
+            const char* name;
+            JSValue* slot;
+        };
+        const Entry entries[] = {
+            {"isReadableStream", &target->is_readable_stream},
+            {"isWritableStream", &target->is_writable_stream},
+            {"checkReadableTransferable", &target->check_readable_transferable},
+            {"checkWritableTransferable", &target->check_writable_transferable},
+            {"extractBytes", &target->extract_bytes},
+            {"attachReadableSource", &target->attach_readable_source},
+            {"createReadableProxy", &target->create_readable_proxy},
+            {"attachWritableSource", &target->attach_writable_source},
+            {"createWritableProxy", &target->create_writable_proxy},
+            {"isRequest", &target->is_request},
+            {"isResponse", &target->is_response},
+            {"inspectRequest", &target->inspect_request},
+            {"createProxyRequest", &target->create_proxy_request},
+            {"inspectResponse", &target->inspect_response},
+            {"createProxyResponse", &target->create_proxy_response},
+            {"disposeLateValue", &target->dispose_late_value},
+        };
+        for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i) {
+            JSValue fn = JS_GetPropertyStr(ctx, argv[0], entries[i].name);
+            if (JS_IsException(fn) || !JS_IsFunction(ctx, fn)) {
+                if (JS_IsException(fn)) {
+                    JSValue exc = JS_GetException(ctx);
+                    JS_FreeValue(ctx, exc);
+                } else {
+                    JS_FreeValue(ctx, fn);
+                }
+                free_binding_js_bridge(ctx, target);
+                return JS_ThrowInternalError(ctx, "missing Binding RPC bridge helper");
+            }
+            *entries[i].slot = fn;
+        }
         return JS_UNDEFINED;
     }
 
@@ -7325,19 +7502,24 @@ class WorkerRuntime {
             options.bootstrap = bootstrap;
             options.bootstrap_opaque = this;
             options.shared_loop = TJS_GetLoop(runtime_);
+            pending_binding_bridge_ = BindingJsBridge();
             bootstrapping_binding_runtime_ = true;
             table.runtime = TJS_NewRuntimeOptions(&options);
             bootstrapping_binding_runtime_ = false;
             if (table.runtime == NULL) {
+                pending_binding_bridge_ = BindingJsBridge();
                 *error = "binding runtime creation failed for " + table.id;
                 return false;
             }
             table.ctx = TJS_GetJSContext(table.runtime);
             if (table.ctx == NULL) {
+                pending_binding_bridge_ = BindingJsBridge();
                 release_binding_table(&table);
                 *error = "binding runtime has no context: " + table.id;
                 return false;
             }
+            table.js_bridge = pending_binding_bridge_;
+            pending_binding_bridge_ = BindingJsBridge();
             JS_SetInterruptHandler(JS_GetRuntime(table.ctx), binding_interrupt_handler, this);
             // Capture this runtime's intrinsics before any Host package
             // evaluates. A package may mutate its own global, but RPC
@@ -7585,12 +7767,22 @@ class WorkerRuntime {
             }
         }
 
-        // §5.3: the input is cloned to a C++ neutral value; a rejected
-        // value fails the call before anything crosses.
+        // §5.3 + Binding RPC v2 (M4B): clone input (plain values + stream
+        // proxies). Roll back any newly opened streams if cloning fails.
         capsid::NeutralValue input;
         std::string clone_error;
         JSValueConst input_value = argc > 0 ? argv[0] : JS_UNDEFINED;
-        if (!capsid::neutral_from_js(ctx, input_value, &input, &clone_error)) {
+        BindingCloneContext clone_ctx;
+        clone_ctx.self = self;
+        clone_ctx.request_id = token->request_id;
+        clone_ctx.binding_id = table.id;
+        clone_ctx.table_index = static_cast<size_t>(table_index);
+        clone_ctx.side = capsid::BindingStreamSide::kUser;
+        capsid::BindingCloneHooks clone_hooks;
+        clone_hooks.try_capture = try_capture_binding_object;
+        clone_hooks.opaque = &clone_ctx;
+        if (!capsid::neutral_from_js_ex(ctx, input_value, &input, &clone_error, &clone_hooks)) {
+            self->rollback_opened_streams(clone_ctx.opened_streams);
             self->binding_ledger_.release_call(token->request_id, table.id);
             JSValue error = JS_NewError(ctx);
             JS_DefinePropertyValueStr(ctx, error, "message", JS_NewString(ctx, clone_error.c_str()),
@@ -7731,12 +7923,1281 @@ class WorkerRuntime {
         JS_FreeValue(table.ctx, ignored);
     }
 
-    // Hook invoked inside the Binding Runtime when a Promise for an already
-    // canceled/expired call fulfills late. M4B/M4C/M4D plug deterministic
-    // stream/Response/RpcTarget disposal in here so abandoned values never leak.
+    // Invoked inside the Binding Runtime when a Promise for an already
+    // canceled/expired call fulfills late. Deterministically cancels/aborts/
+    // disposes ReadableStream, WritableStream, Response, or disposable values.
     void dispose_late_binding_result(JSContext* binding_ctx, JSValueConst value) {
-        (void)binding_ctx;
-        (void)value;
+        if (binding_ctx == NULL || !JS_IsObject(value)) {
+            return;
+        }
+        for (size_t i = 0; i < binding_tables_.size(); ++i) {
+            if (binding_tables_[i].ctx == binding_ctx &&
+                JS_IsFunction(binding_ctx, binding_tables_[i].js_bridge.dispose_late_value)) {
+                JSValue arg = JS_DupValue(binding_ctx, value);
+                JSValue ret = JS_Call(binding_ctx, binding_tables_[i].js_bridge.dispose_late_value,
+                                      JS_UNDEFINED, 1, &arg);
+                JS_FreeValue(binding_ctx, arg);
+                if (JS_IsException(ret)) {
+                    JSValue exc = JS_GetException(binding_ctx);
+                    JS_FreeValue(binding_ctx, exc);
+                } else {
+                    JS_FreeValue(binding_ctx, ret);
+                }
+                return;
+            }
+        }
+    }
+
+    // --- Binding RPC v2 (M4B): Bidirectional Credit-Based Stream Proxies ---
+
+    struct BindingCloneContext {
+        WorkerRuntime* self = NULL;
+        uint64_t request_id = 0;
+        std::string binding_id;
+        size_t table_index = 0;
+        capsid::BindingStreamSide side = capsid::BindingStreamSide::kUser;
+        std::vector<uint64_t> opened_streams;
+    };
+
+    JSContext* stream_side_ctx(const capsid::BindingStreamRecord& rec,
+                               capsid::BindingStreamSide side) const {
+        if (side == capsid::BindingStreamSide::kUser) {
+            return ctx_;
+        }
+        return rec.table_index < binding_tables_.size() ? binding_tables_[rec.table_index].ctx
+                                                        : NULL;
+    }
+
+    const BindingJsBridge* stream_side_bridge(const capsid::BindingStreamRecord& rec,
+                                              capsid::BindingStreamSide side) const {
+        if (side == capsid::BindingStreamSide::kUser) {
+            return &user_binding_bridge_;
+        }
+        return rec.table_index < binding_tables_.size() ? &binding_tables_[rec.table_index].js_bridge
+                                                        : NULL;
+    }
+
+    const capsid::BindingRpcIntrinsics* stream_side_intrinsics(
+        const capsid::BindingStreamRecord& rec, capsid::BindingStreamSide side) const {
+        if (side == capsid::BindingStreamSide::kUser) {
+            return &user_binding_intrinsics_;
+        }
+        return rec.table_index < binding_tables_.size()
+                   ? &binding_tables_[rec.table_index].intrinsics
+                   : NULL;
+    }
+
+    void schedule_stream_work(uint64_t stream_id) {
+        if (stream_id == 0 || shutting_down_) {
+            return;
+        }
+        if (stream_work_set_.insert(stream_id).second) {
+            stream_work_queue_.push_back(stream_id);
+        }
+        binding_scheduler_.wake();
+    }
+
+    static JSValue resolved_undefined_promise(JSContext* ctx) {
+        JSValue resolving[2];
+        JSValue promise = JS_NewPromiseCapability(ctx, resolving);
+        if (JS_IsException(promise)) {
+            return promise;
+        }
+        JSValue undef = JS_UNDEFINED;
+        JSValue ignored = JS_Call(ctx, resolving[0], JS_UNDEFINED, 1, &undef);
+        JS_FreeValue(ctx, ignored);
+        JS_FreeValue(ctx, resolving[0]);
+        JS_FreeValue(ctx, resolving[1]);
+        return promise;
+    }
+
+    static void call_js_method_ignore(JSContext* ctx, JSValueConst obj, const char* name, int argc,
+                                      JSValueConst* argv) {
+        if (ctx == NULL || !JS_IsObject(obj)) {
+            return;
+        }
+        JSValue fn = JS_GetPropertyStr(ctx, obj, name);
+        if (JS_IsException(fn)) {
+            JSValue exc = JS_GetException(ctx);
+            JS_FreeValue(ctx, exc);
+            return;
+        }
+        if (JS_IsFunction(ctx, fn)) {
+            JSValue ret = JS_Call(ctx, fn, obj, argc, argv);
+            if (JS_IsException(ret)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+            } else {
+                JS_FreeValue(ctx, ret);
+            }
+        }
+        JS_FreeValue(ctx, fn);
+    }
+
+    static void settle_and_clear_promise(JSContext* ctx, JSValue* resolve_slot,
+                                         JSValue* reject_slot, bool is_reject,
+                                         JSValueConst arg) {
+        if (ctx == NULL) {
+            return;
+        }
+        JSValue fn = is_reject ? *reject_slot : *resolve_slot;
+        JSValue other = is_reject ? *resolve_slot : *reject_slot;
+        *resolve_slot = JS_UNDEFINED;
+        *reject_slot = JS_UNDEFINED;
+        JS_FreeValue(ctx, other);
+        if (JS_IsFunction(ctx, fn)) {
+            JSValue val = JS_DupValue(ctx, arg);
+            JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 1, &val);
+            JS_FreeValue(ctx, val);
+            if (JS_IsException(ret)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+            } else {
+                JS_FreeValue(ctx, ret);
+            }
+        }
+        JS_FreeValue(ctx, fn);
+    }
+
+    bool verify_user_stream_owner(JSContext* ctx, const capsid::BindingStreamRecord& rec,
+                                  JSValue* out_rejection) {
+        if (ctx != ctx_) {
+            return true;
+        }
+        RequestToken* token = require_active_request(ctx, 0, false, true);
+        if (token != NULL && token->request_id == rec.owner_request_id) {
+            return true;
+        }
+        JSValue err = capsid::materialize_remote_error(
+            ctx,
+            capsid::RemoteErrorInfo::make_dom_exception(
+                "InvalidStateError",
+                "Cannot use Binding stream proxy outside its owning request"),
+            &user_binding_intrinsics_);
+        *out_rejection = rejected_promise(ctx, err);
+        return false;
+    }
+
+    static capsid::BindingCloneHookResult try_capture_binding_object(
+        JSContext* ctx, JSValueConst value, capsid::NeutralValue* out, std::string* error,
+        void* opaque) {
+        BindingCloneContext* cctx = static_cast<BindingCloneContext*>(opaque);
+        if (cctx == NULL || cctx->self == NULL) {
+            return capsid::BindingCloneHookResult::kUnhandled;
+        }
+        WorkerRuntime* self = cctx->self;
+        const BindingJsBridge* bridge =
+            (cctx->side == capsid::BindingStreamSide::kUser)
+                ? &self->user_binding_bridge_
+                : (cctx->table_index < self->binding_tables_.size()
+                       ? &self->binding_tables_[cctx->table_index].js_bridge
+                       : NULL);
+        if (bridge == NULL) {
+            return capsid::BindingCloneHookResult::kUnhandled;
+        }
+
+        // 1. ReadableStream transfer check (brand + unlocked + undisturbed).
+        if (JS_IsFunction(ctx, bridge->check_readable_transferable)) {
+            JSValue arg = JS_DupValue(ctx, value);
+            JSValue rc =
+                JS_Call(ctx, bridge->check_readable_transferable, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            if (JS_IsException(rc)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+            } else {
+                int32_t status = -1;
+                JS_ToInt32(ctx, &status, rc);
+                JS_FreeValue(ctx, rc);
+                if (status == 1) {
+                    if (error != NULL) *error = "ReadableStream is locked";
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                if (status == 2) {
+                    if (error != NULL) *error = "ReadableStream is disturbed or closed";
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                if (status == 0) {
+                    uint64_t stream_id = 0;
+                    capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
+                    if (!self->binding_streams_.open_stream(
+                            capsid::BindingStreamKind::kReadable, cctx->side, cctx->request_id,
+                            cctx->binding_id, cctx->table_index, &stream_id, &qerr)) {
+                        if (error != NULL) *error = capsid::binding_quota_error_message(qerr);
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    JSValue id_js = capsid::binding_call_id_to_js(ctx, stream_id);
+                    JSValue on_chunk = JS_NewCFunctionData2(
+                        ctx, on_binding_readable_chunk, "onStreamChunk", 1, 0, 1, &id_js);
+                    JSValue on_end = JS_NewCFunctionData2(
+                        ctx, on_binding_readable_end, "onStreamEnd", 0, 0, 1, &id_js);
+                    JSValue on_err = JS_NewCFunctionData2(
+                        ctx, on_binding_readable_error, "onStreamError", 1, 0, 1, &id_js);
+                    JS_FreeValue(ctx, id_js);
+                    if (JS_IsException(on_chunk) || JS_IsException(on_end) ||
+                        JS_IsException(on_err)) {
+                        JS_FreeValue(ctx, on_chunk);
+                        JS_FreeValue(ctx, on_end);
+                        JS_FreeValue(ctx, on_err);
+                        self->binding_streams_.close_and_erase(stream_id);
+                        if (error != NULL) *error = "failed to allocate stream callbacks";
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    JSValue args[4] = {JS_DupValue(ctx, value), on_chunk, on_end, on_err};
+                    JSValue src_handle =
+                        JS_Call(ctx, bridge->attach_readable_source, JS_UNDEFINED, 4, args);
+                    JS_FreeValue(ctx, args[0]);
+                    if (JS_IsException(src_handle) || !JS_IsObject(src_handle)) {
+                        if (JS_IsException(src_handle)) {
+                            JSValue exc = JS_GetException(ctx);
+                            JS_FreeValue(ctx, exc);
+                        } else {
+                            JS_FreeValue(ctx, src_handle);
+                        }
+                        JS_FreeValue(ctx, on_chunk);
+                        JS_FreeValue(ctx, on_end);
+                        JS_FreeValue(ctx, on_err);
+                        self->binding_streams_.close_and_erase(stream_id);
+                        if (error != NULL) *error = "failed to lock ReadableStream source";
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    ActiveBindingStream ep;
+                    ep.readable_source = src_handle;
+                    ep.on_chunk_cb = on_chunk;
+                    ep.on_end_cb = on_end;
+                    ep.on_error_cb = on_err;
+                    self->active_binding_streams_.emplace(stream_id, std::move(ep));
+                    cctx->opened_streams.push_back(stream_id);
+                    out->kind = capsid::NeutralValue::Kind::kReadableStreamProxy;
+                    out->stream_id = stream_id;
+                    return capsid::BindingCloneHookResult::kCaptured;
+                }
+            }
+        }
+
+        // 2. WritableStream transfer check (brand + unlocked + writable).
+        if (JS_IsFunction(ctx, bridge->check_writable_transferable)) {
+            JSValue arg = JS_DupValue(ctx, value);
+            JSValue rc =
+                JS_Call(ctx, bridge->check_writable_transferable, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            if (JS_IsException(rc)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+            } else {
+                int32_t status = -1;
+                JS_ToInt32(ctx, &status, rc);
+                JS_FreeValue(ctx, rc);
+                if (status == 1) {
+                    if (error != NULL) *error = "WritableStream is locked";
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                if (status == 2) {
+                    if (error != NULL) *error = "WritableStream is closed or errored";
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                if (status == 0) {
+                    // For WritableStream, the transferring side owns the sink
+                    // (consumer) while the receiving side gets the writer proxy
+                    // (producer).
+                    const capsid::BindingStreamSide producer_side =
+                        (cctx->side == capsid::BindingStreamSide::kUser)
+                            ? capsid::BindingStreamSide::kBinding
+                            : capsid::BindingStreamSide::kUser;
+                    uint64_t stream_id = 0;
+                    capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
+                    if (!self->binding_streams_.open_stream(
+                            capsid::BindingStreamKind::kWritable, producer_side, cctx->request_id,
+                            cctx->binding_id, cctx->table_index, &stream_id, &qerr)) {
+                        if (error != NULL) *error = capsid::binding_quota_error_message(qerr);
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    JSValue id_js = capsid::binding_call_id_to_js(ctx, stream_id);
+                    JSValue on_wdone = JS_NewCFunctionData2(
+                        ctx, on_binding_writable_write_done, "onSinkWriteDone", 0, 0, 1, &id_js);
+                    JSValue on_werr = JS_NewCFunctionData2(
+                        ctx, on_binding_writable_write_err, "onSinkWriteErr", 1, 0, 1, &id_js);
+                    JSValue on_cdone = JS_NewCFunctionData2(
+                        ctx, on_binding_writable_close_done, "onSinkCloseDone", 0, 0, 1, &id_js);
+                    JSValue on_cerr = JS_NewCFunctionData2(
+                        ctx, on_binding_writable_close_err, "onSinkCloseErr", 1, 0, 1, &id_js);
+                    JS_FreeValue(ctx, id_js);
+                    if (JS_IsException(on_wdone) || JS_IsException(on_werr) ||
+                        JS_IsException(on_cdone) || JS_IsException(on_cerr)) {
+                        JS_FreeValue(ctx, on_wdone);
+                        JS_FreeValue(ctx, on_werr);
+                        JS_FreeValue(ctx, on_cdone);
+                        JS_FreeValue(ctx, on_cerr);
+                        self->binding_streams_.close_and_erase(stream_id);
+                        if (error != NULL) *error = "failed to allocate writable sink callbacks";
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    JSValue sink_arg = JS_DupValue(ctx, value);
+                    JSValue sink_handle =
+                        JS_Call(ctx, bridge->attach_writable_source, JS_UNDEFINED, 1, &sink_arg);
+                    JS_FreeValue(ctx, sink_arg);
+                    if (JS_IsException(sink_handle) || !JS_IsObject(sink_handle)) {
+                        if (JS_IsException(sink_handle)) {
+                            JSValue exc = JS_GetException(ctx);
+                            JS_FreeValue(ctx, exc);
+                        } else {
+                            JS_FreeValue(ctx, sink_handle);
+                        }
+                        JS_FreeValue(ctx, on_wdone);
+                        JS_FreeValue(ctx, on_werr);
+                        JS_FreeValue(ctx, on_cdone);
+                        JS_FreeValue(ctx, on_cerr);
+                        self->binding_streams_.close_and_erase(stream_id);
+                        if (error != NULL) *error = "failed to lock WritableStream sink";
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    ActiveBindingStream ep;
+                    ep.writable_sink = sink_handle;
+                    ep.on_write_done_cb = on_wdone;
+                    ep.on_write_err_cb = on_werr;
+                    ep.on_close_done_cb = on_cdone;
+                    ep.on_close_err_cb = on_cerr;
+                    self->active_binding_streams_.emplace(stream_id, std::move(ep));
+                    cctx->opened_streams.push_back(stream_id);
+                    out->kind = capsid::NeutralValue::Kind::kWritableStreamProxy;
+                    out->stream_id = stream_id;
+                    return capsid::BindingCloneHookResult::kCaptured;
+                }
+            }
+        }
+        return capsid::BindingCloneHookResult::kUnhandled;
+    }
+
+    static JSValue materialize_binding_object(JSContext* ctx, const capsid::NeutralValue& value,
+                                              void* opaque) {
+        BindingCloneContext* mctx = static_cast<BindingCloneContext*>(opaque);
+        if (mctx == NULL || mctx->self == NULL) {
+            return JS_ThrowInternalError(ctx, "binding proxy context missing");
+        }
+        WorkerRuntime* self = mctx->self;
+        const BindingJsBridge* bridge =
+            (mctx->side == capsid::BindingStreamSide::kUser)
+                ? &self->user_binding_bridge_
+                : (mctx->table_index < self->binding_tables_.size()
+                       ? &self->binding_tables_[mctx->table_index].js_bridge
+                       : NULL);
+        if (bridge == NULL) {
+            return JS_ThrowInternalError(ctx, "binding js bridge missing");
+        }
+
+        if (value.kind == capsid::NeutralValue::Kind::kReadableStreamProxy) {
+            capsid::BindingStreamRecord* rec = self->binding_streams_.find(value.stream_id);
+            auto ep_it = self->active_binding_streams_.find(value.stream_id);
+            if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+                return JS_ThrowInternalError(ctx, "binding readable stream proxy expired");
+            }
+            JSValue id_js = capsid::binding_call_id_to_js(ctx, value.stream_id);
+            JSValue on_pull = JS_NewCFunctionData2(
+                ctx, js_binding_readable_pull, "onProxyPull", 0, 0, 1, &id_js);
+            JSValue on_cancel = JS_NewCFunctionData2(
+                ctx, js_binding_readable_cancel, "onProxyCancel", 1, 0, 1, &id_js);
+            JS_FreeValue(ctx, id_js);
+            if (JS_IsException(on_pull) || JS_IsException(on_cancel)) {
+                JS_FreeValue(ctx, on_pull);
+                JS_FreeValue(ctx, on_cancel);
+                return JS_EXCEPTION;
+            }
+            JSValue args[2] = {on_pull, on_cancel};
+            JSValue created =
+                JS_Call(ctx, bridge->create_readable_proxy, JS_UNDEFINED, 2, args);
+            JS_FreeValue(ctx, on_pull);
+            JS_FreeValue(ctx, on_cancel);
+            if (JS_IsException(created) || !JS_IsObject(created)) {
+                JS_FreeValue(ctx, created);
+                return JS_EXCEPTION;
+            }
+            JSValue stream = JS_GetPropertyStr(ctx, created, "stream");
+            if (JS_IsException(stream)) {
+                JS_FreeValue(ctx, created);
+                return stream;
+            }
+            ep_it->second.readable_proxy_ctrl = created;
+            self->schedule_stream_work(value.stream_id);
+            return stream;
+        }
+
+        if (value.kind == capsid::NeutralValue::Kind::kWritableStreamProxy) {
+            capsid::BindingStreamRecord* rec = self->binding_streams_.find(value.stream_id);
+            auto ep_it = self->active_binding_streams_.find(value.stream_id);
+            if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+                return JS_ThrowInternalError(ctx, "binding writable stream proxy expired");
+            }
+            JSValue id_js = capsid::binding_call_id_to_js(ctx, value.stream_id);
+            JSValue on_write = JS_NewCFunctionData2(
+                ctx, js_binding_writable_write, "onProxyWrite", 1, 0, 1, &id_js);
+            JSValue on_close = JS_NewCFunctionData2(
+                ctx, js_binding_writable_close, "onProxyClose", 0, 0, 1, &id_js);
+            JSValue on_abort = JS_NewCFunctionData2(
+                ctx, js_binding_writable_abort, "onProxyAbort", 1, 0, 1, &id_js);
+            JS_FreeValue(ctx, id_js);
+            if (JS_IsException(on_write) || JS_IsException(on_close) || JS_IsException(on_abort)) {
+                JS_FreeValue(ctx, on_write);
+                JS_FreeValue(ctx, on_close);
+                JS_FreeValue(ctx, on_abort);
+                return JS_EXCEPTION;
+            }
+            JSValue args[3] = {on_write, on_close, on_abort};
+            JSValue created =
+                JS_Call(ctx, bridge->create_writable_proxy, JS_UNDEFINED, 3, args);
+            JS_FreeValue(ctx, on_write);
+            JS_FreeValue(ctx, on_close);
+            JS_FreeValue(ctx, on_abort);
+            if (JS_IsException(created) || !JS_IsObject(created)) {
+                JS_FreeValue(ctx, created);
+                return JS_EXCEPTION;
+            }
+            JSValue stream = JS_GetPropertyStr(ctx, created, "stream");
+            if (JS_IsException(stream)) {
+                JS_FreeValue(ctx, created);
+                return stream;
+            }
+            ep_it->second.writable_proxy_ctrl = created;
+            return stream;
+        }
+
+        return JS_ThrowInternalError(ctx, "unsupported binding proxy kind");
+    }
+
+    void rollback_opened_streams(const std::vector<uint64_t>& ids) {
+        for (size_t i = 0; i < ids.size(); ++i) {
+            teardown_binding_stream(ids[i], true);
+        }
+    }
+
+    void teardown_unmaterialized_streams_in_value(const capsid::NeutralValue& value) {
+        if (value.kind == capsid::NeutralValue::Kind::kReadableStreamProxy ||
+            value.kind == capsid::NeutralValue::Kind::kWritableStreamProxy) {
+            teardown_binding_stream(value.stream_id, true);
+            return;
+        }
+        if (value.kind == capsid::NeutralValue::Kind::kArray) {
+            for (size_t i = 0; i < value.array.size(); ++i) {
+                teardown_unmaterialized_streams_in_value(value.array[i]);
+            }
+        } else if (value.kind == capsid::NeutralValue::Kind::kObject) {
+            for (size_t i = 0; i < value.object.size(); ++i) {
+                teardown_unmaterialized_streams_in_value(value.object[i].second);
+            }
+        }
+    }
+
+    // ReadableStream producer callbacks
+    static JSValue on_binding_readable_chunk(JSContext* ctx, JSValueConst, int argc,
+                                             JSValueConst* argv, int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return JS_UNDEFINED;
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        if (rec == NULL) {
+            return JS_UNDEFINED;
+        }
+        rec->producer_pull_inflight = false;
+        if (rec->state != capsid::BindingStreamState::kOpen) {
+            self->schedule_stream_work(stream_id);
+            return JS_UNDEFINED;
+        }
+        JSValueConst chunk = argc > 0 ? argv[0] : JS_UNDEFINED;
+        const BindingJsBridge* bridge = self->stream_side_bridge(*rec, rec->producer_side);
+        bool enqueued_ok = false;
+        std::string err_msg;
+
+        if (bridge != NULL && JS_IsFunction(ctx, bridge->extract_bytes)) {
+            JSValue arg = JS_DupValue(ctx, chunk);
+            JSValue bytes_val = JS_Call(ctx, bridge->extract_bytes, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            if (JS_IsException(bytes_val)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+            } else if (!JS_IsNull(bytes_val) && !JS_IsUndefined(bytes_val)) {
+                size_t len = 0;
+                uint8_t* ptr = JS_GetUint8Array(ctx, &len, bytes_val);
+                if (ptr != NULL || len == 0) {
+                    enqueued_ok = true;
+                    if (len == 0) {
+                        enqueued_ok =
+                            self->binding_streams_.enqueue_bytes(stream_id, NULL, 0, &err_msg);
+                    } else {
+                        for (size_t off = 0; off < len;
+                             off += capsid::kBindingStreamMaxChunkBytes) {
+                            const size_t piece =
+                                std::min(capsid::kBindingStreamMaxChunkBytes, len - off);
+                            if (!self->binding_streams_.enqueue_bytes(stream_id, ptr + off, piece,
+                                                                      &err_msg)) {
+                                enqueued_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                JS_FreeValue(ctx, bytes_val);
+                if (!enqueued_ok) {
+                    self->binding_streams_.fail_from_producer(
+                        stream_id, capsid::RemoteErrorInfo::make_error(
+                                       err_msg.empty() ? "stream chunk failed" : err_msg));
+                    self->schedule_stream_work(stream_id);
+                    return JS_UNDEFINED;
+                }
+                self->schedule_stream_work(stream_id);
+                return JS_UNDEFINED;
+            } else {
+                JS_FreeValue(ctx, bytes_val);
+            }
+        }
+
+        // Non-byte chunk: structured clone as bounded NeutralValue.
+        capsid::NeutralValue nv;
+        if (!capsid::neutral_from_js(ctx, chunk, &nv, &err_msg)) {
+            self->binding_streams_.fail_from_producer(
+                stream_id, capsid::RemoteErrorInfo::make_type_error("stream chunk is not cloneable: " +
+                                                                    err_msg));
+        } else {
+            const size_t weight = capsid::estimate_neutral_value_bytes(nv);
+            if (!self->binding_streams_.enqueue_value(stream_id, std::move(nv), weight, &err_msg)) {
+                self->binding_streams_.fail_from_producer(
+                    stream_id, capsid::RemoteErrorInfo::make_error(err_msg));
+            }
+        }
+        self->schedule_stream_work(stream_id);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue on_binding_readable_end(JSContext* ctx, JSValueConst, int, JSValueConst*, int,
+                                           JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return JS_UNDEFINED;
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        if (rec == NULL) {
+            return JS_UNDEFINED;
+        }
+        rec->producer_pull_inflight = false;
+        self->binding_streams_.enqueue_end(stream_id);
+        self->schedule_stream_work(stream_id);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue on_binding_readable_error(JSContext* ctx, JSValueConst, int argc,
+                                             JSValueConst* argv, int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return JS_UNDEFINED;
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        if (rec == NULL) {
+            return JS_UNDEFINED;
+        }
+        rec->producer_pull_inflight = false;
+        capsid::RemoteErrorInfo info;
+        capsid::capture_remote_error(ctx, argc > 0 ? argv[0] : JS_UNDEFINED,
+                                     self->stream_side_intrinsics(*rec, rec->producer_side),
+                                     "binding stream errored", &info);
+        self->binding_streams_.fail_from_producer(stream_id, info);
+        self->schedule_stream_work(stream_id);
+        return JS_UNDEFINED;
+    }
+
+    // ReadableStream consumer proxy callbacks
+    static JSValue js_binding_readable_pull(JSContext* ctx, JSValueConst, int, JSValueConst*, int,
+                                            JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return resolved_undefined_promise(ctx);
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+            return resolved_undefined_promise(ctx);
+        }
+        JSValue rejection = JS_UNDEFINED;
+        if (!self->verify_user_stream_owner(ctx, *rec, &rejection)) {
+            return rejection;
+        }
+        JSValue resolving[2];
+        JSValue promise = JS_NewPromiseCapability(ctx, resolving);
+        if (JS_IsException(promise)) {
+            return promise;
+        }
+        JS_FreeValue(ctx, ep_it->second.pull_resolve);
+        JS_FreeValue(ctx, ep_it->second.pull_reject);
+        ep_it->second.pull_resolve = resolving[0];
+        ep_it->second.pull_reject = resolving[1];
+        rec->consumer_waiting = true;
+        self->schedule_stream_work(stream_id);
+        return promise;
+    }
+
+    static JSValue js_binding_readable_cancel(JSContext* ctx, JSValueConst, int argc,
+                                              JSValueConst* argv, int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return resolved_undefined_promise(ctx);
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+            return resolved_undefined_promise(ctx);
+        }
+        JSValue rejection = JS_UNDEFINED;
+        if (!self->verify_user_stream_owner(ctx, *rec, &rejection)) {
+            return rejection;
+        }
+        capsid::RemoteErrorInfo reason;
+        capsid::capture_remote_error(ctx, argc > 0 ? argv[0] : JS_UNDEFINED,
+                                     self->stream_side_intrinsics(*rec, rec->consumer_side),
+                                     "stream canceled", &reason);
+        self->binding_streams_.cancel_from_consumer(stream_id, reason);
+        rec->consumer_waiting = false;
+        settle_and_clear_promise(ctx, &ep_it->second.pull_resolve, &ep_it->second.pull_reject,
+                                 false, JS_UNDEFINED);
+        self->schedule_stream_work(stream_id);
+        return resolved_undefined_promise(ctx);
+    }
+
+    // WritableStream producer proxy callbacks
+    static JSValue js_binding_writable_write(JSContext* ctx, JSValueConst, int argc,
+                                             JSValueConst* argv, int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return rejected_promise(
+                ctx, capsid::materialize_remote_error(
+                         ctx,
+                         capsid::RemoteErrorInfo::make_dom_exception("InvalidStateError",
+                                                                     "binding writable stream closed"),
+                         NULL));
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+            return rejected_promise(
+                ctx, capsid::materialize_remote_error(
+                         ctx,
+                         capsid::RemoteErrorInfo::make_dom_exception("InvalidStateError",
+                                                                     "binding writable stream closed"),
+                         ctx == self->ctx_ ? &self->user_binding_intrinsics_ : NULL));
+        }
+        JSValue rejection = JS_UNDEFINED;
+        if (!self->verify_user_stream_owner(ctx, *rec, &rejection)) {
+            return rejection;
+        }
+        const capsid::BindingRpcIntrinsics* intr =
+            self->stream_side_intrinsics(*rec, rec->producer_side);
+        if (rec->state != capsid::BindingStreamState::kOpen) {
+            const capsid::RemoteErrorInfo err =
+                rec->has_terminal_error
+                    ? rec->terminal_error
+                    : capsid::RemoteErrorInfo::make_dom_exception("InvalidStateError",
+                                                                  "binding writable stream closed");
+            return rejected_promise(ctx, capsid::materialize_remote_error(ctx, err, intr));
+        }
+
+        PendingStreamWrite pw;
+        JSValueConst chunk = argc > 0 ? argv[0] : JS_UNDEFINED;
+        const BindingJsBridge* bridge = self->stream_side_bridge(*rec, rec->producer_side);
+        bool parsed_bytes = false;
+        if (bridge != NULL && JS_IsFunction(ctx, bridge->extract_bytes)) {
+            JSValue arg = JS_DupValue(ctx, chunk);
+            JSValue bytes_val = JS_Call(ctx, bridge->extract_bytes, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            if (JS_IsException(bytes_val)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+            } else if (!JS_IsNull(bytes_val) && !JS_IsUndefined(bytes_val)) {
+                size_t len = 0;
+                uint8_t* ptr = JS_GetUint8Array(ctx, &len, bytes_val);
+                if (ptr != NULL || len == 0) {
+                    pw.is_bytes = true;
+                    if (len > 0 && ptr != NULL) {
+                        pw.bytes.assign(ptr, ptr + len);
+                    }
+                    pw.accounted_bytes = len;
+                    parsed_bytes = true;
+                }
+                JS_FreeValue(ctx, bytes_val);
+            } else {
+                JS_FreeValue(ctx, bytes_val);
+            }
+        }
+        if (!parsed_bytes) {
+            std::string clone_err;
+            if (!capsid::neutral_from_js(ctx, chunk, &pw.value, &clone_err)) {
+                return rejected_promise(
+                    ctx, capsid::materialize_remote_error(
+                             ctx,
+                             capsid::RemoteErrorInfo::make_type_error(
+                                 "writable stream chunk is not cloneable: " + clone_err),
+                             intr));
+            }
+            pw.accounted_bytes = capsid::estimate_neutral_value_bytes(pw.value);
+        }
+
+        JSValue resolving[2];
+        JSValue promise = JS_NewPromiseCapability(ctx, resolving);
+        if (JS_IsException(promise)) {
+            return promise;
+        }
+        pw.resolve = resolving[0];
+        pw.reject = resolving[1];
+        ep_it->second.pending_writes.push_back(std::move(pw));
+        self->schedule_stream_work(stream_id);
+        return promise;
+    }
+
+    static JSValue js_binding_writable_close(JSContext* ctx, JSValueConst, int, JSValueConst*, int,
+                                             JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return resolved_undefined_promise(ctx);
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+            return resolved_undefined_promise(ctx);
+        }
+        JSValue rejection = JS_UNDEFINED;
+        if (!self->verify_user_stream_owner(ctx, *rec, &rejection)) {
+            return rejection;
+        }
+        JSValue resolving[2];
+        JSValue promise = JS_NewPromiseCapability(ctx, resolving);
+        if (JS_IsException(promise)) {
+            return promise;
+        }
+        JS_FreeValue(ctx, ep_it->second.close_resolve);
+        JS_FreeValue(ctx, ep_it->second.close_reject);
+        ep_it->second.close_resolve = resolving[0];
+        ep_it->second.close_reject = resolving[1];
+        ep_it->second.close_waiting = true;
+        self->schedule_stream_work(stream_id);
+        return promise;
+    }
+
+    static JSValue js_binding_writable_abort(JSContext* ctx, JSValueConst, int argc,
+                                             JSValueConst* argv, int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return resolved_undefined_promise(ctx);
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        if (rec == NULL) {
+            return resolved_undefined_promise(ctx);
+        }
+        JSValue rejection = JS_UNDEFINED;
+        if (!self->verify_user_stream_owner(ctx, *rec, &rejection)) {
+            return rejection;
+        }
+        capsid::RemoteErrorInfo reason;
+        capsid::capture_remote_error(ctx, argc > 0 ? argv[0] : JS_UNDEFINED,
+                                     self->stream_side_intrinsics(*rec, rec->producer_side),
+                                     "writable stream aborted", &reason);
+        self->binding_streams_.fail_from_producer(stream_id, reason);
+        self->schedule_stream_work(stream_id);
+        return resolved_undefined_promise(ctx);
+    }
+
+    // WritableStream consumer sink callbacks
+    static JSValue on_binding_writable_write_done(JSContext* ctx, JSValueConst, int, JSValueConst*,
+                                                  int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return JS_UNDEFINED;
+        }
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (ep_it == self->active_binding_streams_.end()) {
+            return JS_UNDEFINED;
+        }
+        ep_it->second.sink_write_inflight = false;
+        const size_t drained = ep_it->second.last_sink_write_bytes;
+        ep_it->second.last_sink_write_bytes = 0;
+        self->binding_streams_.grant_credit(stream_id, drained > 0 ? drained : 1);
+        self->schedule_stream_work(stream_id);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue on_binding_writable_write_err(JSContext* ctx, JSValueConst, int argc,
+                                                 JSValueConst* argv, int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return JS_UNDEFINED;
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+            return JS_UNDEFINED;
+        }
+        ep_it->second.sink_write_inflight = false;
+        capsid::RemoteErrorInfo err;
+        capsid::capture_remote_error(ctx, argc > 0 ? argv[0] : JS_UNDEFINED,
+                                     self->stream_side_intrinsics(*rec, rec->consumer_side),
+                                     "writable sink write failed", &err);
+        self->binding_streams_.cancel_from_consumer(stream_id, err);
+        self->schedule_stream_work(stream_id);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue on_binding_writable_close_done(JSContext* ctx, JSValueConst, int, JSValueConst*,
+                                                  int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return JS_UNDEFINED;
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+            return JS_UNDEFINED;
+        }
+        ep_it->second.sink_close_inflight = false;
+        JSContext* producer_ctx = self->stream_side_ctx(*rec, rec->producer_side);
+        if (producer_ctx != NULL) {
+            if (rec->producer_side == capsid::BindingStreamSide::kBinding) {
+                BindingWindowGuard guard(self->current_binding_id_,
+                                         self->current_binding_request_id_, rec->owner_binding_id,
+                                         rec->owner_request_id);
+                settle_and_clear_promise(producer_ctx, &ep_it->second.close_resolve,
+                                         &ep_it->second.close_reject, false, JS_UNDEFINED);
+            } else {
+                UserRequestTokenGuard guard(self, rec->owner_request_id);
+                settle_and_clear_promise(producer_ctx, &ep_it->second.close_resolve,
+                                         &ep_it->second.close_reject, false, JS_UNDEFINED);
+            }
+        }
+        self->teardown_binding_stream(stream_id, false);
+        return JS_UNDEFINED;
+    }
+
+    static JSValue on_binding_writable_close_err(JSContext* ctx, JSValueConst, int argc,
+                                                 JSValueConst* argv, int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t stream_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
+            return JS_UNDEFINED;
+        }
+        capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
+        auto ep_it = self->active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == self->active_binding_streams_.end()) {
+            return JS_UNDEFINED;
+        }
+        ep_it->second.sink_close_inflight = false;
+        capsid::RemoteErrorInfo err;
+        capsid::capture_remote_error(ctx, argc > 0 ? argv[0] : JS_UNDEFINED,
+                                     self->stream_side_intrinsics(*rec, rec->consumer_side),
+                                     "writable sink close failed", &err);
+        JSContext* producer_ctx = self->stream_side_ctx(*rec, rec->producer_side);
+        if (producer_ctx != NULL) {
+            JSValue mat = capsid::materialize_remote_error(
+                producer_ctx, err, self->stream_side_intrinsics(*rec, rec->producer_side));
+            if (rec->producer_side == capsid::BindingStreamSide::kBinding) {
+                BindingWindowGuard guard(self->current_binding_id_,
+                                         self->current_binding_request_id_, rec->owner_binding_id,
+                                         rec->owner_request_id);
+                settle_and_clear_promise(producer_ctx, &ep_it->second.close_resolve,
+                                         &ep_it->second.close_reject, true, mat);
+            } else {
+                UserRequestTokenGuard guard(self, rec->owner_request_id);
+                settle_and_clear_promise(producer_ctx, &ep_it->second.close_resolve,
+                                         &ep_it->second.close_reject, true, mat);
+            }
+            JS_FreeValue(producer_ctx, mat);
+        }
+        self->teardown_binding_stream(stream_id, false);
+        return JS_UNDEFINED;
+    }
+
+    void pump_binding_streams() {
+        const size_t budget = binding_scheduler_.config().max_control_frames_per_turn;
+        for (size_t step = 0; step < budget && !stream_work_queue_.empty() && !shutting_down_;
+             ++step) {
+            const uint64_t stream_id = stream_work_queue_.front();
+            stream_work_queue_.pop_front();
+            stream_work_set_.erase(stream_id);
+            advance_binding_stream(stream_id);
+        }
+        if (!stream_work_queue_.empty() && !shutting_down_) {
+            binding_scheduler_.wake();
+        }
+    }
+
+    void advance_binding_stream(uint64_t stream_id) {
+        capsid::BindingStreamRecord* rec = binding_streams_.find(stream_id);
+        auto ep_it = active_binding_streams_.find(stream_id);
+        if (rec == NULL || ep_it == active_binding_streams_.end()) {
+            return;
+        }
+        ActiveBindingStream& ep = ep_it->second;
+        JSContext* producer_ctx = stream_side_ctx(*rec, rec->producer_side);
+        JSContext* consumer_ctx = stream_side_ctx(*rec, rec->consumer_side);
+        if (producer_ctx == NULL || consumer_ctx == NULL) {
+            teardown_binding_stream(stream_id, false);
+            return;
+        }
+
+        if (rec->kind == capsid::BindingStreamKind::kReadable) {
+            if (rec->state == capsid::BindingStreamState::kCanceled) {
+                teardown_binding_stream(stream_id, true);
+                return;
+            }
+            // 1. Deliver 1 frame to waiting consumer.
+            if (rec->consumer_waiting && !rec->queue.empty() &&
+                JS_IsObject(ep.readable_proxy_ctrl)) {
+                capsid::BindingStreamFrame frame;
+                if (binding_streams_.pop_frame(stream_id, &frame)) {
+                    rec->consumer_waiting = false;
+                    const bool consumer_is_binding =
+                        (rec->consumer_side == capsid::BindingStreamSide::kBinding);
+                    auto deliver = [&]() {
+                        if (frame.type == capsid::BindingStreamFrame::Type::kBytes) {
+                            JSValue chunk = JS_NewUint8ArrayCopy(
+                                consumer_ctx, frame.bytes.data(), frame.bytes.size());
+                            call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl, "enqueue",
+                                                  1, &chunk);
+                            JS_FreeValue(consumer_ctx, chunk);
+                            binding_streams_.grant_credit(
+                                stream_id, frame.accounted_bytes > 0 ? frame.accounted_bytes : 1);
+                            settle_and_clear_promise(consumer_ctx, &ep.pull_resolve,
+                                                     &ep.pull_reject, false, JS_UNDEFINED);
+                        } else if (frame.type == capsid::BindingStreamFrame::Type::kValue) {
+                            JSValue chunk = capsid::neutral_to_js(consumer_ctx, frame.value);
+                            if (JS_IsException(chunk)) {
+                                JSValue exc = JS_GetException(consumer_ctx);
+                                call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl, "error",
+                                                      1, &exc);
+                                JS_FreeValue(consumer_ctx, exc);
+                            } else {
+                                call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl,
+                                                      "enqueue", 1, &chunk);
+                                JS_FreeValue(consumer_ctx, chunk);
+                            }
+                            binding_streams_.grant_credit(
+                                stream_id, frame.accounted_bytes > 0 ? frame.accounted_bytes : 1);
+                            settle_and_clear_promise(consumer_ctx, &ep.pull_resolve,
+                                                     &ep.pull_reject, false, JS_UNDEFINED);
+                        } else if (frame.type == capsid::BindingStreamFrame::Type::kEnd) {
+                            call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl, "close", 0,
+                                                  NULL);
+                            settle_and_clear_promise(consumer_ctx, &ep.pull_resolve,
+                                                     &ep.pull_reject, false, JS_UNDEFINED);
+                        } else if (frame.type == capsid::BindingStreamFrame::Type::kError) {
+                            JSValue err = capsid::materialize_remote_error(
+                                consumer_ctx, frame.error,
+                                stream_side_intrinsics(*rec, rec->consumer_side));
+                            call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl, "error", 1,
+                                                  &err);
+                            JS_FreeValue(consumer_ctx, err);
+                            settle_and_clear_promise(consumer_ctx, &ep.pull_resolve,
+                                                     &ep.pull_reject, false, JS_UNDEFINED);
+                        }
+                    };
+                    if (consumer_is_binding) {
+                        BindingWindowGuard guard(current_binding_id_, current_binding_request_id_,
+                                                 rec->owner_binding_id, rec->owner_request_id);
+                        deliver();
+                    } else {
+                        UserRequestTokenGuard guard(this, rec->owner_request_id);
+                        deliver();
+                    }
+                    if (frame.type == capsid::BindingStreamFrame::Type::kEnd ||
+                        frame.type == capsid::BindingStreamFrame::Type::kError) {
+                        teardown_binding_stream(stream_id, false);
+                        return;
+                    }
+                }
+            }
+            // Re-lookup in case consumer callback mutated stream state.
+            rec = binding_streams_.find(stream_id);
+            ep_it = active_binding_streams_.find(stream_id);
+            if (rec == NULL || ep_it == active_binding_streams_.end()) {
+                return;
+            }
+            // 2. Pull next chunk from producer if credit > 0.
+            if (rec->state == capsid::BindingStreamState::kOpen && rec->credit_bytes > 0 &&
+                !rec->producer_pull_inflight &&
+                rec->queued_frames < capsid::kBindingStreamMaxQueuedFrames &&
+                JS_IsObject(ep_it->second.readable_source)) {
+                rec->producer_pull_inflight = true;
+                if (rec->producer_side == capsid::BindingStreamSide::kBinding) {
+                    BindingWindowGuard guard(current_binding_id_, current_binding_request_id_,
+                                             rec->owner_binding_id, rec->owner_request_id);
+                    call_js_method_ignore(producer_ctx, ep_it->second.readable_source, "pull", 0,
+                                          NULL);
+                } else {
+                    UserRequestTokenGuard guard(this, rec->owner_request_id);
+                    call_js_method_ignore(producer_ctx, ep_it->second.readable_source, "pull", 0,
+                                          NULL);
+                }
+            }
+            return;
+        }
+
+        // WritableStream state machine
+        if (rec->state == capsid::BindingStreamState::kCanceled ||
+            rec->state == capsid::BindingStreamState::kErrored) {
+            teardown_binding_stream(stream_id, true);
+            return;
+        }
+
+        // 1. Admit backpressured producer writes while credit > 0.
+        while (!ep.pending_writes.empty() && rec->state == capsid::BindingStreamState::kOpen &&
+               rec->credit_bytes > 0) {
+            PendingStreamWrite pw = std::move(ep.pending_writes.front());
+            ep.pending_writes.pop_front();
+            bool ok = true;
+            std::string err_msg;
+            if (pw.is_bytes) {
+                if (pw.bytes.empty()) {
+                    ok = binding_streams_.enqueue_bytes(stream_id, NULL, 0, &err_msg);
+                } else {
+                    for (size_t off = 0; off < pw.bytes.size();
+                         off += capsid::kBindingStreamMaxChunkBytes) {
+                        const size_t piece =
+                            std::min(capsid::kBindingStreamMaxChunkBytes, pw.bytes.size() - off);
+                        if (!binding_streams_.enqueue_bytes(stream_id, pw.bytes.data() + off, piece,
+                                                            &err_msg)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                ok = binding_streams_.enqueue_value(stream_id, std::move(pw.value),
+                                                    pw.accounted_bytes, &err_msg);
+            }
+            auto settle_pw = [&]() {
+                if (ok) {
+                    settle_and_clear_promise(producer_ctx, &pw.resolve, &pw.reject, false,
+                                             JS_UNDEFINED);
+                } else {
+                    JSValue err = capsid::materialize_remote_error(
+                        producer_ctx, capsid::RemoteErrorInfo::make_error(err_msg),
+                        stream_side_intrinsics(*rec, rec->producer_side));
+                    settle_and_clear_promise(producer_ctx, &pw.resolve, &pw.reject, true, err);
+                    JS_FreeValue(producer_ctx, err);
+                }
+            };
+            if (rec->producer_side == capsid::BindingStreamSide::kBinding) {
+                BindingWindowGuard guard(current_binding_id_, current_binding_request_id_,
+                                         rec->owner_binding_id, rec->owner_request_id);
+                settle_pw();
+            } else {
+                UserRequestTokenGuard guard(this, rec->owner_request_id);
+                settle_pw();
+            }
+            if (!ok) {
+                binding_streams_.fail_from_producer(stream_id,
+                                                    capsid::RemoteErrorInfo::make_error(err_msg));
+                teardown_binding_stream(stream_id, true);
+                return;
+            }
+        }
+
+        // 2. If producer called close() and all pending writes are admitted, enqueue END.
+        if (ep.close_waiting && ep.pending_writes.empty() &&
+            rec->state == capsid::BindingStreamState::kOpen) {
+            binding_streams_.enqueue_end(stream_id);
+        }
+
+        // 3. Drive consumer sink write/close one frame at a time.
+        if (!ep.sink_write_inflight && !ep.sink_close_inflight && !rec->queue.empty() &&
+            JS_IsObject(ep.writable_sink)) {
+            capsid::BindingStreamFrame frame;
+            if (binding_streams_.pop_frame(stream_id, &frame)) {
+                auto drive_sink = [&]() {
+                    if (frame.type == capsid::BindingStreamFrame::Type::kBytes) {
+                        ep.sink_write_inflight = true;
+                        ep.last_sink_write_bytes = frame.accounted_bytes;
+                        JSValue chunk = JS_NewUint8ArrayCopy(consumer_ctx, frame.bytes.data(),
+                                                             frame.bytes.size());
+                        JSValue args[3] = {chunk, ep.on_write_done_cb, ep.on_write_err_cb};
+                        call_js_method_ignore(consumer_ctx, ep.writable_sink, "write", 3, args);
+                        JS_FreeValue(consumer_ctx, chunk);
+                    } else if (frame.type == capsid::BindingStreamFrame::Type::kValue) {
+                        ep.sink_write_inflight = true;
+                        ep.last_sink_write_bytes = frame.accounted_bytes;
+                        JSValue chunk = capsid::neutral_to_js(consumer_ctx, frame.value);
+                        JSValue args[3] = {chunk, ep.on_write_done_cb, ep.on_write_err_cb};
+                        call_js_method_ignore(consumer_ctx, ep.writable_sink, "write", 3, args);
+                        JS_FreeValue(consumer_ctx, chunk);
+                    } else if (frame.type == capsid::BindingStreamFrame::Type::kEnd) {
+                        ep.sink_close_inflight = true;
+                        JSValue args[2] = {ep.on_close_done_cb, ep.on_close_err_cb};
+                        call_js_method_ignore(consumer_ctx, ep.writable_sink, "close", 2, args);
+                    }
+                };
+                if (rec->consumer_side == capsid::BindingStreamSide::kBinding) {
+                    BindingWindowGuard guard(current_binding_id_, current_binding_request_id_,
+                                             rec->owner_binding_id, rec->owner_request_id);
+                    drive_sink();
+                } else {
+                    UserRequestTokenGuard guard(this, rec->owner_request_id);
+                    drive_sink();
+                }
+            }
+        }
+    }
+
+    void teardown_binding_stream(uint64_t stream_id, bool notify_endpoints) {
+        capsid::BindingStreamRecord* rec_ptr = binding_streams_.find(stream_id);
+        auto ep_it = active_binding_streams_.find(stream_id);
+        if (rec_ptr == NULL && ep_it == active_binding_streams_.end()) {
+            return;
+        }
+        capsid::BindingStreamRecord rec_copy;
+        bool had_rec = false;
+        if (rec_ptr != NULL) {
+            rec_copy = *rec_ptr;
+            had_rec = true;
+        }
+        ActiveBindingStream ep;
+        bool had_ep = false;
+        if (ep_it != active_binding_streams_.end()) {
+            ep = std::move(ep_it->second);
+            active_binding_streams_.erase(ep_it);
+            had_ep = true;
+        }
+        binding_streams_.close_and_erase(stream_id);
+
+        if (!had_rec || !had_ep) {
+            return;
+        }
+        JSContext* producer_ctx = stream_side_ctx(rec_copy, rec_copy.producer_side);
+        JSContext* consumer_ctx = stream_side_ctx(rec_copy, rec_copy.consumer_side);
+        const capsid::RemoteErrorInfo reason =
+            rec_copy.has_terminal_error
+                ? rec_copy.terminal_error
+                : capsid::RemoteErrorInfo::make_dom_exception("AbortError",
+                                                              "binding stream was canceled");
+
+        if (notify_endpoints && !shutting_down_) {
+            if (producer_ctx != NULL) {
+                auto notify_prod = [&]() {
+                    JSValue err = capsid::materialize_remote_error(
+                        producer_ctx, reason,
+                        stream_side_intrinsics(rec_copy, rec_copy.producer_side));
+                    if (JS_IsObject(ep.readable_source)) {
+                        call_js_method_ignore(producer_ctx, ep.readable_source, "cancel", 1, &err);
+                    }
+                    if (JS_IsObject(ep.writable_proxy_ctrl)) {
+                        call_js_method_ignore(producer_ctx, ep.writable_proxy_ctrl, "error", 1,
+                                              &err);
+                    }
+                    while (!ep.pending_writes.empty()) {
+                        PendingStreamWrite pw = std::move(ep.pending_writes.front());
+                        ep.pending_writes.pop_front();
+                        settle_and_clear_promise(producer_ctx, &pw.resolve, &pw.reject, true, err);
+                    }
+                    if (!JS_IsUndefined(ep.close_reject) || !JS_IsUndefined(ep.close_resolve)) {
+                        settle_and_clear_promise(producer_ctx, &ep.close_resolve, &ep.close_reject,
+                                                 true, err);
+                    }
+                    JS_FreeValue(producer_ctx, err);
+                };
+                if (rec_copy.producer_side == capsid::BindingStreamSide::kBinding) {
+                    BindingWindowGuard guard(current_binding_id_, current_binding_request_id_,
+                                             rec_copy.owner_binding_id, rec_copy.owner_request_id);
+                    notify_prod();
+                } else {
+                    UserRequestTokenGuard guard(this, rec_copy.owner_request_id);
+                    notify_prod();
+                }
+            }
+            if (consumer_ctx != NULL) {
+                auto notify_cons = [&]() {
+                    JSValue err = capsid::materialize_remote_error(
+                        consumer_ctx, reason,
+                        stream_side_intrinsics(rec_copy, rec_copy.consumer_side));
+                    if (JS_IsObject(ep.readable_proxy_ctrl)) {
+                        call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl, "error", 1,
+                                              &err);
+                    }
+                    if (!JS_IsUndefined(ep.pull_resolve) || !JS_IsUndefined(ep.pull_reject)) {
+                        settle_and_clear_promise(consumer_ctx, &ep.pull_resolve, &ep.pull_reject,
+                                                 false, JS_UNDEFINED);
+                    }
+                    if (JS_IsObject(ep.writable_sink)) {
+                        call_js_method_ignore(consumer_ctx, ep.writable_sink, "abort", 1, &err);
+                    }
+                    JS_FreeValue(consumer_ctx, err);
+                };
+                if (rec_copy.consumer_side == capsid::BindingStreamSide::kBinding) {
+                    BindingWindowGuard guard(current_binding_id_, current_binding_request_id_,
+                                             rec_copy.owner_binding_id, rec_copy.owner_request_id);
+                    notify_cons();
+                } else {
+                    UserRequestTokenGuard guard(this, rec_copy.owner_request_id);
+                    notify_cons();
+                }
+            }
+        }
+
+        // Unconditionally free every JSValue owned in producer_ctx and consumer_ctx.
+        if (producer_ctx != NULL) {
+            JS_FreeValue(producer_ctx, ep.readable_source);
+            JS_FreeValue(producer_ctx, ep.writable_proxy_ctrl);
+            JS_FreeValue(producer_ctx, ep.on_chunk_cb);
+            JS_FreeValue(producer_ctx, ep.on_end_cb);
+            JS_FreeValue(producer_ctx, ep.on_error_cb);
+            while (!ep.pending_writes.empty()) {
+                JS_FreeValue(producer_ctx, ep.pending_writes.front().resolve);
+                JS_FreeValue(producer_ctx, ep.pending_writes.front().reject);
+                ep.pending_writes.pop_front();
+            }
+            JS_FreeValue(producer_ctx, ep.close_resolve);
+            JS_FreeValue(producer_ctx, ep.close_reject);
+        }
+        if (consumer_ctx != NULL) {
+            JS_FreeValue(consumer_ctx, ep.readable_proxy_ctrl);
+            JS_FreeValue(consumer_ctx, ep.pull_resolve);
+            JS_FreeValue(consumer_ctx, ep.pull_reject);
+            JS_FreeValue(consumer_ctx, ep.writable_sink);
+            JS_FreeValue(consumer_ctx, ep.on_write_done_cb);
+            JS_FreeValue(consumer_ctx, ep.on_write_err_cb);
+            JS_FreeValue(consumer_ctx, ep.on_close_done_cb);
+            JS_FreeValue(consumer_ctx, ep.on_close_err_cb);
+        }
+    }
+
+    void teardown_binding_streams_for_request(uint64_t request_id) {
+        const std::vector<uint64_t> ids = binding_streams_.collect_for_request(request_id);
+        for (size_t i = 0; i < ids.size(); ++i) {
+            teardown_binding_stream(ids[i], true);
+        }
+    }
+
+    void teardown_all_binding_streams() {
+        const std::vector<uint64_t> ids = binding_streams_.collect_all();
+        for (size_t i = 0; i < ids.size(); ++i) {
+            teardown_binding_stream(ids[i], false);
+        }
+        stream_work_queue_.clear();
+        stream_work_set_.clear();
     }
 
     static JSValue on_user_binding_call_abort(JSContext* ctx, JSValueConst this_val, int argc,
@@ -7919,6 +9380,7 @@ class WorkerRuntime {
         }
         self->expire_binding_calls();
         self->pump_binding_control_frames();
+        self->pump_binding_streams();
         self->pump_binding_calls();
         self->pump_binding_results();
     }
@@ -8028,7 +9490,16 @@ class WorkerRuntime {
                 settle_binding_call_error(call_id, table, error);
                 continue;
             }
-            JSValue input = capsid::neutral_to_js(ctx, call.input);
+            BindingCloneContext mat_ctx;
+            mat_ctx.self = this;
+            mat_ctx.request_id = call.request_id;
+            mat_ctx.binding_id = call.binding_id;
+            mat_ctx.table_index = call.table_index;
+            mat_ctx.side = capsid::BindingStreamSide::kBinding;
+            capsid::BindingCloneHooks mat_hooks;
+            mat_hooks.materialize = materialize_binding_object;
+            mat_hooks.opaque = &mat_ctx;
+            JSValue input = capsid::neutral_to_js_ex(ctx, call.input, &mat_hooks);
             JSValue call_object = JS_NewObjectProto(ctx, JS_NULL);
             if (JS_IsException(input) || JS_IsException(call_object)) {
                 JS_FreeValue(ctx, input);
@@ -8143,11 +9614,21 @@ class WorkerRuntime {
             JSValue handler = call.has_binding_error ? call.user_reject : call.user_resolve;
             JSValue payload = JS_UNDEFINED;
             if (!call.has_binding_error) {
-                // Clone the Binding value into the User runtime.
+                // Clone the Binding value (including stream proxies) into User.
                 capsid::NeutralValue neutral;
                 std::string clone_error;
-                if (!capsid::neutral_from_js(binding_ctx, call.binding_result, &neutral,
-                                             &clone_error)) {
+                BindingCloneContext cap_ctx;
+                cap_ctx.self = this;
+                cap_ctx.request_id = call.request_id;
+                cap_ctx.binding_id = call.binding_id;
+                cap_ctx.table_index = call.table_index;
+                cap_ctx.side = capsid::BindingStreamSide::kBinding;
+                capsid::BindingCloneHooks cap_hooks;
+                cap_hooks.try_capture = try_capture_binding_object;
+                cap_hooks.opaque = &cap_ctx;
+                if (!capsid::neutral_from_js_ex(binding_ctx, call.binding_result, &neutral,
+                                                &clone_error, &cap_hooks)) {
+                    rollback_opened_streams(cap_ctx.opened_streams);
                     payload = JS_NewError(ctx_);
                     JS_DefinePropertyValueStr(
                         ctx_, payload, "message",
@@ -8156,7 +9637,28 @@ class WorkerRuntime {
                         JS_PROP_C_W_E);
                     handler = call.user_reject;
                 } else {
-                    payload = capsid::neutral_to_js(ctx_, neutral);
+                    UserRequestTokenGuard token_guard(this, call.request_id);
+                    BindingCloneContext mat_ctx;
+                    mat_ctx.self = this;
+                    mat_ctx.request_id = call.request_id;
+                    mat_ctx.binding_id = call.binding_id;
+                    mat_ctx.table_index = call.table_index;
+                    mat_ctx.side = capsid::BindingStreamSide::kUser;
+                    capsid::BindingCloneHooks mat_hooks;
+                    mat_hooks.materialize = materialize_binding_object;
+                    mat_hooks.opaque = &mat_ctx;
+                    payload = capsid::neutral_to_js_ex(ctx_, neutral, &mat_hooks);
+                    if (JS_IsException(payload)) {
+                        JSValue exc = JS_GetException(ctx_);
+                        JS_FreeValue(ctx_, exc);
+                        rollback_opened_streams(cap_ctx.opened_streams);
+                        payload = JS_NewError(ctx_);
+                        JS_DefinePropertyValueStr(
+                            ctx_, payload, "message",
+                            JS_NewString(ctx_, "binding result materialization failed"),
+                            JS_PROP_C_W_E);
+                        handler = call.user_reject;
+                    }
                 }
             } else {
                 payload = capsid::materialize_remote_error(ctx_, call.binding_error,
@@ -8178,6 +9680,9 @@ class WorkerRuntime {
     // Frees every cross-runtime JSValue a pending call owns and detaches any
     // User AbortSignal listener so long-lived signals never retain settled calls.
     void self_finish_binding_call(PendingBindingCall& call) {
+        if (call.state == BindingCallState::kQueued) {
+            teardown_unmaterialized_streams_in_value(call.input);
+        }
         if (call.table_index < binding_tables_.size()) {
             JSContext* ctx = binding_tables_[call.table_index].ctx;
             if (ctx != NULL) {
@@ -8257,6 +9762,7 @@ class WorkerRuntime {
             std::map<uint64_t, PendingBindingCall>::iterator doomed = it++;
             finish_binding_call(doomed);
         }
+        teardown_binding_streams_for_request(request_id);
     }
 
     bool load_application(std::string* error) {
@@ -9665,6 +11171,7 @@ class WorkerRuntime {
             return;
         }
         shutting_down_ = true;
+        teardown_all_binding_streams();
         binding_scheduler_.detach();
         binding_scheduler_.clear_queues();
         clear_connections();

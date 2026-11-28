@@ -93,7 +93,7 @@ void BindingScheduler::enqueue_call(std::size_t table_index, std::uint64_t call_
     }
     call_queues_[table_index].push_back(call_id);
     ++total_queued_calls_;
-    wake();
+    update_idle_state();
 }
 
 bool BindingScheduler::cancel_call(std::size_t table_index, std::uint64_t call_id) {
@@ -137,7 +137,7 @@ bool BindingScheduler::pop_next_call(std::uint64_t* out_call_id) {
 
 void BindingScheduler::enqueue_result(std::uint64_t call_id) {
     result_queue_.push_back(call_id);
-    wake();
+    update_idle_state();
 }
 
 bool BindingScheduler::pop_next_result(std::uint64_t* out_call_id) {
@@ -154,7 +154,7 @@ bool BindingScheduler::pop_next_result(std::uint64_t* out_call_id) {
 
 void BindingScheduler::enqueue_control(std::uint64_t item_id) {
     control_queue_.push_back(item_id);
-    wake();
+    update_idle_state();
 }
 
 bool BindingScheduler::pop_next_control(std::uint64_t* out_item_id) {
@@ -170,7 +170,7 @@ bool BindingScheduler::pop_next_control(std::uint64_t* out_item_id) {
 }
 
 void BindingScheduler::wake() {
-    if (in_turn_) {
+    if (attached_ || in_turn_) {
         reschedule_needed_ = true;
     }
     update_idle_state();

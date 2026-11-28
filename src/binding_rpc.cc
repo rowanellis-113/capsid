@@ -32,6 +32,7 @@ struct CloneContext {
     std::size_t bytes;
     std::unordered_set<const void*> ancestors; // cycle detection
     JSValue object_proto;                      // Object.prototype, referenced
+    const BindingCloneHooks* hooks;
 };
 
 bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::string* error,
@@ -321,6 +322,16 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
     }
     if (JS_IsWeakSet(value)) {
         return fail_closed(error, "WeakSet values are not cloneable");
+    }
+    if (context->hooks != NULL && context->hooks->try_capture != NULL) {
+        const BindingCloneHookResult hooked =
+            context->hooks->try_capture(ctx, value, out, error, context->hooks->opaque);
+        if (hooked == BindingCloneHookResult::kCaptured) {
+            return true;
+        }
+        if (hooked == BindingCloneHookResult::kFailed) {
+            return false;
+        }
     }
     if (!reject_enumerable_symbol_keys(ctx, value, error)) {
         return false;
@@ -1302,7 +1313,8 @@ bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
     return true;
 }
 
-JSValue neutral_to_js(JSContext* ctx, const NeutralValue& value) {
+JSValue neutral_to_js_ex(JSContext* ctx, const NeutralValue& value,
+                         const BindingCloneHooks* hooks) {
     switch (value.kind) {
     case NeutralValue::Kind::kUndefined:
         return JS_UNDEFINED;
@@ -1344,7 +1356,7 @@ JSValue neutral_to_js(JSContext* ctx, const NeutralValue& value) {
             return array;
         }
         for (std::size_t index = 0; index < value.array.size(); ++index) {
-            JSValue child = neutral_to_js(ctx, value.array[index]);
+            JSValue child = neutral_to_js_ex(ctx, value.array[index], hooks);
             if (JS_IsException(child)) {
                 JS_FreeValue(ctx, array);
                 return child;
@@ -1362,7 +1374,7 @@ JSValue neutral_to_js(JSContext* ctx, const NeutralValue& value) {
             return object;
         }
         for (const auto& entry : value.object) {
-            JSValue child = neutral_to_js(ctx, entry.second);
+            JSValue child = neutral_to_js_ex(ctx, entry.second, hooks);
             if (JS_IsException(child)) {
                 JS_FreeValue(ctx, object);
                 return child;
@@ -1374,11 +1386,23 @@ JSValue neutral_to_js(JSContext* ctx, const NeutralValue& value) {
         }
         return object;
     }
+    case NeutralValue::Kind::kReadableStreamProxy:
+    case NeutralValue::Kind::kWritableStreamProxy: {
+        if (hooks != NULL && hooks->materialize != NULL) {
+            return hooks->materialize(ctx, value, hooks->opaque);
+        }
+        return JS_ThrowInternalError(ctx, "binding stream proxy materializer unavailable");
+    }
     }
     return JS_ThrowInternalError(ctx, "invalid neutral value kind");
 }
 
-bool neutral_from_js(JSContext* ctx, JSValueConst value, NeutralValue* out, std::string* error) {
+JSValue neutral_to_js(JSContext* ctx, const NeutralValue& value) {
+    return neutral_to_js_ex(ctx, value, NULL);
+}
+
+bool neutral_from_js_ex(JSContext* ctx, JSValueConst value, NeutralValue* out, std::string* error,
+                        const BindingCloneHooks* hooks) {
     if (ctx == NULL || out == NULL) {
         return fail_closed(error, "clone arguments are invalid");
     }
@@ -1390,6 +1414,7 @@ bool neutral_from_js(JSContext* ctx, JSValueConst value, NeutralValue* out, std:
     context.depth = 0;
     context.nodes = 0;
     context.bytes = 0;
+    context.hooks = hooks;
     if (!learn_class_ids(ctx, &context)) {
         return fail_closed(error, "clone class probe failed");
     }
@@ -1400,6 +1425,47 @@ bool neutral_from_js(JSContext* ctx, JSValueConst value, NeutralValue* out, std:
         *out = std::move(result);
     }
     return ok;
+}
+
+bool neutral_from_js(JSContext* ctx, JSValueConst value, NeutralValue* out, std::string* error) {
+    return neutral_from_js_ex(ctx, value, out, error, NULL);
+}
+
+std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
+    switch (value.kind) {
+    case NeutralValue::Kind::kUndefined:
+    case NeutralValue::Kind::kNull:
+    case NeutralValue::Kind::kBool:
+        return 1;
+    case NeutralValue::Kind::kNumber:
+    case NeutralValue::Kind::kDate:
+        return 8;
+    case NeutralValue::Kind::kBigInt:
+        return value.bigint.size() + 8;
+    case NeutralValue::Kind::kString:
+        return value.string.size() + 1;
+    case NeutralValue::Kind::kBytes:
+        return value.bytes.size();
+    case NeutralValue::Kind::kArray: {
+        std::size_t total = 8;
+        for (std::size_t i = 0; i < value.array.size(); ++i) {
+            total += estimate_neutral_value_bytes(value.array[i]);
+        }
+        return total;
+    }
+    case NeutralValue::Kind::kObject: {
+        std::size_t total = 8;
+        for (std::size_t i = 0; i < value.object.size(); ++i) {
+            total += value.object[i].first.size() +
+                     estimate_neutral_value_bytes(value.object[i].second);
+        }
+        return total;
+    }
+    case NeutralValue::Kind::kReadableStreamProxy:
+    case NeutralValue::Kind::kWritableStreamProxy:
+        return 16;
+    }
+    return 1;
 }
 
 JSValue binding_call_id_to_js(JSContext* ctx, std::uint64_t call_id) {
