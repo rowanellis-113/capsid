@@ -9,6 +9,7 @@
 import {
   bridgeHeaderPairs,
   createHeadersFromIncomingPairs,
+  markResponseHeadersImmutable,
   consumeFastResponseBody,
   getFastStreamResponseBody,
   isNullFastResponseBody,
@@ -27,6 +28,8 @@ const IntrinsicWritableStream = WritableStream;
 const IntrinsicRequest = Request;
 const IntrinsicResponse = Response;
 const IntrinsicHeaders = Headers;
+const IntrinsicAbortController = AbortController;
+const abortControllerAbort = IntrinsicAbortController.prototype.abort;
 const IntrinsicDOMException = DOMException;
 const IntrinsicUint8Array = Uint8Array;
 const IntrinsicArrayBuffer = ArrayBuffer;
@@ -344,6 +347,7 @@ function inspectRequest(req) {
     if (encoded.byteLength <= 65536) {
       bodyKind = 1;
       inlineBytes = encoded;
+      req._bodyConsumed = true;
     } else {
       bodyKind = 2;
       bodyStream = req.body;
@@ -353,6 +357,7 @@ function inspectRequest(req) {
     if (view !== null && view.byteLength <= 65536) {
       bodyKind = 1;
       inlineBytes = view;
+      req._bodyConsumed = true;
     } else {
       bodyKind = 2;
       bodyStream = req.body;
@@ -427,6 +432,7 @@ function inspectResponse(res) {
       if (encoded.byteLength <= 65536) {
         bodyKind = 1;
         inlineBytes = encoded;
+        res._bodyConsumed = true;
       } else {
         bodyKind = 2;
         bodyStream = res.body;
@@ -436,6 +442,7 @@ function inspectResponse(res) {
       if (view !== null && view.byteLength <= 65536) {
         bodyKind = 1;
         inlineBytes = view;
+        res._bodyConsumed = true;
       } else {
         bodyKind = 2;
         bodyStream = res.body;
@@ -474,6 +481,20 @@ function inspectResponse(res) {
   };
 }
 
+function createProxyAbortController() {
+  const controller = new IntrinsicAbortController();
+  return {
+    signal: controller.signal,
+    abort(reason) {
+      try {
+        abortControllerAbort.call(controller, reason);
+      } catch {
+        // Ignore reentrant or already-aborted controller errors.
+      }
+    },
+  };
+}
+
 function createProxyResponse(meta, body) {
   if (meta.type === 'error' || meta.status === 0) {
     return IntrinsicResponse.error();
@@ -486,6 +507,7 @@ function createProxyResponse(meta, body) {
   });
   if (meta.url) res.url = meta.url;
   if (meta.redirected) res.redirected = true;
+  markResponseHeadersImmutable(res);
   return res;
 }
 
@@ -559,6 +581,7 @@ export function installBindingRpcBridge(core) {
     createProxyRequest,
     inspectResponse,
     createProxyResponse,
+    createProxyAbortController,
     disposeLateValue,
   });
 }

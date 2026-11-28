@@ -849,6 +849,212 @@ export default {
     require(exit.clean(), "fence worker did not exit cleanly");
 }
 
+// M4C: Controlled Request and Response proxies (inline & streaming bodies,
+// canonical multi-value headers / Set-Cookie, pre-aborted & live Request.signal,
+// direct streaming Response return from fetch(), and fail-closed rejections).
+void test_m4c_request_response_proxies(const char* worker_path) {
+    const std::string binding_src = R"JS(
+export default () => ({
+  async echoRequest(req) {
+    const isReq = req instanceof Request;
+    const text = await req.text();
+    return {
+      isReq,
+      url: req.url,
+      method: req.method,
+      hdr: req.headers.get('x-custom'),
+      text,
+    };
+  },
+  async sumStreamRequest(req) {
+    const buf = new Uint8Array(await req.arrayBuffer());
+    let sum = 0;
+    for (let i = 0; i < buf.length; ++i) sum = (sum + buf[i]) % 65521;
+    return { len: buf.length, sum };
+  },
+  checkPreAbortedRequest(req) {
+    return {
+      aborted: req.signal ? req.signal.aborted : false,
+      msg: req.signal?.reason?.message ?? '',
+    };
+  },
+  waitRequestSignalAbort(req) {
+    return new Promise((resolve) => {
+      if (!req.signal) { resolve('no-signal'); return; }
+      if (req.signal.aborted) { resolve('already:' + req.signal.reason?.message); return; }
+      req.signal.addEventListener('abort', () => {
+        resolve(`${req.signal.reason?.name}:${req.signal.reason?.message}`);
+      });
+    });
+  },
+  inlineResponse() {
+    const h = new Headers();
+    h.append('x-a', '1');
+    h.append('set-cookie', 'a=1');
+    h.append('set-cookie', 'b=2');
+    return new Response('hi-user', { status: 201, statusText: 'Created', headers: h });
+  },
+  noContentResponse() {
+    return new Response(null, { status: 204 });
+  },
+  errorResponse() {
+    return Response.error();
+  },
+  streamResponse() {
+    let i = 0;
+    const body = new ReadableStream({
+      pull(c) {
+        if (i >= 5) { c.close(); return; }
+        const chunk = new Uint8Array(16384);
+        chunk.fill(65 + i); // 'A', 'B', 'C', 'D', 'E'
+        i++;
+        c.enqueue(chunk);
+      }
+    });
+    return new Response(body, { status: 200, headers: { 'x-stream': 'yes' } });
+  },
+  async usedResponse() {
+    const r = new Response('consumed');
+    await r.text();
+    return r;
+  },
+  async echoResponse(res) {
+    return { status: res.status, text: await res.text() };
+  }
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+export default {
+  async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === '/direct-stream') {
+      return await svc.streamResponse();
+    }
+    if (path === '/m4c') {
+      const out = {};
+      // 1. User -> Binding inline Request + bodyUsed protection on reuse.
+      const r1 = new Request('https://api.test/items?k=1', {
+        method: 'POST',
+        headers: { 'x-custom': 'abc' },
+        body: 'hello-inline',
+      });
+      const e1 = await svc.echoRequest(r1);
+      out.inlineReq = e1.isReq && e1.url === 'https://api.test/items?k=1' &&
+                      e1.method === 'POST' && e1.hdr === 'abc' && e1.text === 'hello-inline' &&
+                      r1.bodyUsed === true;
+      let reuseRejected = false;
+      try { await svc.echoRequest(r1); } catch (e) {
+        reuseRejected = e.message.includes('already used');
+      }
+      out.reuseReqRejected = reuseRejected;
+
+      // 2. User -> Binding streaming Request (>64 KiB).
+      const big = new Uint8Array(90000);
+      let expectSum = 0;
+      for (let i = 0; i < big.length; ++i) {
+        big[i] = (i * 3 + 5) & 0xff;
+        expectSum = (expectSum + big[i]) % 65521;
+      }
+      const sBody = new ReadableStream({
+        start(c) { c.enqueue(big); c.close(); }
+      });
+      const r2 = new Request('https://api.test/upload', {
+        method: 'PUT',
+        body: sBody,
+        duplex: 'half',
+      });
+      const e2 = await svc.sumStreamRequest(r2);
+      out.streamReq = e2.len === 90000 && e2.sum === expectSum;
+
+      // 3. Pre-aborted and live-aborted Request.signal propagation.
+      const preAc = new AbortController();
+      preAc.abort(new DOMException('req-pre-abort', 'AbortError'));
+      const preRes = await svc.checkPreAbortedRequest(
+        new Request('https://api.test/pre', { signal: preAc.signal }));
+      out.preSignal = preRes.aborted === true && preRes.msg === 'req-pre-abort';
+
+      const liveAc = new AbortController();
+      const livePromise = svc.waitRequestSignalAbort(
+        new Request('https://api.test/live', { signal: liveAc.signal }));
+      setTimeout(() => liveAc.abort(new DOMException('req-live-abort', 'AbortError')), 15);
+      out.liveSignal = (await livePromise) === 'AbortError:req-live-abort';
+
+      // 4. Binding -> User inline Response + Set-Cookie + immutable headers + 204 + Response.error().
+      const res1 = await svc.inlineResponse();
+      const cookies = res1.headers.getSetCookie().join(',');
+      let headersImmutable = false;
+      try { res1.headers.set('x-mut', '1'); } catch (e) {
+        headersImmutable = e instanceof TypeError;
+      }
+      out.inlineRes = (res1 instanceof Response) && res1.status === 201 &&
+                      res1.statusText === 'Created' && res1.headers.get('x-a') === '1' &&
+                      cookies === 'a=1,b=2' && headersImmutable &&
+                      (await res1.text()) === 'hi-user';
+      const res204 = await svc.noContentResponse();
+      out.res204 = res204.status === 204 && res204.body === null;
+      const resErr = await svc.errorResponse();
+      out.resErr = resErr.type === 'error' && resErr.status === 0;
+
+      // 5. Negative controls: locked Request body, bodyUsed Response, WebSocket Response.
+      const lockedStream = new ReadableStream();
+      lockedStream.getReader();
+      const lockedReq = new Request('https://api.test/locked', {
+        method: 'POST', body: lockedStream, duplex: 'half'
+      });
+      let lockedReqErr = 'none';
+      try { await svc.echoRequest(lockedReq); } catch (e) {
+        lockedReqErr = e && e.message ? e.message : String(e);
+      }
+      let usedResErr = 'none';
+      try { await svc.usedResponse(); } catch (e) {
+        usedResErr = e && e.message ? e.message : String(e);
+      }
+      let wsResErr = 'none';
+      try {
+        const pair = new WebSocketPair();
+        const wsRes = new Response(null, { status: 101, webSocket: pair[0] });
+        await svc.echoResponse(wsRes);
+      } catch (e) {
+        wsResErr = e && e.message ? e.message : String(e);
+      }
+      const u2bRes = await svc.echoResponse(new Response('user-to-binding', { status: 202 }));
+      out.negatives = lockedReqErr.includes('locked') &&
+                      usedResErr.includes('already used') &&
+                      wsResErr.includes('WebSocket') &&
+                      u2bRes.status === 202 && u2bRes.text === 'user-to-binding';
+
+      return new Response(JSON.stringify(out));
+    }
+    return new Response('404', { status: 404 });
+  }
+};
+)JS";
+
+    WorkerHarness harness(worker_path, {{"svc", binding_src}}, app_src);
+
+    const HttpResponse res = harness.get(1, "/m4c");
+    require(res.status == 200, "m4c status != 200: " + res.body);
+    require(res.body ==
+                "{\"inlineReq\":true,\"reuseReqRejected\":true,\"streamReq\":true,"
+                "\"preSignal\":true,\"liveSignal\":true,\"inlineRes\":true,"
+                "\"res204\":true,\"resErr\":true,\"negatives\":true}",
+            "m4c assertions failed: " + res.body);
+
+    // Direct streaming Response passthrough from Binding -> User fetch() -> Host!
+    const HttpResponse streamed = harness.get(2, "/direct-stream");
+    require(streamed.status == 200, "direct stream status != 200");
+    require(streamed.body.size() == 5 * 16384,
+            "direct stream wrong length: " + std::to_string(streamed.body.size()));
+    for (int i = 0; i < 5; ++i) {
+        const char expected = static_cast<char>('A' + i);
+        require(streamed.body[i * 16384] == expected &&
+                    streamed.body[i * 16384 + 16383] == expected,
+                "direct stream body byte mismatch");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -859,5 +1065,6 @@ int main(int argc, char** argv) {
     test_m4b_readable_streams(argv[1]);
     test_m4b_writable_streams(argv[1]);
     test_m4b_cross_request_fencing(argv[1]);
+    test_m4c_request_response_proxies(argv[1]);
     return 0;
 }

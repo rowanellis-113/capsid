@@ -27,6 +27,35 @@ constexpr std::size_t kMaxBindingCloneNodes = 10000;
 constexpr std::size_t kMaxBindingCloneBytes = 1024U * 1024U;
 constexpr std::size_t kMaxRemoteErrorNameBytes = 128;
 constexpr std::size_t kMaxRemoteErrorMessageBytes = 4096;
+constexpr std::size_t kMaxBindingProxyHeaders = 256;
+constexpr std::size_t kMaxBindingProxyHeaderBytes = 64U * 1024U;
+
+struct NeutralHttpRequest {
+    std::string url;
+    std::string method;
+    std::string credentials;
+    std::string redirect;
+    bool has_mode = false;
+    std::string mode;
+    std::vector<std::pair<std::string, std::string>> headers;
+    int body_kind = 0; // 0 = none, 1 = inline bytes, 2 = stream proxy
+    std::vector<std::uint8_t> inline_bytes;
+    std::uint64_t body_stream_id = 0;
+    std::uint64_t signal_bridge_id = 0; // 0 = no signal
+    bool signal_pre_aborted = false;
+};
+
+struct NeutralHttpResponse {
+    std::uint16_t status = 200;
+    std::string status_text;
+    std::string url;
+    bool redirected = false;
+    std::string type;
+    std::vector<std::pair<std::string, std::string>> headers;
+    int body_kind = 0; // 0 = none, 1 = inline bytes, 2 = stream proxy
+    std::vector<std::uint8_t> inline_bytes;
+    std::uint64_t body_stream_id = 0;
+};
 
 struct NeutralValue {
     enum class Kind {
@@ -42,6 +71,8 @@ struct NeutralValue {
         kObject,
         kReadableStreamProxy,
         kWritableStreamProxy,
+        kRequestProxy,
+        kResponseProxy,
     };
 
     Kind kind = Kind::kUndefined;
@@ -55,6 +86,8 @@ struct NeutralValue {
     // kObject: insertion-ordered, duplicate keys rejected at clone time.
     std::vector<std::pair<std::string, NeutralValue>> object;
     std::uint64_t stream_id = 0;     // kReadableStreamProxy / kWritableStreamProxy
+    NeutralHttpRequest request;      // kRequestProxy
+    NeutralHttpResponse response;    // kResponseProxy
 };
 
 enum class BindingCloneHookResult {

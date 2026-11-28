@@ -1387,11 +1387,13 @@ JSValue neutral_to_js_ex(JSContext* ctx, const NeutralValue& value,
         return object;
     }
     case NeutralValue::Kind::kReadableStreamProxy:
-    case NeutralValue::Kind::kWritableStreamProxy: {
+    case NeutralValue::Kind::kWritableStreamProxy:
+    case NeutralValue::Kind::kRequestProxy:
+    case NeutralValue::Kind::kResponseProxy: {
         if (hooks != NULL && hooks->materialize != NULL) {
             return hooks->materialize(ctx, value, hooks->opaque);
         }
-        return JS_ThrowInternalError(ctx, "binding stream proxy materializer unavailable");
+        return JS_ThrowInternalError(ctx, "binding proxy materializer unavailable");
     }
     }
     return JS_ThrowInternalError(ctx, "invalid neutral value kind");
@@ -1464,6 +1466,10 @@ std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
     case NeutralValue::Kind::kReadableStreamProxy:
     case NeutralValue::Kind::kWritableStreamProxy:
         return 16;
+    case NeutralValue::Kind::kRequestProxy:
+        return 64 + value.request.inline_bytes.size();
+    case NeutralValue::Kind::kResponseProxy:
+        return 64 + value.response.inline_bytes.size();
     }
     return 1;
 }

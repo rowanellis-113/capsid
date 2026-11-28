@@ -958,14 +958,18 @@ function wrapNormalizedNativeHeaders(nativeHeaders) {
   return headers;
 }
 
-function finishFetchedResponse(response, url, redirected) {
-  response.url = url;
-  response.redirected = Boolean(redirected);
+export function markResponseHeadersImmutable(response) {
   const state =
     response._headersState !== null ? response._headersState : getHeaderState(response.headers);
   if (state !== undefined && state !== null) {
     state.immutable = true;
   }
+}
+
+function finishFetchedResponse(response, url, redirected) {
+  response.url = url;
+  response.redirected = Boolean(redirected);
+  markResponseHeadersImmutable(response);
   if (response.body !== null) weakSetAdd.call(ordinaryFetchStreams, response.body);
   return response;
 }

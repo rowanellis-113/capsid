@@ -731,6 +731,7 @@ class WorkerRuntime {
         JSValue create_proxy_request = JS_UNDEFINED;
         JSValue inspect_response = JS_UNDEFINED;
         JSValue create_proxy_response = JS_UNDEFINED;
+        JSValue create_proxy_abort_controller = JS_UNDEFINED;
         JSValue dispose_late_value = JS_UNDEFINED;
     };
 
@@ -754,6 +755,7 @@ class WorkerRuntime {
             &bridge->create_proxy_request,
             &bridge->inspect_response,
             &bridge->create_proxy_response,
+            &bridge->create_proxy_abort_controller,
             &bridge->dispose_late_value,
         };
         for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
@@ -883,6 +885,20 @@ class WorkerRuntime {
         ~UserRequestTokenGuard() { self->current_token_ = saved; }
     };
 
+    struct ActiveBindingSignalBridge {
+        uint64_t bridge_id = 0;
+        uint64_t owner_request_id = 0;
+        std::string owner_binding_id;
+        size_t table_index = 0;
+        capsid::BindingStreamSide source_side = capsid::BindingStreamSide::kUser;
+        JSValue source_signal = JS_UNDEFINED;
+        JSValue source_listener = JS_UNDEFINED;
+        JSValue target_controller = JS_UNDEFINED; // { signal, abort }
+        bool aborted = false;
+        bool abort_pending = false;
+        capsid::BindingAbortReason reason;
+    };
+
     capsid::BindingRpcIntrinsics user_binding_intrinsics_;
     BindingJsBridge user_binding_bridge_;
     BindingJsBridge pending_binding_bridge_;
@@ -892,6 +908,9 @@ class WorkerRuntime {
     std::map<uint64_t, ActiveBindingStream> active_binding_streams_;
     std::deque<uint64_t> stream_work_queue_;
     std::unordered_set<uint64_t> stream_work_set_;
+    std::map<uint64_t, ActiveBindingSignalBridge> active_signal_bridges_;
+    std::deque<uint64_t> signal_work_queue_;
+    uint64_t next_signal_bridge_id_ = 1;
     std::map<uint64_t, PendingBindingCall> pending_binding_calls_;
     uint64_t next_binding_call_id_ = 1;
     // Binding Runtime interrupt authority: the call id currently executing
@@ -4967,6 +4986,7 @@ class WorkerRuntime {
             {"createProxyRequest", &target->create_proxy_request},
             {"inspectResponse", &target->inspect_response},
             {"createProxyResponse", &target->create_proxy_response},
+            {"createProxyAbortController", &target->create_proxy_abort_controller},
             {"disposeLateValue", &target->dispose_late_value},
         };
         for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i) {
@@ -7782,7 +7802,7 @@ class WorkerRuntime {
         clone_hooks.try_capture = try_capture_binding_object;
         clone_hooks.opaque = &clone_ctx;
         if (!capsid::neutral_from_js_ex(ctx, input_value, &input, &clone_error, &clone_hooks)) {
-            self->rollback_opened_streams(clone_ctx.opened_streams);
+            self->rollback_opened_proxies(clone_ctx);
             self->binding_ledger_.release_call(token->request_id, table.id);
             JSValue error = JS_NewError(ctx);
             JS_DefinePropertyValueStr(ctx, error, "message", JS_NewString(ctx, clone_error.c_str()),
@@ -7957,7 +7977,243 @@ class WorkerRuntime {
         size_t table_index = 0;
         capsid::BindingStreamSide side = capsid::BindingStreamSide::kUser;
         std::vector<uint64_t> opened_streams;
+        std::vector<uint64_t> opened_signals;
     };
+
+    static bool read_js_string_prop(JSContext* ctx, JSValueConst obj, const char* name,
+                                    std::string* out) {
+        JSValue val = JS_GetPropertyStr(ctx, obj, name);
+        if (JS_IsException(val)) {
+            JSValue exc = JS_GetException(ctx);
+            JS_FreeValue(ctx, exc);
+            return false;
+        }
+        if (!JS_IsString(val)) {
+            JS_FreeValue(ctx, val);
+            return false;
+        }
+        size_t len = 0;
+        const char* s = JS_ToCStringLen(ctx, &len, val);
+        if (s == NULL) {
+            JSValue exc = JS_GetException(ctx);
+            JS_FreeValue(ctx, exc);
+            JS_FreeValue(ctx, val);
+            return false;
+        }
+        out->assign(s, len);
+        JS_FreeCString(ctx, s);
+        JS_FreeValue(ctx, val);
+        return true;
+    }
+
+    static bool read_js_header_pairs(JSContext* ctx, JSValueConst arr,
+                                     std::vector<std::pair<std::string, std::string>>* out,
+                                     std::string* error) {
+        out->clear();
+        if (JS_IsNull(arr) || JS_IsUndefined(arr)) {
+            return true;
+        }
+        if (!JS_IsArray(arr)) {
+            if (error != NULL) *error = "invalid proxy headers array";
+            return false;
+        }
+        JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+        uint32_t count = 0;
+        if (JS_IsException(len_val) || JS_ToUint32(ctx, &count, len_val) != 0) {
+            JS_FreeValue(ctx, len_val);
+            if (error != NULL) *error = "unreadable proxy headers length";
+            return false;
+        }
+        JS_FreeValue(ctx, len_val);
+        if (count > capsid::kMaxBindingProxyHeaders) {
+            if (error != NULL) *error = "proxy header count limit exceeded";
+            return false;
+        }
+        size_t total_bytes = 0;
+        out->reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            JSValue entry = JS_GetPropertyUint32(ctx, arr, i);
+            if (!JS_IsArray(entry)) {
+                JS_FreeValue(ctx, entry);
+                if (error != NULL) *error = "invalid proxy header pair";
+                return false;
+            }
+            JSValue k = JS_GetPropertyUint32(ctx, entry, 0);
+            JSValue v = JS_GetPropertyUint32(ctx, entry, 1);
+            JS_FreeValue(ctx, entry);
+            size_t klen = 0, vlen = 0;
+            const char* ks = JS_ToCStringLen(ctx, &klen, k);
+            const char* vs = JS_ToCStringLen(ctx, &vlen, v);
+            JS_FreeValue(ctx, k);
+            JS_FreeValue(ctx, v);
+            if (ks == NULL || vs == NULL) {
+                if (ks) JS_FreeCString(ctx, ks);
+                if (vs) JS_FreeCString(ctx, vs);
+                if (error != NULL) *error = "unreadable proxy header entry";
+                return false;
+            }
+            if (klen + vlen > capsid::kMaxBindingProxyHeaderBytes ||
+                total_bytes > capsid::kMaxBindingProxyHeaderBytes - (klen + vlen)) {
+                JS_FreeCString(ctx, ks);
+                JS_FreeCString(ctx, vs);
+                if (error != NULL) *error = "proxy header byte limit exceeded";
+                return false;
+            }
+            total_bytes += klen + vlen;
+            out->push_back(std::make_pair(std::string(ks, klen), std::string(vs, vlen)));
+            JS_FreeCString(ctx, ks);
+            JS_FreeCString(ctx, vs);
+        }
+        return true;
+    }
+
+    static JSValue make_js_flat_headers(
+        JSContext* ctx, const std::vector<std::pair<std::string, std::string>>& headers) {
+        JSValue arr = JS_NewArray(ctx);
+        if (JS_IsException(arr)) {
+            return arr;
+        }
+        uint32_t idx = 0;
+        for (size_t i = 0; i < headers.size(); ++i) {
+            JSValue k = JS_NewStringLen(ctx, headers[i].first.data(), headers[i].first.size());
+            JSValue v = JS_NewStringLen(ctx, headers[i].second.data(), headers[i].second.size());
+            if (JS_IsException(k) || JS_IsException(v) ||
+                JS_SetPropertyUint32(ctx, arr, idx++, k) < 0 ||
+                JS_SetPropertyUint32(ctx, arr, idx++, v) < 0) {
+                JS_FreeValue(ctx, arr);
+                return JS_EXCEPTION;
+            }
+        }
+        return arr;
+    }
+
+    uint64_t allocate_signal_bridge_id() {
+        for (size_t probe = 0; probe <= active_signal_bridges_.size(); ++probe) {
+            const uint64_t id = next_signal_bridge_id_++;
+            if (next_signal_bridge_id_ == 0) next_signal_bridge_id_ = 1;
+            if (id != 0 && active_signal_bridges_.count(id) == 0) {
+                return id;
+            }
+        }
+        return 0;
+    }
+
+    static JSValue on_binding_request_signal_abort(JSContext* ctx, JSValueConst, int, JSValueConst*,
+                                                   int, JSValueConst* func_data) {
+        WorkerRuntime* self = g_worker;
+        uint64_t bridge_id = 0;
+        if (self == NULL || func_data == NULL ||
+            !capsid::binding_call_id_from_js(ctx, func_data[0], &bridge_id)) {
+            return JS_UNDEFINED;
+        }
+        auto it = self->active_signal_bridges_.find(bridge_id);
+        if (it == self->active_signal_bridges_.end() || it->second.aborted) {
+            return JS_UNDEFINED;
+        }
+        ActiveBindingSignalBridge& sb = it->second;
+        const capsid::BindingRpcIntrinsics* intr =
+            (sb.source_side == capsid::BindingStreamSide::kUser)
+                ? &self->user_binding_intrinsics_
+                : (sb.table_index < self->binding_tables_.size()
+                       ? &self->binding_tables_[sb.table_index].intrinsics
+                       : NULL);
+        JSValue reason_val = JS_UNDEFINED;
+        capsid::binding_signal_read_reason(ctx, sb.source_signal, intr, &reason_val);
+        capsid::capture_abort_reason(ctx, reason_val, intr, &sb.reason);
+        JS_FreeValue(ctx, reason_val);
+        sb.aborted = true;
+        sb.abort_pending = true;
+        self->signal_work_queue_.push_back(bridge_id);
+        self->binding_scheduler_.wake();
+        return JS_UNDEFINED;
+    }
+
+    void teardown_signal_bridge(uint64_t bridge_id) {
+        auto it = active_signal_bridges_.find(bridge_id);
+        if (it == active_signal_bridges_.end()) {
+            return;
+        }
+        ActiveBindingSignalBridge sb = std::move(it->second);
+        active_signal_bridges_.erase(it);
+        JSContext* src_ctx =
+            (sb.source_side == capsid::BindingStreamSide::kUser)
+                ? ctx_
+                : (sb.table_index < binding_tables_.size() ? binding_tables_[sb.table_index].ctx
+                                                           : NULL);
+        JSContext* dst_ctx =
+            (sb.source_side == capsid::BindingStreamSide::kUser)
+                ? (sb.table_index < binding_tables_.size() ? binding_tables_[sb.table_index].ctx
+                                                           : NULL)
+                : ctx_;
+        const capsid::BindingRpcIntrinsics* src_intr =
+            (sb.source_side == capsid::BindingStreamSide::kUser)
+                ? &user_binding_intrinsics_
+                : (sb.table_index < binding_tables_.size()
+                       ? &binding_tables_[sb.table_index].intrinsics
+                       : NULL);
+        if (src_ctx != NULL) {
+            if (!JS_IsUndefined(sb.source_signal) && !JS_IsUndefined(sb.source_listener)) {
+                capsid::binding_signal_remove_abort_listener(src_ctx, sb.source_signal,
+                                                             sb.source_listener, src_intr);
+            }
+            JS_FreeValue(src_ctx, sb.source_listener);
+            JS_FreeValue(src_ctx, sb.source_signal);
+        }
+        if (dst_ctx != NULL) {
+            JS_FreeValue(dst_ctx, sb.target_controller);
+        }
+    }
+
+    void pump_binding_signal_bridges() {
+        while (!signal_work_queue_.empty() && !shutting_down_) {
+            const uint64_t bridge_id = signal_work_queue_.front();
+            signal_work_queue_.pop_front();
+            auto it = active_signal_bridges_.find(bridge_id);
+            if (it == active_signal_bridges_.end() || !it->second.abort_pending) {
+                continue;
+            }
+            ActiveBindingSignalBridge& sb = it->second;
+            sb.abort_pending = false;
+            const capsid::BindingStreamSide dst_side =
+                (sb.source_side == capsid::BindingStreamSide::kUser)
+                    ? capsid::BindingStreamSide::kBinding
+                    : capsid::BindingStreamSide::kUser;
+            JSContext* dst_ctx =
+                (dst_side == capsid::BindingStreamSide::kUser)
+                    ? ctx_
+                    : (sb.table_index < binding_tables_.size() ? binding_tables_[sb.table_index].ctx
+                                                               : NULL);
+            const capsid::BindingRpcIntrinsics* dst_intr =
+                (dst_side == capsid::BindingStreamSide::kUser)
+                    ? &user_binding_intrinsics_
+                    : (sb.table_index < binding_tables_.size()
+                           ? &binding_tables_[sb.table_index].intrinsics
+                           : NULL);
+            if (dst_ctx != NULL && JS_IsObject(sb.target_controller)) {
+                auto fire = [&]() {
+                    JSValue reason =
+                        capsid::materialize_abort_reason(dst_ctx, sb.reason, dst_intr);
+                    if (JS_IsException(reason)) {
+                        JSValue exc = JS_GetException(dst_ctx);
+                        JS_FreeValue(dst_ctx, exc);
+                        call_js_method_ignore(dst_ctx, sb.target_controller, "abort", 0, NULL);
+                    } else {
+                        call_js_method_ignore(dst_ctx, sb.target_controller, "abort", 1, &reason);
+                        JS_FreeValue(dst_ctx, reason);
+                    }
+                };
+                if (dst_side == capsid::BindingStreamSide::kBinding) {
+                    BindingWindowGuard guard(current_binding_id_, current_binding_request_id_,
+                                             sb.owner_binding_id, sb.owner_request_id);
+                    fire();
+                } else {
+                    UserRequestTokenGuard guard(this, sb.owner_request_id);
+                    fire();
+                }
+            }
+            teardown_signal_bridge(bridge_id);
+        }
+    }
 
     JSContext* stream_side_ctx(const capsid::BindingStreamRecord& rec,
                                capsid::BindingStreamSide side) const {
@@ -8265,6 +8521,208 @@ class WorkerRuntime {
                 }
             }
         }
+
+        // 3. Controlled Request proxy (M4C).
+        if (JS_IsFunction(ctx, bridge->inspect_request)) {
+            JSValue arg = JS_DupValue(ctx, value);
+            JSValue info = JS_Call(ctx, bridge->inspect_request, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            if (JS_IsException(info)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+                if (error != NULL) *error = "Request inspection failed";
+                return capsid::BindingCloneHookResult::kFailed;
+            }
+            if (JS_IsObject(info)) {
+                std::string inspect_err;
+                if (read_js_string_prop(ctx, info, "error", &inspect_err)) {
+                    JS_FreeValue(ctx, info);
+                    if (error != NULL) *error = inspect_err;
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                capsid::NeutralHttpRequest req;
+                read_js_string_prop(ctx, info, "url", &req.url);
+                read_js_string_prop(ctx, info, "method", &req.method);
+                read_js_string_prop(ctx, info, "credentials", &req.credentials);
+                read_js_string_prop(ctx, info, "redirect", &req.redirect);
+                if (read_js_string_prop(ctx, info, "mode", &req.mode)) {
+                    req.has_mode = true;
+                }
+                JSValue headers_val = JS_GetPropertyStr(ctx, info, "headers");
+                const bool headers_ok =
+                    read_js_header_pairs(ctx, headers_val, &req.headers, error);
+                JS_FreeValue(ctx, headers_val);
+                if (!headers_ok) {
+                    JS_FreeValue(ctx, info);
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+
+                JSValue body_kind_val = JS_GetPropertyStr(ctx, info, "bodyKind");
+                int32_t body_kind = 0;
+                JS_ToInt32(ctx, &body_kind, body_kind_val);
+                JS_FreeValue(ctx, body_kind_val);
+                req.body_kind = body_kind;
+                if (body_kind == 1) {
+                    JSValue bytes_val = JS_GetPropertyStr(ctx, info, "inlineBytes");
+                    size_t blen = 0;
+                    uint8_t* bptr = JS_GetUint8Array(ctx, &blen, bytes_val);
+                    if (bptr != NULL && blen > 0) {
+                        req.inline_bytes.assign(bptr, bptr + blen);
+                    }
+                    JS_FreeValue(ctx, bytes_val);
+                } else if (body_kind == 2) {
+                    JSValue bstream = JS_GetPropertyStr(ctx, info, "bodyStream");
+                    capsid::NeutralValue stream_nv;
+                    const capsid::BindingCloneHookResult sres =
+                        try_capture_binding_object(ctx, bstream, &stream_nv, error, opaque);
+                    JS_FreeValue(ctx, bstream);
+                    if (sres != capsid::BindingCloneHookResult::kCaptured ||
+                        stream_nv.kind != capsid::NeutralValue::Kind::kReadableStreamProxy) {
+                        JS_FreeValue(ctx, info);
+                        if (error != NULL && error->empty()) {
+                            *error = "Request body stream is not transferable";
+                        }
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    req.body_stream_id = stream_nv.stream_id;
+                }
+
+                JSValue sig_val = JS_GetPropertyStr(ctx, info, "signal");
+                if (JS_IsObject(sig_val)) {
+                    const capsid::BindingRpcIntrinsics* src_intr =
+                        (cctx->side == capsid::BindingStreamSide::kUser)
+                            ? &self->user_binding_intrinsics_
+                            : (cctx->table_index < self->binding_tables_.size()
+                                   ? &self->binding_tables_[cctx->table_index].intrinsics
+                                   : NULL);
+                    bool is_aborted = false;
+                    if (capsid::binding_signal_is_aborted(ctx, sig_val, src_intr, &is_aborted)) {
+                        const uint64_t bid = self->allocate_signal_bridge_id();
+                        if (bid != 0) {
+                            ActiveBindingSignalBridge sb;
+                            sb.bridge_id = bid;
+                            sb.owner_request_id = cctx->request_id;
+                            sb.owner_binding_id = cctx->binding_id;
+                            sb.table_index = cctx->table_index;
+                            sb.source_side = cctx->side;
+                            if (is_aborted) {
+                                JSValue reason_val = JS_UNDEFINED;
+                                capsid::binding_signal_read_reason(ctx, sig_val, src_intr,
+                                                                   &reason_val);
+                                capsid::capture_abort_reason(ctx, reason_val, src_intr, &sb.reason);
+                                JS_FreeValue(ctx, reason_val);
+                                sb.aborted = true;
+                                req.signal_pre_aborted = true;
+                            } else {
+                                JSValue bid_js = capsid::binding_call_id_to_js(ctx, bid);
+                                JSValue listener = JS_NewCFunctionData2(
+                                    ctx, on_binding_request_signal_abort, "onReqSignalAbort", 0, 0,
+                                    1, &bid_js);
+                                JS_FreeValue(ctx, bid_js);
+                                if (!JS_IsException(listener) &&
+                                    capsid::binding_signal_add_abort_listener(ctx, sig_val,
+                                                                              listener, src_intr)) {
+                                    sb.source_signal = JS_DupValue(ctx, sig_val);
+                                    sb.source_listener = listener;
+                                } else {
+                                    if (JS_IsException(listener)) {
+                                        JSValue exc = JS_GetException(ctx);
+                                        JS_FreeValue(ctx, exc);
+                                    } else {
+                                        JS_FreeValue(ctx, listener);
+                                    }
+                                }
+                            }
+                            self->active_signal_bridges_.emplace(bid, std::move(sb));
+                            cctx->opened_signals.push_back(bid);
+                            req.signal_bridge_id = bid;
+                        }
+                    }
+                }
+                JS_FreeValue(ctx, sig_val);
+                JS_FreeValue(ctx, info);
+                out->kind = capsid::NeutralValue::Kind::kRequestProxy;
+                out->request = std::move(req);
+                return capsid::BindingCloneHookResult::kCaptured;
+            }
+            JS_FreeValue(ctx, info);
+        }
+
+        // 4. Controlled Response proxy (M4C).
+        if (JS_IsFunction(ctx, bridge->inspect_response)) {
+            JSValue arg = JS_DupValue(ctx, value);
+            JSValue info = JS_Call(ctx, bridge->inspect_response, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            if (JS_IsException(info)) {
+                JSValue exc = JS_GetException(ctx);
+                JS_FreeValue(ctx, exc);
+                if (error != NULL) *error = "Response inspection failed";
+                return capsid::BindingCloneHookResult::kFailed;
+            }
+            if (JS_IsObject(info)) {
+                std::string inspect_err;
+                if (read_js_string_prop(ctx, info, "error", &inspect_err)) {
+                    JS_FreeValue(ctx, info);
+                    if (error != NULL) *error = inspect_err;
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+                capsid::NeutralHttpResponse res;
+                JSValue st_val = JS_GetPropertyStr(ctx, info, "status");
+                int32_t st_i32 = 200;
+                JS_ToInt32(ctx, &st_i32, st_val);
+                JS_FreeValue(ctx, st_val);
+                res.status = static_cast<uint16_t>(st_i32);
+                read_js_string_prop(ctx, info, "statusText", &res.status_text);
+                read_js_string_prop(ctx, info, "url", &res.url);
+                read_js_string_prop(ctx, info, "type", &res.type);
+                JSValue redir_val = JS_GetPropertyStr(ctx, info, "redirected");
+                res.redirected = JS_ToBool(ctx, redir_val) != 0;
+                JS_FreeValue(ctx, redir_val);
+                JSValue headers_val = JS_GetPropertyStr(ctx, info, "headers");
+                const bool headers_ok =
+                    read_js_header_pairs(ctx, headers_val, &res.headers, error);
+                JS_FreeValue(ctx, headers_val);
+                if (!headers_ok) {
+                    JS_FreeValue(ctx, info);
+                    return capsid::BindingCloneHookResult::kFailed;
+                }
+
+                JSValue body_kind_val = JS_GetPropertyStr(ctx, info, "bodyKind");
+                int32_t body_kind = 0;
+                JS_ToInt32(ctx, &body_kind, body_kind_val);
+                JS_FreeValue(ctx, body_kind_val);
+                res.body_kind = body_kind;
+                if (body_kind == 1) {
+                    JSValue bytes_val = JS_GetPropertyStr(ctx, info, "inlineBytes");
+                    size_t blen = 0;
+                    uint8_t* bptr = JS_GetUint8Array(ctx, &blen, bytes_val);
+                    if (bptr != NULL && blen > 0) {
+                        res.inline_bytes.assign(bptr, bptr + blen);
+                    }
+                    JS_FreeValue(ctx, bytes_val);
+                } else if (body_kind == 2) {
+                    JSValue bstream = JS_GetPropertyStr(ctx, info, "bodyStream");
+                    capsid::NeutralValue stream_nv;
+                    const capsid::BindingCloneHookResult sres =
+                        try_capture_binding_object(ctx, bstream, &stream_nv, error, opaque);
+                    JS_FreeValue(ctx, bstream);
+                    if (sres != capsid::BindingCloneHookResult::kCaptured ||
+                        stream_nv.kind != capsid::NeutralValue::Kind::kReadableStreamProxy) {
+                        JS_FreeValue(ctx, info);
+                        if (error != NULL && error->empty()) {
+                            *error = "Response body stream is not transferable";
+                        }
+                        return capsid::BindingCloneHookResult::kFailed;
+                    }
+                    res.body_stream_id = stream_nv.stream_id;
+                }
+                JS_FreeValue(ctx, info);
+                out->kind = capsid::NeutralValue::Kind::kResponseProxy;
+                out->response = std::move(res);
+                return capsid::BindingCloneHookResult::kCaptured;
+            }
+            JS_FreeValue(ctx, info);
+        }
         return capsid::BindingCloneHookResult::kUnhandled;
     }
 
@@ -8360,12 +8818,172 @@ class WorkerRuntime {
             return stream;
         }
 
+        if (value.kind == capsid::NeutralValue::Kind::kRequestProxy) {
+            const capsid::NeutralHttpRequest& req = value.request;
+            JSValue meta = JS_NewObjectProto(ctx, JS_NULL);
+            JSValue flat_headers = make_js_flat_headers(ctx, req.headers);
+            if (JS_IsException(meta) || JS_IsException(flat_headers)) {
+                JS_FreeValue(ctx, meta);
+                JS_FreeValue(ctx, flat_headers);
+                return JS_EXCEPTION;
+            }
+            bool ok =
+                JS_SetPropertyStr(ctx, meta, "url",
+                                  JS_NewStringLen(ctx, req.url.data(), req.url.size())) >= 0 &&
+                JS_SetPropertyStr(ctx, meta, "method",
+                                  JS_NewStringLen(ctx, req.method.data(), req.method.size())) >=
+                    0 &&
+                JS_SetPropertyStr(
+                    ctx, meta, "credentials",
+                    JS_NewStringLen(ctx, req.credentials.data(), req.credentials.size())) >= 0 &&
+                JS_SetPropertyStr(ctx, meta, "redirect",
+                                  JS_NewStringLen(ctx, req.redirect.data(), req.redirect.size())) >=
+                    0 &&
+                JS_SetPropertyStr(ctx, meta, "headers", flat_headers) >= 0;
+            if (req.has_mode) {
+                ok = ok && JS_SetPropertyStr(
+                               ctx, meta, "mode",
+                               JS_NewStringLen(ctx, req.mode.data(), req.mode.size())) >= 0;
+            } else {
+                ok = ok && JS_SetPropertyStr(ctx, meta, "mode", JS_NULL) >= 0;
+            }
+            if (!ok) {
+                JS_FreeValue(ctx, meta);
+                return JS_EXCEPTION;
+            }
+
+            JSValue body = JS_NULL;
+            if (req.body_kind == 1) {
+                body =
+                    JS_NewUint8ArrayCopy(ctx, req.inline_bytes.data(), req.inline_bytes.size());
+                if (JS_IsException(body)) {
+                    JS_FreeValue(ctx, meta);
+                    return body;
+                }
+            } else if (req.body_kind == 2 && req.body_stream_id != 0) {
+                capsid::NeutralValue snv;
+                snv.kind = capsid::NeutralValue::Kind::kReadableStreamProxy;
+                snv.stream_id = req.body_stream_id;
+                body = materialize_binding_object(ctx, snv, opaque);
+                if (JS_IsException(body)) {
+                    JS_FreeValue(ctx, meta);
+                    return body;
+                }
+            }
+
+            JSValue signal = JS_NULL;
+            if (req.signal_bridge_id != 0) {
+                auto sb_it = self->active_signal_bridges_.find(req.signal_bridge_id);
+                if (sb_it != self->active_signal_bridges_.end() &&
+                    JS_IsFunction(ctx, bridge->create_proxy_abort_controller)) {
+                    JSValue ctrl = JS_Call(ctx, bridge->create_proxy_abort_controller, JS_UNDEFINED,
+                                           0, NULL);
+                    if (!JS_IsException(ctrl) && JS_IsObject(ctrl)) {
+                        signal = JS_GetPropertyStr(ctx, ctrl, "signal");
+                        if (sb_it->second.aborted) {
+                            const capsid::BindingRpcIntrinsics* dst_intr =
+                                (mctx->side == capsid::BindingStreamSide::kUser)
+                                    ? &self->user_binding_intrinsics_
+                                    : (mctx->table_index < self->binding_tables_.size()
+                                           ? &self->binding_tables_[mctx->table_index].intrinsics
+                                           : NULL);
+                            JSValue reason = capsid::materialize_abort_reason(
+                                ctx, sb_it->second.reason, dst_intr);
+                            if (JS_IsException(reason)) {
+                                JSValue exc = JS_GetException(ctx);
+                                JS_FreeValue(ctx, exc);
+                                call_js_method_ignore(ctx, ctrl, "abort", 0, NULL);
+                            } else {
+                                call_js_method_ignore(ctx, ctrl, "abort", 1, &reason);
+                                JS_FreeValue(ctx, reason);
+                            }
+                            JS_FreeValue(ctx, ctrl);
+                            self->teardown_signal_bridge(req.signal_bridge_id);
+                        } else {
+                            sb_it->second.target_controller = ctrl;
+                        }
+                    } else {
+                        if (JS_IsException(ctrl)) {
+                            JSValue exc = JS_GetException(ctx);
+                            JS_FreeValue(ctx, exc);
+                        } else {
+                            JS_FreeValue(ctx, ctrl);
+                        }
+                    }
+                }
+            }
+
+            JSValue args[3] = {meta, body, signal};
+            JSValue req_obj =
+                JS_Call(ctx, bridge->create_proxy_request, JS_UNDEFINED, 3, args);
+            JS_FreeValue(ctx, meta);
+            JS_FreeValue(ctx, body);
+            JS_FreeValue(ctx, signal);
+            return req_obj;
+        }
+
+        if (value.kind == capsid::NeutralValue::Kind::kResponseProxy) {
+            const capsid::NeutralHttpResponse& res = value.response;
+            JSValue meta = JS_NewObjectProto(ctx, JS_NULL);
+            JSValue flat_headers = make_js_flat_headers(ctx, res.headers);
+            if (JS_IsException(meta) || JS_IsException(flat_headers)) {
+                JS_FreeValue(ctx, meta);
+                JS_FreeValue(ctx, flat_headers);
+                return JS_EXCEPTION;
+            }
+            const bool ok =
+                JS_SetPropertyStr(ctx, meta, "status", JS_NewInt32(ctx, res.status)) >= 0 &&
+                JS_SetPropertyStr(
+                    ctx, meta, "statusText",
+                    JS_NewStringLen(ctx, res.status_text.data(), res.status_text.size())) >= 0 &&
+                JS_SetPropertyStr(ctx, meta, "url",
+                                  JS_NewStringLen(ctx, res.url.data(), res.url.size())) >= 0 &&
+                JS_SetPropertyStr(ctx, meta, "redirected", res.redirected ? JS_TRUE : JS_FALSE) >=
+                    0 &&
+                JS_SetPropertyStr(ctx, meta, "type",
+                                  JS_NewStringLen(ctx, res.type.data(), res.type.size())) >= 0 &&
+                JS_SetPropertyStr(ctx, meta, "headers", flat_headers) >= 0;
+            if (!ok) {
+                JS_FreeValue(ctx, meta);
+                return JS_EXCEPTION;
+            }
+
+            JSValue body = JS_NULL;
+            if (res.body_kind == 1) {
+                body =
+                    JS_NewUint8ArrayCopy(ctx, res.inline_bytes.data(), res.inline_bytes.size());
+                if (JS_IsException(body)) {
+                    JS_FreeValue(ctx, meta);
+                    return body;
+                }
+            } else if (res.body_kind == 2 && res.body_stream_id != 0) {
+                capsid::NeutralValue snv;
+                snv.kind = capsid::NeutralValue::Kind::kReadableStreamProxy;
+                snv.stream_id = res.body_stream_id;
+                body = materialize_binding_object(ctx, snv, opaque);
+                if (JS_IsException(body)) {
+                    JS_FreeValue(ctx, meta);
+                    return body;
+                }
+            }
+
+            JSValue args[2] = {meta, body};
+            JSValue res_obj =
+                JS_Call(ctx, bridge->create_proxy_response, JS_UNDEFINED, 2, args);
+            JS_FreeValue(ctx, meta);
+            JS_FreeValue(ctx, body);
+            return res_obj;
+        }
+
         return JS_ThrowInternalError(ctx, "unsupported binding proxy kind");
     }
 
-    void rollback_opened_streams(const std::vector<uint64_t>& ids) {
-        for (size_t i = 0; i < ids.size(); ++i) {
-            teardown_binding_stream(ids[i], true);
+    void rollback_opened_proxies(const BindingCloneContext& cctx) {
+        for (size_t i = 0; i < cctx.opened_streams.size(); ++i) {
+            teardown_binding_stream(cctx.opened_streams[i], true);
+        }
+        for (size_t i = 0; i < cctx.opened_signals.size(); ++i) {
+            teardown_signal_bridge(cctx.opened_signals[i]);
         }
     }
 
@@ -8373,6 +8991,21 @@ class WorkerRuntime {
         if (value.kind == capsid::NeutralValue::Kind::kReadableStreamProxy ||
             value.kind == capsid::NeutralValue::Kind::kWritableStreamProxy) {
             teardown_binding_stream(value.stream_id, true);
+            return;
+        }
+        if (value.kind == capsid::NeutralValue::Kind::kRequestProxy) {
+            if (value.request.body_kind == 2 && value.request.body_stream_id != 0) {
+                teardown_binding_stream(value.request.body_stream_id, true);
+            }
+            if (value.request.signal_bridge_id != 0) {
+                teardown_signal_bridge(value.request.signal_bridge_id);
+            }
+            return;
+        }
+        if (value.kind == capsid::NeutralValue::Kind::kResponseProxy) {
+            if (value.response.body_kind == 2 && value.response.body_stream_id != 0) {
+                teardown_binding_stream(value.response.body_stream_id, true);
+            }
             return;
         }
         if (value.kind == capsid::NeutralValue::Kind::kArray) {
@@ -8833,6 +9466,7 @@ class WorkerRuntime {
     }
 
     void pump_binding_streams() {
+        pump_binding_signal_bridges();
         const size_t budget = binding_scheduler_.config().max_control_frames_per_turn;
         for (size_t step = 0; step < budget && !stream_work_queue_.empty() && !shutting_down_;
              ++step) {
@@ -9189,6 +9823,15 @@ class WorkerRuntime {
         for (size_t i = 0; i < ids.size(); ++i) {
             teardown_binding_stream(ids[i], true);
         }
+        std::vector<uint64_t> sig_ids;
+        for (auto it = active_signal_bridges_.begin(); it != active_signal_bridges_.end(); ++it) {
+            if (it->second.owner_request_id == request_id) {
+                sig_ids.push_back(it->first);
+            }
+        }
+        for (size_t i = 0; i < sig_ids.size(); ++i) {
+            teardown_signal_bridge(sig_ids[i]);
+        }
     }
 
     void teardown_all_binding_streams() {
@@ -9198,6 +9841,10 @@ class WorkerRuntime {
         }
         stream_work_queue_.clear();
         stream_work_set_.clear();
+        while (!active_signal_bridges_.empty()) {
+            teardown_signal_bridge(active_signal_bridges_.begin()->first);
+        }
+        signal_work_queue_.clear();
     }
 
     static JSValue on_user_binding_call_abort(JSContext* ctx, JSValueConst this_val, int argc,
@@ -9628,7 +10275,7 @@ class WorkerRuntime {
                 cap_hooks.opaque = &cap_ctx;
                 if (!capsid::neutral_from_js_ex(binding_ctx, call.binding_result, &neutral,
                                                 &clone_error, &cap_hooks)) {
-                    rollback_opened_streams(cap_ctx.opened_streams);
+                    rollback_opened_proxies(cap_ctx);
                     payload = JS_NewError(ctx_);
                     JS_DefinePropertyValueStr(
                         ctx_, payload, "message",
@@ -9651,7 +10298,7 @@ class WorkerRuntime {
                     if (JS_IsException(payload)) {
                         JSValue exc = JS_GetException(ctx_);
                         JS_FreeValue(ctx_, exc);
-                        rollback_opened_streams(cap_ctx.opened_streams);
+                        rollback_opened_proxies(cap_ctx);
                         payload = JS_NewError(ctx_);
                         JS_DefinePropertyValueStr(
                             ctx_, payload, "message",
