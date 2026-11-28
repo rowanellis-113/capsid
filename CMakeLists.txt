@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 
-project(capsid_runtime VERSION 0.3.2 LANGUAGES C CXX)
+project(capsid_runtime VERSION 0.4.0 LANGUAGES C CXX)
 
 include(CTest)
 include(GNUInstallDirs)

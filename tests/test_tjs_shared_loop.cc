@@ -230,6 +230,70 @@ void test_shared_loop_two_runtimes() {
     TJS_FreeRuntime(user);
 }
 
+// Binding RPC v2 (M4A): bounded per-turn microtask job budgets prevent a
+// self-chaining microtask storm in one runtime from starving its sibling
+// runtime on the shared loop.
+void test_fair_microtask_job_budget() {
+    TJSRunOptions user_options;
+    TJS_DefaultOptions(&user_options);
+    user_options.skip_run_main = true;
+    user_options.bootstrap = noop_bootstrap;
+    TJSRuntime* user = TJS_NewRuntimeOptions(&user_options);
+    require(user != NULL, "fairness user runtime creation failed");
+    uv_loop_t* loop = TJS_GetLoop(user);
+
+    TJSRunOptions binding_options;
+    TJS_DefaultOptions(&binding_options);
+    binding_options.skip_run_main = true;
+    binding_options.mem_limit = 64 * 1024 * 1024;
+    binding_options.bootstrap = noop_bootstrap;
+    binding_options.shared_loop = loop;
+    TJSRuntime* binding = TJS_NewRuntimeOptions(&binding_options);
+    require(binding != NULL, "fairness binding runtime creation failed");
+
+    TJS_SetMaxJobsPerTurn(user, 16);
+    TJS_SetMaxJobsPerTurn(binding, 16);
+    TJS_StartRuntimeJobs(user);
+    TJS_StartRuntimeJobs(binding);
+
+    JSContext* user_ctx = TJS_GetJSContext(user);
+    JSContext* binding_ctx = TJS_GetJSContext(binding);
+
+    // User queues a 200-step chained microtask storm; Binding queues 1 job.
+    JS_FreeValue(user_ctx,
+                 eval_js(user_ctx, "globalThis.steps = 0;"
+                                   "function pump() {"
+                                   "  if (++globalThis.steps < 200) Promise.resolve().then(pump);"
+                                   "}"
+                                   "Promise.resolve().then(pump);"));
+    JS_FreeValue(binding_ctx,
+                 eval_js(binding_ctx, "globalThis.ran = 0;"
+                                      "Promise.resolve().then(() => { globalThis.ran = 1; });"));
+
+    // After the first turn, Binding MUST already have run while User is still
+    // well short of completing all 200 chained microtasks.
+    uv_run(loop, UV_RUN_NOWAIT);
+    const double user_after_one = global_number(user_ctx, "steps");
+    const double binding_after_one = global_number(binding_ctx, "ran");
+    require(binding_after_one == 1,
+            "sibling runtime was starved on the first bounded turn");
+    require(user_after_one > 0 && user_after_one < 200,
+            "microtask storm was not bounded per turn");
+
+    // Subsequent turns complete all 200 steps cleanly.
+    for (int turn = 0; turn < 200; ++turn) {
+        if (global_number(user_ctx, "steps") >= 200) {
+            break;
+        }
+        uv_run(loop, UV_RUN_NOWAIT);
+    }
+    require(global_number(user_ctx, "steps") == 200,
+            "bounded microtask chain did not finish across subsequent turns");
+
+    TJS_FreeRuntime(binding);
+    TJS_FreeRuntime(user);
+}
+
 } // namespace
 
 int main() {
@@ -239,5 +303,6 @@ int main() {
     TJS_Initialize(1, argv);
     test_module_default_export();
     test_shared_loop_two_runtimes();
+    test_fair_microtask_job_budget();
     return 0;
 }

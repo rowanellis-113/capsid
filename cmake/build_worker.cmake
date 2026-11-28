@@ -316,6 +316,9 @@ if(CAPSID_BUILD_WORKER)
     )
     add_executable(capsid-worker
         src/binding_rpc.cc
+        src/binding_rpc_ledger.cc
+        src/binding_scheduler.cc
+        src/binding_stream_table.cc
         src/capability_policy.cc
         src/channel_io.cc
         src/channel_registry.cc

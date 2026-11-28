@@ -708,7 +708,7 @@ void test_binding_rpc_lifecycle(const char* worker_path, const char* lifecycle_p
             "Binding call metadata lost width or absolute deadline");
 
     send_bodyless_get(fd, 1, "/throw");
-    require(read_response_body(fd, &parser, 1) == "error:Error: binding-sync-boom",
+    require(read_response_body(fd, &parser, 1) == "error:binding-sync-boom",
             "synchronous Binding throw lost its message");
 
     // 17 * 64 exceeds the worker-wide quota if response-terminal calls are

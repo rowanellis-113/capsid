@@ -22,7 +22,7 @@
 ## Design
 
 - [Runtime architecture](design/runtime-architecture.md) and [Host architecture](design/host-architecture.md) describe the process boundary, request path and worker lifecycle.
-- [Binding v1](design/bindings-v1.md) describes trusted packages and their contract with the Host.
+- [Binding v1](design/bindings-v1.md) and [Binding RPC v2 (`v0.4.0`)](design/binding-rpc-v2.md) describe trusted packages, dual-runtime isolation, and the credit-based stream/proxy/handle RPC contract.
 - [Config v2 and elastic pools](design/config-v2.md) describes the development branch. The [v0.3.2 review](history/v0.3.2/README.md) records which design goals have been verified.
 
 ## History and supporting files

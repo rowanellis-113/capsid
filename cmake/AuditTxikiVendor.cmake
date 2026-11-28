@@ -3,7 +3,7 @@
 # This audit verifies:
 #   1. Vendor checkout is clean (no untracked or modified files).
 #   2. Vendor HEAD matches the expected tag (if configured).
-#   3. All 79 patches apply in sequence to a fresh vendor copy, using the
+#   3. All 80 patches apply in sequence to a fresh vendor copy, using the
 #      same tool and flags as the build (git apply -p1 --ignore-whitespace
 #      — PrepareTxiki.cmake).
 #   4. The overlay stamp matches the key computed from the shared function.
@@ -204,9 +204,10 @@ list(LENGTH CAPSID_TXIKI_PATCHES CAPSID_PATCH_COUNT)
 # 0077 avoids pointer arithmetic on null storage when transfer detaches an empty typed-array view.
 # 0078 keeps compiler-probe cache keys valid identifiers across repeated configuration.
 # 0079 integrates quickjs-turbo's audited VM overlay into the txiki.js QuickJS build.
-if(NOT CAPSID_PATCH_COUNT EQUAL 79)
+# 0080 adds TJS_SetMaxJobsPerTurn for fair bounded microtask turns on shared-loop runtimes.
+if(NOT CAPSID_PATCH_COUNT EQUAL 80)
     string(APPEND CAPSID_AUDIT_FAILURES
-        "\n  expected 79 v26.6.0 patches, found ${CAPSID_PATCH_COUNT}")
+        "\n  expected 80 v26.6.0 patches, found ${CAPSID_PATCH_COUNT}")
 endif()
 
 # --- overlay key via shared function -----------------------------------------

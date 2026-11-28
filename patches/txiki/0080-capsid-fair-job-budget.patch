@@ -1,0 +1,139 @@
+--- a/src/tjs.h
++++ b/src/tjs.h
+@@ -65,6 +65,11 @@
+  * handles on its (possibly shared) loop. A shared-loop runtime is pumped
+  * by the owning runtime's loop; it never calls TJS_Run itself. */
+ void TJS_StartRuntimeJobs(TJSRuntime *qrt);
++/* Capsid Binding RPC v2: cap the number of QuickJS microtask jobs executed per
++ * event-loop turn (0 = unbounded, the default for single-runtime workers).
++ * Remaining jobs keep the runtime's idle handle active so sibling shared-loop
++ * runtimes receive fair turns. */
++void TJS_SetMaxJobsPerTurn(TJSRuntime *qrt, size_t max_jobs);
+ JSValue TJS_GetInternalCore(TJSRuntime *qrt);
+ int TJS_EvalBytecode(JSContext *ctx, const uint8_t *buf, size_t buf_len, bool check_promise);
+ JSValue TJS_EvalModuleContent(JSContext *ctx,
+--- a/src/private.h
++++ b/src/private.h
+@@ -88,6 +88,8 @@
+      * runtime's loop (options.shared_loop); its free path then skips
+      * uv_loop_close and only closes its own handles. */
+     bool loop_shared;
++    /* Capsid Binding RPC v2: per-turn microtask job budget (0 = unbounded). */
++    size_t max_jobs_per_turn;
+     TJSAsyncContextHooks async_ctx_hooks;
+     void *async_ctx_opaque;
+     TJSAsyncContextControlHooks async_ctx_control;
+@@ -209,6 +211,7 @@
+ uv_stream_t *tjs_pipe_get_stream(JSContext *ctx, JSValue obj);
+ 
+ void tjs__drain_microtasks(JSContext *ctx);
++void tjs__drain_microtasks_turn(JSContext *ctx);
+ void tjs__execute_jobs(JSContext *ctx);
+ JSModuleDef *tjs__load_builtin(JSContext *ctx, const char *name);
+ int tjs__load_file(JSContext *ctx, TBuf *dbuf, const char *filename);
+--- a/src/vm.c
++++ b/src/vm.c
+@@ -190,7 +190,7 @@
+     }
+ 
+     qrt->draining_microtasks = true;
+-    tjs__drain_microtasks(ctx);
++    tjs__drain_microtasks_turn(ctx);
+     qrt->draining_microtasks = false;
+ 
+     return JS_UNDEFINED;
+@@ -854,12 +854,23 @@
+     uv__maybe_idle(qrt);
+ }
+ 
+-void tjs__drain_microtasks(JSContext *ctx) {
++void TJS_SetMaxJobsPerTurn(TJSRuntime *qrt, size_t max_jobs) {
++    if (qrt != NULL) {
++        qrt->max_jobs_per_turn = max_jobs;
++    }
++}
++
++static bool tjs__drain_microtasks_budget(JSContext *ctx, size_t max_jobs) {
++    JSRuntime *rt = JS_GetRuntime(ctx);
+     JSContext *ctx1;
+     int err;
++    size_t executed = 0;
+ 
+     for (;;) {
+-        err = JS_ExecutePendingJob(JS_GetRuntime(ctx), &ctx1);
++        if (max_jobs > 0 && executed >= max_jobs) {
++            return !JS_IsJobPending(rt);
++        }
++        err = JS_ExecutePendingJob(rt, &ctx1);
+         if (err <= 0) {
+             if (err < 0) {
+                 TJSRuntime *qrt = TJS_GetRuntime(ctx);
+@@ -881,14 +892,33 @@
+                 }
+             }
+ 
+-            break;
+-        }
+-    }
+-}
+-
+-void tjs__execute_jobs(JSContext *ctx) {
+-    tjs__drain_microtasks(ctx);
++            return true;
++        }
++        ++executed;
++    }
++}
++
++void tjs__drain_microtasks(JSContext *ctx) {
++    (void) tjs__drain_microtasks_budget(ctx, 0);
++}
++
++void tjs__drain_microtasks_turn(JSContext *ctx) {
++    TJSRuntime *qrt = TJS_GetRuntime(ctx);
++    CHECK_NOT_NULL(qrt);
++    if (!tjs__drain_microtasks_budget(ctx, qrt->max_jobs_per_turn) && !qrt->freeing) {
++        uv__maybe_idle(qrt);
++    }
++}
++
++static void tjs__execute_jobs_budget(JSContext *ctx, size_t max_jobs) {
++    bool drained = tjs__drain_microtasks_budget(ctx, max_jobs);
+     tjs_async_context_checkpoint(ctx);
++    if (!drained) {
++        /* Pending microtasks may still attach rejection handlers on the next
++         * fair turn; keep pending_rejections deferred until the microtask queue
++         * drains completely. */
++        return;
++    }
+ 
+     /* Process deferred unhandled promise rejections.
+      * The rejection tracker defers event dispatch to after all microtasks
+@@ -1026,11 +1056,15 @@
+     }
+ }
+ 
++void tjs__execute_jobs(JSContext *ctx) {
++    tjs__execute_jobs_budget(ctx, 0);
++}
++
+ static void uv__check_cb(uv_check_t *handle) {
+     TJSRuntime *qrt = handle->data;
+     CHECK_NOT_NULL(qrt);
+ 
+-    tjs__execute_jobs(qrt->ctx);
++    tjs__execute_jobs_budget(qrt->ctx, qrt->max_jobs_per_turn);
+ 
+     uv__maybe_idle(qrt);
+ }
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -223,7 +223,7 @@
+         if (!handled) TJS_Stop(qrt);
+     }
+     JS_FreeValue(ctx, ret);
+-    if (checkpoint) tjs__drain_microtasks(ctx);
++    if (checkpoint) tjs__drain_microtasks_turn(ctx);
+ }
+ 
+ void tjs_call_handler(JSContext *ctx, JSValue func, int argc, JSValue *argv) {

@@ -267,9 +267,9 @@ function(capsid_compute_txiki_overlay_key)
 # 0077 avoids pointer arithmetic on null storage when transfer detaches an empty typed-array view.
 # 0078 keeps compiler-probe cache keys valid identifiers across repeated configuration.
 # 0079 integrates quickjs-turbo's audited VM overlay (native Linux x86-64 / portable C, Hybrid GC, Property IC, Bellard backports, Portable RegExp).
-    if(NOT CTOK_PATCH_COUNT EQUAL 79)
+    if(NOT CTOK_PATCH_COUNT EQUAL 80)
         message(FATAL_ERROR
-            "expected 79 patches, found ${CTOK_PATCH_COUNT} in ${CTOK_PATCH_DIR}")
+            "expected 80 patches, found ${CTOK_PATCH_COUNT} in ${CTOK_PATCH_DIR}")
     endif()
 
     set(CTOK_PATCH_LINES "")

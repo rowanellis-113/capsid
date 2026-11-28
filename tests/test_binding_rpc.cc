@@ -301,6 +301,198 @@ void test_object_key_ordering_and_duplicates() {
             "object key order was not preserved");
 }
 
+void test_remote_error_structured_and_tamper_proof() {
+    RuntimeFixture source;
+    RuntimeFixture target;
+
+    // Install minimal DOMException + QuotaExceededError + AbortSignal surfaces
+    // mirroring Capsid's bootstrap before capturing intrinsics.
+    const char* setup_js =
+        "class FakeDOMException extends Error {"
+        "  #name; #message;"
+        "  constructor(message = '', name = 'Error') {"
+        "    super(String(message)); this.#name = String(name); this.#message = String(message);"
+        "  }"
+        "  get name() { return this.#name; }"
+        "  get message() { return this.#message; }"
+        "}"
+        "globalThis.DOMException = FakeDOMException;"
+        "class FakeQuotaExceededError extends FakeDOMException {"
+        "  #quota; #requested;"
+        "  static _capture(v) {"
+        "    if (v === null || typeof v !== 'object' || !(#quota in v)) return null;"
+        "    return { message: v.message, quota: v.#quota, requested: v.#requested };"
+        "  }"
+        "  constructor(message = '', opts = {}) {"
+        "    super(message, 'QuotaExceededError');"
+        "    this.#quota = opts.quota ?? null; this.#requested = opts.requested ?? null;"
+        "  }"
+        "  get quota() { return this.#quota; }"
+        "  get requested() { return this.#requested; }"
+        "}"
+        "globalThis.QuotaExceededError = FakeQuotaExceededError;"
+        "class FakeAbortSignal {"
+        "  #aborted = false; #reason = undefined; #listeners = new Set();"
+        "  get aborted() { return this.#aborted; }"
+        "  get reason() { return this.#reason; }"
+        "  _abort(r) { this.#aborted = true; this.#reason = r; for (const fn of [...this.#listeners]) fn(); }"
+        "  addEventListener(t, fn) { if (t === 'abort') this.#listeners.add(fn); }"
+        "  removeEventListener(t, fn) { if (t === 'abort') this.#listeners.delete(fn); }"
+        "}"
+        "globalThis.EventTarget = { prototype: FakeAbortSignal.prototype };"
+        "globalThis.AbortSignal = FakeAbortSignal;";
+    JS_FreeValue(source.ctx(), source.eval(setup_js));
+    JS_FreeValue(target.ctx(), target.eval(setup_js));
+
+    capsid::BindingRpcIntrinsics src_intrinsics;
+    capsid::BindingRpcIntrinsics dst_intrinsics;
+    require(capsid::capture_binding_rpc_intrinsics(source.ctx(), &src_intrinsics),
+            "capture source intrinsics failed");
+    require(capsid::capture_binding_rpc_intrinsics(target.ctx(), &dst_intrinsics),
+            "capture target intrinsics failed");
+
+    // Mutate globals after capture: intrinsics must remain immune.
+    JS_FreeValue(target.ctx(), target.eval("globalThis.__origTypeError = TypeError;"
+                                           "globalThis.__origRangeError = RangeError;"
+                                           "globalThis.__origDOMException = DOMException;"
+                                           "globalThis.__origQuotaExceededError = QuotaExceededError;"
+                                           "globalThis.TypeError = function() { throw new Error('tampered'); };"
+                                           "globalThis.DOMException = function() { throw new Error('tampered'); };"));
+
+    // Native Error subclasses round-trip cleanly.
+    struct Case {
+        const char* expr;
+        capsid::RemoteErrorKind kind;
+        const char* expected_msg;
+        const char* check_expr;
+    };
+    const Case cases[] = {
+        {"new TypeError('bad type')", capsid::RemoteErrorKind::kTypeError, "bad type",
+         "(e instanceof __origTypeError) && e.message === 'bad type'"},
+        {"new RangeError('out of bounds')", capsid::RemoteErrorKind::kRangeError, "out of bounds",
+         "(e instanceof __origRangeError) && e.message === 'out of bounds'"},
+        {"new SyntaxError('bad json')", capsid::RemoteErrorKind::kSyntaxError, "bad json",
+         "e.name === 'SyntaxError' && e.message === 'bad json'"},
+        {"new DOMException('timed out', 'TimeoutError')", capsid::RemoteErrorKind::kDOMException,
+         "timed out", "(e instanceof __origDOMException) && e.name === 'TimeoutError' && e.message === 'timed out'"},
+        {"new QuotaExceededError('too big', { quota: 64, requested: 128 })",
+         capsid::RemoteErrorKind::kQuotaExceededError, "too big",
+         "(e instanceof __origQuotaExceededError) && e.quota === 64 && e.requested === 128 && e.message === 'too big'"},
+    };
+    for (std::size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        JSValue src_err = source.eval(cases[i].expr);
+        capsid::RemoteErrorInfo info;
+        capsid::capture_remote_error(source.ctx(), src_err, &src_intrinsics, "fallback", &info);
+        JS_FreeValue(source.ctx(), src_err);
+        require(info.kind == cases[i].kind, "remote error kind mismatch");
+        require(info.message == cases[i].expected_msg, "remote error message mismatch");
+        JSValue mat = capsid::materialize_remote_error(target.ctx(), info, &dst_intrinsics);
+        require(!JS_IsException(mat), "materialize_remote_error threw");
+        JSValue global = JS_GetGlobalObject(target.ctx());
+        JS_SetPropertyStr(target.ctx(), global, "e", mat);
+        JS_FreeValue(target.ctx(), global);
+        JSValue ok = target.eval(cases[i].check_expr);
+        require(JS_ToBool(target.ctx(), ok) == 1, "materialized error failed check");
+        JS_FreeValue(target.ctx(), ok);
+    }
+
+    // Hostile getter on Error.message and Proxy rejection must NEVER execute.
+    JSValue hostile = source.eval(
+        "globalThis.__errGetterRan = false;"
+        "(() => { const err = new Error('ignored');"
+        "  Object.defineProperty(err, 'message', { get() { globalThis.__errGetterRan = true; return 'pwn'; }, configurable: true });"
+        "  return err; })()");
+    capsid::RemoteErrorInfo hostile_info;
+    capsid::capture_remote_error(source.ctx(), hostile, &src_intrinsics, "safe-fallback",
+                                 &hostile_info);
+    JS_FreeValue(source.ctx(), hostile);
+    require(hostile_info.message == "safe-fallback", "hostile error getter did not fall back");
+    JSValue ran = source.eval("globalThis.__errGetterRan");
+    require(JS_ToBool(source.ctx(), ran) == 0, "capture_remote_error executed hostile getter");
+    JS_FreeValue(source.ctx(), ran);
+
+    JSValue proxy_err = source.eval(
+        "globalThis.__proxyTrapRan = false;"
+        "new Proxy({}, { get() { globalThis.__proxyTrapRan = true; return 'x'; } })");
+    capsid::RemoteErrorInfo proxy_info;
+    capsid::capture_remote_error(source.ctx(), proxy_err, &src_intrinsics, "proxy-fallback",
+                                 &proxy_info);
+    JS_FreeValue(source.ctx(), proxy_err);
+    require(proxy_info.message == "proxy-fallback", "proxy error did not fall back");
+    JSValue trap_ran = source.eval("globalThis.__proxyTrapRan");
+    require(JS_ToBool(source.ctx(), trap_ran) == 0, "capture_remote_error triggered proxy trap");
+    JS_FreeValue(source.ctx(), trap_ran);
+
+    // Message truncation at kMaxRemoteErrorMessageBytes must not split UTF-8.
+    JSValue huge = source.eval("'a'.repeat(5000)");
+    capsid::RemoteErrorInfo huge_info;
+    capsid::capture_remote_error(source.ctx(), huge, &src_intrinsics, "fallback", &huge_info);
+    JS_FreeValue(source.ctx(), huge);
+    require(huge_info.message.size() == capsid::kMaxRemoteErrorMessageBytes,
+            "oversized remote error message was not truncated to limit");
+
+    // BindingCallOptions strict validation.
+    capsid::BindingCallOptions opts;
+    std::string opt_err;
+    JSValue valid_opts = source.eval("({ timeoutMs: 250, signal: new AbortSignal() })");
+    require(capsid::parse_binding_call_options(source.ctx(), valid_opts, &src_intrinsics, &opts,
+                                               &opt_err),
+            ("valid options rejected: " + opt_err).c_str());
+    require(opts.has_timeout_ms && opts.timeout_ms == 250 && opts.has_signal,
+            "valid options did not decode fields");
+    JS_FreeValue(source.ctx(), valid_opts);
+
+    const char* bad_opts[] = {
+        "123",
+        "[]",
+        "new Proxy({}, {})",
+        "({ unknownKey: 1 })",
+        "({ timeoutMs: -1 })",
+        "({ timeoutMs: NaN })",
+        "({ timeoutMs: Infinity })",
+        "({ timeoutMs: '100' })",
+        "({ signal: { aborted: false } })",
+        "Object.defineProperty({}, 'timeoutMs', { get() { globalThis.__optGetter = true; return 10; }, enumerable: true })",
+    };
+    JS_FreeValue(source.ctx(), source.eval("globalThis.__optGetter = false;"));
+    for (std::size_t i = 0; i < sizeof(bad_opts) / sizeof(bad_opts[0]); ++i) {
+        JSValue bad = source.eval(bad_opts[i]);
+        opt_err.clear();
+        require(!capsid::parse_binding_call_options(source.ctx(), bad, &src_intrinsics, &opts,
+                                                    &opt_err) &&
+                    !opt_err.empty(),
+                (std::string("bad options accepted: ") + bad_opts[i]).c_str());
+        JS_FreeValue(source.ctx(), bad);
+    }
+    JSValue opt_ran = source.eval("globalThis.__optGetter");
+    require(JS_ToBool(source.ctx(), opt_ran) == 0, "parse_binding_call_options executed getter");
+    JS_FreeValue(source.ctx(), opt_ran);
+
+    // Abort reason round-trip (DOMException, plain object, uncloneable fallback).
+    JSValue dom_abort = source.eval("new DOMException('user cancel', 'AbortError')");
+    capsid::BindingAbortReason reason;
+    capsid::capture_abort_reason(source.ctx(), dom_abort, &src_intrinsics, &reason);
+    JS_FreeValue(source.ctx(), dom_abort);
+    require(reason.kind == capsid::BindingAbortReason::Kind::kRemoteError &&
+                reason.error.name == "AbortError" && reason.error.message == "user cancel",
+            "DOMException abort reason lost structured metadata");
+
+    JSValue plain_abort = source.eval("({ code: 'STOP', n: 7 })");
+    capsid::capture_abort_reason(source.ctx(), plain_abort, &src_intrinsics, &reason);
+    JS_FreeValue(source.ctx(), plain_abort);
+    require(reason.kind == capsid::BindingAbortReason::Kind::kNeutralValue,
+            "plain object abort reason was not cloned as NeutralValue");
+
+    JSValue bad_abort = source.eval("() => {}");
+    capsid::capture_abort_reason(source.ctx(), bad_abort, &src_intrinsics, &reason);
+    JS_FreeValue(source.ctx(), bad_abort);
+    require(reason.kind == capsid::BindingAbortReason::Kind::kDefaultAbort,
+            "uncloneable abort reason did not fall back to default AbortError");
+
+    capsid::free_binding_rpc_intrinsics(source.ctx(), &src_intrinsics);
+    capsid::free_binding_rpc_intrinsics(target.ctx(), &dst_intrinsics);
+}
+
 } // namespace
 
 int main() {
@@ -314,5 +506,6 @@ int main() {
     test_object_key_ordering_and_duplicates();
     test_call_ids_use_full_width_biguint64();
     test_neutral_to_js_propagates_conversion_errors();
+    test_remote_error_structured_and_tamper_proof();
     return 0;
 }

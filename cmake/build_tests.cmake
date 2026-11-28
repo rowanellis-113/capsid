@@ -2610,6 +2610,13 @@ if(BUILD_TESTING)
                     --worker $<TARGET_FILE:capsid-worker> --kind worker)
             set_tests_properties(binding_rpc_request_quota binding_rpc_worker_quota
                 PROPERTIES TIMEOUT 60 LABELS "worker;binding;quota;lifecycle")
+            capsid_add_binding_test(test-worker-binding-v2 tests/test_worker_binding_v2.cc)
+            target_link_libraries(test-worker-binding-v2 PRIVATE capsid_runtime)
+            add_dependencies(test-worker-binding-v2 capsid-worker)
+            add_test(NAME worker_binding_v2
+                COMMAND test-worker-binding-v2 $<TARGET_FILE:capsid-worker>)
+            set_tests_properties(worker_binding_v2
+                PROPERTIES TIMEOUT 60 LABELS "worker;binding;quota;lifecycle")
             add_test(NAME binding_rpc_quota_contract_controls
                 COMMAND "${CAPSID_HOST_TEST_NODE}" --test
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_binding_quota_contract.mjs")
@@ -7597,6 +7604,70 @@ if(BUILD_TESTING)
             COMMAND test-binding-rpc
         )
         set_tests_properties(binding_rpc PROPERTIES TIMEOUT 20)
+
+        # Binding RPC v2 (v0.4.0) M4A: 3-tier quota ledger and fair round-robin
+        # shared-loop scheduler unit contract.
+        add_executable(
+            test-binding-rpc-v2-core
+            tests/test_binding_rpc_v2_core.cc
+            src/binding_rpc_ledger.cc
+            src/binding_scheduler.cc
+        )
+        target_include_directories(test-binding-rpc-v2-core PRIVATE
+            include src
+            "${CAPSID_TXIKI_OVERLAY}/deps/libuv/include")
+        target_link_libraries(test-binding-rpc-v2-core PRIVATE tjs capsid_sanitizers)
+        set_target_properties(test-binding-rpc-v2-core PROPERTIES
+            CXX_STANDARD 11
+            CXX_STANDARD_REQUIRED ON)
+        if(CAPSID_STRICT_WARNINGS)
+            if(MSVC)
+                target_compile_options(test-binding-rpc-v2-core PRIVATE /W4 /WX)
+            else()
+                target_compile_options(test-binding-rpc-v2-core PRIVATE
+                    -Wall -Wextra -Wpedantic -Werror
+                    "$<$<COMPILE_LANGUAGE:CXX>:-Wno-c99-extensions>")
+            endif()
+        endif()
+        add_test(
+            NAME binding_rpc_v2_core
+            COMMAND test-binding-rpc-v2-core
+        )
+        set_tests_properties(binding_rpc_v2_core PROPERTIES
+            TIMEOUT 20 LABELS "worker;binding;quota;lifecycle")
+
+        # Binding RPC v2 (v0.4.0) M4B: credit-based stream proxy state machine.
+        add_executable(
+            test-binding-stream-table
+            tests/test_binding_stream_table.cc
+            src/binding_stream_table.cc
+            src/binding_rpc_ledger.cc
+            src/binding_rpc.cc
+        )
+        target_include_directories(test-binding-stream-table PRIVATE
+            include src
+            "${CAPSID_TXIKI_OVERLAY}/src"
+            "${CAPSID_TXIKI_OVERLAY}/deps/quickjs"
+            "${CAPSID_TXIKI_OVERLAY}/deps/libuv/include")
+        target_link_libraries(test-binding-stream-table PRIVATE tjs capsid_sanitizers)
+        set_target_properties(test-binding-stream-table PROPERTIES
+            CXX_STANDARD 11
+            CXX_STANDARD_REQUIRED ON)
+        if(CAPSID_STRICT_WARNINGS)
+            if(MSVC)
+                target_compile_options(test-binding-stream-table PRIVATE /W4 /WX)
+            else()
+                target_compile_options(test-binding-stream-table PRIVATE
+                    -Wall -Wextra -Wpedantic -Werror
+                    "$<$<COMPILE_LANGUAGE:CXX>:-Wno-c99-extensions>")
+            endif()
+        endif()
+        add_test(
+            NAME binding_stream_table
+            COMMAND test-binding-stream-table
+        )
+        set_tests_properties(binding_stream_table PROPERTIES
+            TIMEOUT 20 LABELS "worker;binding;stream;quota")
 
         # WP-00/PR-01 RED gates. All three worker tests are expected to
         # FAIL on the pre-fix bridge (identity collapse P0-1, request

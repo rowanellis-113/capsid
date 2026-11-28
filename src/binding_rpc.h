@@ -1,9 +1,13 @@
-// Binding v1 §5.3: the C++ neutral value between the User and Binding
-// Runtimes. Only plain data crosses the boundary — never JSValue,
-// objects, or native handles. Cloning rejects functions, promises,
-// symbols, accessors (without executing them), cycles, Map/Set/Weak
-// collections, Error/RegExp/class instances, exotic proxies and every
-// native handle; depth, node count and byte size are bounded.
+// Binding RPC v2 (v0.4.0): the C++ neutral boundary between User and Binding
+// Runtimes.
+//
+// Plain values clone across the boundary without executing user getters,
+// proxies, or mutated globals. Binding RPC v2 adds:
+//   - captured per-runtime intrinsics (immune to global/prototype tampering);
+//   - structured RemoteErrorInfo capture & materialization (preserving Error
+//     subclasses, DOMException, and QuotaExceededError);
+//   - strict BindingCallOptions parsing ({ signal?, timeoutMs? });
+//   - cross-runtime AbortSignal reason capture & listener helpers.
 
 #ifndef CAPSID_BINDING_RPC_H
 #define CAPSID_BINDING_RPC_H
@@ -21,6 +25,8 @@ namespace capsid {
 constexpr std::size_t kMaxBindingCloneDepth = 64;
 constexpr std::size_t kMaxBindingCloneNodes = 10000;
 constexpr std::size_t kMaxBindingCloneBytes = 1024U * 1024U;
+constexpr std::size_t kMaxRemoteErrorNameBytes = 128;
+constexpr std::size_t kMaxRemoteErrorMessageBytes = 4096;
 
 struct NeutralValue {
     enum class Kind {
@@ -47,6 +53,124 @@ struct NeutralValue {
     // kObject: insertion-ordered, duplicate keys rejected at clone time.
     std::vector<std::pair<std::string, NeutralValue>> object;
 };
+
+// Intrinsic constructors, prototypes, and brand-checked native getters
+// captured once per JSContext immediately after bootstrap, before any
+// untrusted application or Binding package code executes.
+struct BindingRpcIntrinsics {
+    JSValue object_proto = JS_UNDEFINED;
+    JSValue error_ctor = JS_UNDEFINED;
+    JSValue error_proto = JS_UNDEFINED;
+    JSValue type_error_ctor = JS_UNDEFINED;
+    JSValue type_error_proto = JS_UNDEFINED;
+    JSValue range_error_ctor = JS_UNDEFINED;
+    JSValue range_error_proto = JS_UNDEFINED;
+    JSValue syntax_error_ctor = JS_UNDEFINED;
+    JSValue syntax_error_proto = JS_UNDEFINED;
+    JSValue uri_error_ctor = JS_UNDEFINED;
+    JSValue uri_error_proto = JS_UNDEFINED;
+    JSValue reference_error_ctor = JS_UNDEFINED;
+    JSValue reference_error_proto = JS_UNDEFINED;
+    JSValue eval_error_ctor = JS_UNDEFINED;
+    JSValue eval_error_proto = JS_UNDEFINED;
+    JSValue dom_exception_ctor = JS_UNDEFINED;
+    JSValue dom_exception_name_getter = JS_UNDEFINED;
+    JSValue dom_exception_message_getter = JS_UNDEFINED;
+    JSValue quota_exceeded_ctor = JS_UNDEFINED;
+    JSValue quota_exceeded_capture = JS_UNDEFINED;
+    JSValue abort_signal_aborted_getter = JS_UNDEFINED;
+    JSValue abort_signal_reason_getter = JS_UNDEFINED;
+    JSValue event_target_add_listener = JS_UNDEFINED;
+    JSValue event_target_remove_listener = JS_UNDEFINED;
+};
+
+bool capture_binding_rpc_intrinsics(JSContext* ctx, BindingRpcIntrinsics* out);
+void free_binding_rpc_intrinsics(JSContext* ctx, BindingRpcIntrinsics* intrinsics);
+
+enum class RemoteErrorKind {
+    kError = 0,
+    kTypeError,
+    kRangeError,
+    kSyntaxError,
+    kURIError,
+    kReferenceError,
+    kEvalError,
+    kDOMException,
+    kQuotaExceededError,
+};
+
+struct RemoteErrorInfo {
+    RemoteErrorKind kind = RemoteErrorKind::kError;
+    std::string name;
+    std::string message;
+    bool has_quota = false;
+    double quota = 0;
+    bool has_requested = false;
+    double requested = 0;
+
+    static RemoteErrorInfo make_error(const std::string& message);
+    static RemoteErrorInfo make_type_error(const std::string& message);
+    static RemoteErrorInfo make_dom_exception(const std::string& name, const std::string& message);
+};
+
+// Inspects a JS error/rejection value without running user getters, Proxy
+// traps, or overridden prototype methods, and records a runtime-neutral
+// structured error snapshot.
+void capture_remote_error(JSContext* ctx, JSValueConst value,
+                          const BindingRpcIntrinsics* intrinsics, const char* fallback,
+                          RemoteErrorInfo* out);
+
+// Materializes an authentic Error / subclass / DOMException / QuotaExceededError
+// in `ctx` using captured intrinsics when provided. Caller owns the result.
+JSValue materialize_remote_error(JSContext* ctx, const RemoteErrorInfo& info,
+                                 const BindingRpcIntrinsics* intrinsics);
+
+// Cross-runtime abort reason carried from User AbortSignal to Binding
+// AbortController.abort(reason). Preserves structured errors or plain cloneable
+// values and falls back to default AbortError for uncloneable objects.
+struct BindingAbortReason {
+    enum class Kind {
+        kDefaultAbort = 0,
+        kRemoteError,
+        kNeutralValue,
+    };
+
+    Kind kind = Kind::kDefaultAbort;
+    RemoteErrorInfo error;
+    NeutralValue value;
+};
+
+void capture_abort_reason(JSContext* ctx, JSValueConst value,
+                          const BindingRpcIntrinsics* intrinsics, BindingAbortReason* out);
+JSValue materialize_abort_reason(JSContext* ctx, const BindingAbortReason& reason,
+                                 const BindingRpcIntrinsics* intrinsics);
+
+struct BindingCallOptions {
+    bool has_timeout_ms = false;
+    std::uint64_t timeout_ms = 0;
+    bool has_signal = false;
+    JSValueConst signal = JS_UNDEFINED; // borrowed from options argument
+};
+
+// Strict parser for optional `binding.method(input, options)` second argument.
+// Rejects non-plain objects, proxies, accessors, unknown keys, non-finite or
+// negative timeoutMs, and non-AbortSignal `signal` values without invoking any
+// attacker-controlled getters or traps.
+bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
+                                const BindingRpcIntrinsics* intrinsics, BindingCallOptions* out,
+                                std::string* error);
+
+// Brand-checked native AbortSignal helpers immune to prototype tampering.
+bool binding_signal_is_aborted(JSContext* ctx, JSValueConst signal,
+                               const BindingRpcIntrinsics* intrinsics, bool* out_aborted);
+bool binding_signal_read_reason(JSContext* ctx, JSValueConst signal,
+                                const BindingRpcIntrinsics* intrinsics, JSValue* out_reason);
+bool binding_signal_add_abort_listener(JSContext* ctx, JSValueConst signal,
+                                       JSValueConst listener,
+                                       const BindingRpcIntrinsics* intrinsics);
+void binding_signal_remove_abort_listener(JSContext* ctx, JSValueConst signal,
+                                          JSValueConst listener,
+                                          const BindingRpcIntrinsics* intrinsics);
 
 // JS -> neutral. Fails closed with a static diagnostic; `out` is not
 // touched on failure.
