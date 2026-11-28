@@ -511,6 +511,94 @@ function createProxyResponse(meta, body) {
   return res;
 }
 
+// M4D: Unforgeable private-branded RpcTarget base class exposed ONLY on the
+// Binding Runtime globalThis (never in User Runtime). Ordinary classes cannot
+// forge the private `#rpcTarget` brand.
+const IntrinsicSymbolDispose = Symbol.dispose;
+const IntrinsicSymbolAsyncDispose = Symbol.asyncDispose;
+const IntrinsicTypeError = TypeError;
+const numberIsFinite = Number.isFinite;
+const objectFreeze = Object.freeze;
+
+class RpcTarget {
+  #rpcTarget = true;
+  #leaseMs = 0;
+
+  constructor(options = undefined) {
+    if (options !== undefined && options !== null) {
+      if (typeof options !== 'object') {
+        throw new IntrinsicTypeError('RpcTarget options must be an object');
+      }
+      const desc = ownDesc(options, 'leaseMs');
+      if (desc !== undefined) {
+        if (desc.get !== undefined || desc.set !== undefined) {
+          throw new IntrinsicTypeError('RpcTarget leaseMs must be a data property');
+        }
+        const v = desc.value;
+        if (v !== undefined) {
+          if (typeof v !== 'number' || !numberIsFinite(v) || v < 0) {
+            throw new IntrinsicTypeError('RpcTarget leaseMs must be a non-negative finite number');
+          }
+          this.#leaseMs = Math.floor(v);
+        }
+      }
+    }
+  }
+
+  static _isInstance(value) {
+    return value !== null && typeof value === 'object' && #rpcTarget in value;
+  }
+
+  static _getLeaseMs(value) {
+    return #rpcTarget in value ? value.#leaseMs : 0;
+  }
+}
+
+const isRpcTarget = RpcTarget._isInstance;
+const getRpcTargetLeaseMs = RpcTarget._getLeaseMs;
+delete RpcTarget._isInstance;
+delete RpcTarget._getLeaseMs;
+objectFreeze(RpcTarget.prototype);
+objectFreeze(RpcTarget);
+
+function disposeRpcTarget(target) {
+  if (target === null || typeof target !== 'object') {
+    return;
+  }
+  const invoke = (fn) => {
+    try {
+      const ret = fn.call(target);
+      if (ret !== null && typeof ret === 'object' && typeof ret.then === 'function') {
+        promiseThen.call(promiseResolve(ret), () => {}, () => {});
+      }
+    } catch {
+      // Fault-isolated disposal: Binding cleanup failures never poison User or Worker.
+    }
+  };
+  try {
+    if (IntrinsicSymbolDispose !== undefined) {
+      const fn = target[IntrinsicSymbolDispose];
+      if (typeof fn === 'function') {
+        invoke(fn);
+        return;
+      }
+    }
+    if (IntrinsicSymbolAsyncDispose !== undefined) {
+      const fn = target[IntrinsicSymbolAsyncDispose];
+      if (typeof fn === 'function') {
+        invoke(fn);
+        return;
+      }
+    }
+    const fn = target.dispose;
+    if (typeof fn === 'function') {
+      invoke(fn);
+    }
+  } catch {
+    // Ignore hostile property access during disposal.
+  }
+}
+
 function disposeLateValue(value) {
   const abortErr = new IntrinsicDOMException('Binding call was canceled', 'AbortError');
   if (isReadableStream(value)) {
@@ -542,20 +630,23 @@ function disposeLateValue(value) {
     }
     return;
   }
-  // M4D RpcTarget or Symbol.dispose resource cleanup (bounded, fault-isolated).
+  if (isRpcTarget(value)) {
+    disposeRpcTarget(value);
+    return;
+  }
+  // Best-effort Symbol.dispose resource cleanup (bounded, fault-isolated).
   if (value !== null && typeof value === 'object') {
-    const symDispose = Symbol.dispose;
-    if (symDispose !== undefined) {
-      const fn = value[symDispose];
-      if (typeof fn === 'function') {
-        try {
+    if (IntrinsicSymbolDispose !== undefined) {
+      try {
+        const fn = value[IntrinsicSymbolDispose];
+        if (typeof fn === 'function') {
           const ret = fn.call(value);
           if (ret !== null && typeof ret === 'object' && typeof ret.then === 'function') {
             promiseThen.call(promiseResolve(ret), () => {}, () => {});
           }
-        } catch {
-          // Fault-isolated disposal.
         }
+      } catch {
+        // Fault-isolated disposal.
       }
     }
   }
@@ -582,6 +673,10 @@ export function installBindingRpcBridge(core) {
     inspectResponse,
     createProxyResponse,
     createProxyAbortController,
+    RpcTarget,
+    isRpcTarget,
+    getRpcTargetLeaseMs,
+    disposeRpcTarget,
     disposeLateValue,
   });
 }

@@ -708,6 +708,29 @@ bool capture_binding_rpc_intrinsics(JSContext* ctx, BindingRpcIntrinsics* out) {
     }
     JS_FreeValue(ctx, et_ctor);
 
+    JSValue symbol_ctor = JS_GetPropertyStr(ctx, global, "Symbol");
+    if (JS_IsException(symbol_ctor)) {
+        clear_pending_exception(ctx);
+    } else if (JS_IsObject(symbol_ctor)) {
+        JSValue s_disp = JS_GetPropertyStr(ctx, symbol_ctor, "dispose");
+        if (JS_IsException(s_disp)) {
+            clear_pending_exception(ctx);
+        } else if (JS_IsSymbol(s_disp)) {
+            out->symbol_dispose = s_disp;
+        } else {
+            JS_FreeValue(ctx, s_disp);
+        }
+        JSValue s_adisp = JS_GetPropertyStr(ctx, symbol_ctor, "asyncDispose");
+        if (JS_IsException(s_adisp)) {
+            clear_pending_exception(ctx);
+        } else if (JS_IsSymbol(s_adisp)) {
+            out->symbol_async_dispose = s_adisp;
+        } else {
+            JS_FreeValue(ctx, s_adisp);
+        }
+    }
+    JS_FreeValue(ctx, symbol_ctor);
+
     JS_FreeValue(ctx, global);
     return true;
 }
@@ -741,6 +764,8 @@ void free_binding_rpc_intrinsics(JSContext* ctx, BindingRpcIntrinsics* intrinsic
         &intrinsics->abort_signal_reason_getter,
         &intrinsics->event_target_add_listener,
         &intrinsics->event_target_remove_listener,
+        &intrinsics->symbol_dispose,
+        &intrinsics->symbol_async_dispose,
     };
     for (std::size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
         JS_FreeValue(ctx, *fields[i]);
@@ -1389,7 +1414,8 @@ JSValue neutral_to_js_ex(JSContext* ctx, const NeutralValue& value,
     case NeutralValue::Kind::kReadableStreamProxy:
     case NeutralValue::Kind::kWritableStreamProxy:
     case NeutralValue::Kind::kRequestProxy:
-    case NeutralValue::Kind::kResponseProxy: {
+    case NeutralValue::Kind::kResponseProxy:
+    case NeutralValue::Kind::kRpcHandleProxy: {
         if (hooks != NULL && hooks->materialize != NULL) {
             return hooks->materialize(ctx, value, hooks->opaque);
         }
@@ -1470,6 +1496,8 @@ std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
         return 64 + value.request.inline_bytes.size();
     case NeutralValue::Kind::kResponseProxy:
         return 64 + value.response.inline_bytes.size();
+    case NeutralValue::Kind::kRpcHandleProxy:
+        return 32 + value.handle_methods.size() * 16;
     }
     return 1;
 }

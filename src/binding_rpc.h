@@ -73,6 +73,7 @@ struct NeutralValue {
         kWritableStreamProxy,
         kRequestProxy,
         kResponseProxy,
+        kRpcHandleProxy,
     };
 
     Kind kind = Kind::kUndefined;
@@ -88,6 +89,8 @@ struct NeutralValue {
     std::uint64_t stream_id = 0;     // kReadableStreamProxy / kWritableStreamProxy
     NeutralHttpRequest request;      // kRequestProxy
     NeutralHttpResponse response;    // kResponseProxy
+    std::uint64_t handle_id = 0;     // kRpcHandleProxy
+    std::vector<std::string> handle_methods; // kRpcHandleProxy
 };
 
 enum class BindingCloneHookResult {
@@ -131,6 +134,8 @@ struct BindingRpcIntrinsics {
     JSValue abort_signal_reason_getter = JS_UNDEFINED;
     JSValue event_target_add_listener = JS_UNDEFINED;
     JSValue event_target_remove_listener = JS_UNDEFINED;
+    JSValue symbol_dispose = JS_UNDEFINED;
+    JSValue symbol_async_dispose = JS_UNDEFINED;
 };
 
 bool capture_binding_rpc_intrinsics(JSContext* ctx, BindingRpcIntrinsics* out);

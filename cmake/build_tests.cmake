@@ -7669,6 +7669,33 @@ if(BUILD_TESTING)
         set_tests_properties(binding_stream_table PROPERTIES
             TIMEOUT 20 LABELS "worker;binding;stream;quota")
 
+        # Binding RPC v2 (v0.4.0) M4D: RpcTarget handle table & lease/quota state machine.
+        add_executable(
+            test-binding-handle-table
+            tests/test_binding_handle_table.cc
+            src/binding_handle_table.cc
+            src/binding_rpc_ledger.cc
+        )
+        target_include_directories(test-binding-handle-table PRIVATE include src)
+        target_link_libraries(test-binding-handle-table PRIVATE capsid_sanitizers)
+        set_target_properties(test-binding-handle-table PROPERTIES
+            CXX_STANDARD 11
+            CXX_STANDARD_REQUIRED ON)
+        if(CAPSID_STRICT_WARNINGS)
+            if(MSVC)
+                target_compile_options(test-binding-handle-table PRIVATE /W4 /WX)
+            else()
+                target_compile_options(test-binding-handle-table PRIVATE
+                    -Wall -Wextra -Wpedantic -Werror)
+            endif()
+        endif()
+        add_test(
+            NAME binding_handle_table
+            COMMAND test-binding-handle-table
+        )
+        set_tests_properties(binding_handle_table PROPERTIES
+            TIMEOUT 20 LABELS "worker;binding;quota;lifecycle")
+
         # WP-00/PR-01 RED gates. All three worker tests are expected to
         # FAIL on the pre-fix bridge (identity collapse P0-1, request
         # context loss P0-2, terminal continuation survival P0-3); the

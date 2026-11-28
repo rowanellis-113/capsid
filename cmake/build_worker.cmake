@@ -315,6 +315,7 @@ if(CAPSID_BUILD_WORKER)
         VERBATIM
     )
     add_executable(capsid-worker
+        src/binding_handle_table.cc
         src/binding_rpc.cc
         src/binding_rpc_ledger.cc
         src/binding_scheduler.cc

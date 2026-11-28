@@ -1055,6 +1055,470 @@ export default {
     }
 }
 
+// M4D: Native-branded RpcTarget handles, nested handles, leases, explicit &
+// Symbol.dispose, GC finalizer fallback, request-end disposal, quota refill,
+// and malicious provider hardening.
+void test_m4d_rpc_target_handles(const char* worker_path) {
+    const std::string binding_src = R"JS(
+const disposedLog = [];
+let getterTripped = false;
+let proxyTripped = false;
+
+class ChildTarget extends RpcTarget {
+  constructor(tag) {
+    super();
+    this.tag = tag;
+  }
+  read() { return 'child:' + this.tag; }
+  [Symbol.dispose]() { disposedLog.push('child:' + this.tag); }
+}
+
+class SessionTarget extends RpcTarget {
+  constructor(name, leaseMs) {
+    super(leaseMs !== undefined ? { leaseMs } : undefined);
+    this.name = name;
+    this.n = 0;
+  }
+  inc(delta) {
+    this.n += delta;
+    return this.n;
+  }
+  failType() {
+    throw new TypeError('session-bad-arg');
+  }
+  spawnNested(tag) {
+    return { tag, child: new ChildTarget(tag) };
+  }
+  streamChunk() {
+    return new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('from-handle:' + 'ok'));
+        c.close();
+      }
+    });
+  }
+  responseOf() {
+    return new Response('handle-res:' + this.name, { status: 202 });
+  }
+  [Symbol.dispose]() {
+    disposedLog.push(this.name);
+  }
+}
+
+class ThrowingDisposeTarget extends RpcTarget {
+  ping() { return 'alive'; }
+  [Symbol.dispose]() {
+    disposedLog.push('throw-dispose');
+    throw new Error('dispose-boom');
+  }
+}
+
+class GetterTarget extends RpcTarget {
+  ok() { return 1; }
+  get hostile() {
+    getterTripped = true;
+    throw new Error('getter-ran');
+  }
+}
+
+class OrdinaryClass {
+  ping() { return 'nope'; }
+}
+
+export default () => ({
+  openSession(name) { return new SessionTarget(name); },
+  openShortLease(name) { return new SessionTarget(name, 40); },
+  openThrowingDispose() { return new ThrowingDisposeTarget(); },
+  openOrdinary() { return new OrdinaryClass(); },
+  openGetterTarget() { return new GetterTarget(); },
+  openProxyTarget() {
+    const t = new SessionTarget('proxied');
+    return new Proxy(t, {
+      ownKeys() { proxyTripped = true; return ['inc']; }
+    });
+  },
+  openLateTarget() {
+    return new Promise((resolve) => {
+      setTimeout(() => resolve(new SessionTarget('late-res')), 50);
+    });
+  },
+  accept(v) { return v; },
+  stats() {
+    return {
+      disposed: disposedLog.slice(),
+      getterTripped,
+      proxyTripped,
+    };
+  },
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+export default {
+  async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === '/m4d-main') {
+      const out = {};
+      out.noUserRpcTarget = (typeof globalThis.RpcTarget === 'undefined');
+
+      // 1. Basic handle calls, frozen null-proto stub, streams, Response, errors, nested handle.
+      const s = await svc.openSession('s1');
+      out.stubShape = Object.getPrototypeOf(s) === null && Object.isFrozen(s);
+      const v1 = await s.inc(3);
+      const v2 = await s.inc(4);
+      let errTypeOk = false;
+      try { await s.failType(); } catch (e) {
+        errTypeOk = (e instanceof TypeError) && e.message === 'session-bad-arg';
+      }
+      const stream = await s.streamChunk();
+      const streamText = await new Response(stream).text();
+      const hRes = await s.responseOf();
+      const hResText = await hRes.text();
+      const nested = await s.spawnNested('sub1');
+      const childVal = await nested.child.read();
+      nested.child[Symbol.dispose]();
+      s.dispose();
+      s.dispose(); // idempotent
+      let postDisposeErr = false;
+      try { await s.inc(1); } catch (e) {
+        postDisposeErr = (e instanceof DOMException) && e.name === 'InvalidStateError';
+      }
+      out.basic = v1 === 3 && v2 === 7 && errTypeOk && streamText === 'from-handle:ok' &&
+                  hRes.status === 202 && hResText === 'handle-res:s1' &&
+                  nested.tag === 'sub1' && childVal === 'child:sub1' && postDisposeErr;
+
+      // 2. Lease expiry triggers automatic disposal and fails subsequent calls.
+      const shortH = await svc.openShortLease('short1');
+      const beforeExp = await shortH.inc(1);
+      await new Promise((r) => setTimeout(r, 80));
+      let expiredErr = false;
+      try { await shortH.inc(1); } catch (e) {
+        expiredErr = (e instanceof DOMException) && e.name === 'InvalidStateError';
+      }
+      out.lease = beforeExp === 1 && expiredErr;
+
+      // 3. GC finalizer fallback (drop without calling dispose).
+      {
+        let ephemeral = await svc.openSession('gc1');
+        await ephemeral.inc(1);
+        ephemeral = null;
+      }
+      // Give the shared scheduler a turn to pump the finalizer-enqueued disposal.
+      await new Promise((r) => setTimeout(r, 30));
+      const stAfterGc = await svc.stats();
+      out.gcFallback = stAfterGc.disposed.includes('gc1') &&
+                       stAfterGc.disposed.includes('s1') &&
+                       stAfterGc.disposed.includes('child:sub1') &&
+                       stAfterGc.disposed.includes('short1');
+
+      // 4. Malicious provider & negative controls.
+      let ordinaryRejected = false;
+      try { await svc.openOrdinary(); } catch (e) { ordinaryRejected = true; }
+      let getterRejected = false;
+      try { await svc.openGetterTarget(); } catch (e) {
+        getterRejected = e.message.includes('accessor');
+      }
+      let proxyRejected = false;
+      try { await svc.openProxyTarget(); } catch (e) { proxyRejected = true; }
+
+      // Throwing [Symbol.dispose]() is fault-isolated.
+      const td = await svc.openThrowingDispose();
+      const tdAlive = await td.ping();
+      await td[Symbol.asyncDispose]();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Late-result RpcTarget after timeoutMs is deterministically disposed.
+      let lateTimedOut = false;
+      try { await svc.openLateTarget(undefined, { timeoutMs: 15 }); } catch (e) {
+        lateTimedOut = (e instanceof DOMException) && e.name === 'TimeoutError';
+      }
+      await new Promise((r) => setTimeout(r, 80));
+
+      // Passing handle back to Binding fails closed.
+      const passH = await svc.openSession('pass1');
+      let passBackRejected = false;
+      try { await svc.accept(passH); } catch (e) { passBackRejected = true; }
+      passH.dispose();
+
+      const stNeg = await svc.stats();
+      out.malicious = ordinaryRejected && getterRejected && proxyRejected &&
+                      !stNeg.getterTripped && !stNeg.proxyTripped &&
+                      tdAlive === 'alive' && stNeg.disposed.includes('throw-dispose') &&
+                      lateTimedOut && stNeg.disposed.includes('late-res') &&
+                      passBackRejected;
+
+      // 5. Handle quota (32/request) + refill after disposal.
+      const batch = [];
+      for (let i = 0; i < 32; ++i) {
+        batch.push(await svc.openSession('q' + i));
+      }
+      let quotaHit = false;
+      try { await svc.openSession('q-overflow'); } catch (e) {
+        quotaHit = e.message.includes('handle quota');
+      }
+      for (const h of batch) h.dispose();
+      await new Promise((r) => setTimeout(r, 30));
+      const refilled = await svc.openSession('refill-ok');
+      const refillVal = await refilled.inc(9);
+      refilled.dispose();
+      out.quota = quotaHit && refillVal === 9;
+
+      // 6. Leave one handle undisposed to verify request-end cleanup in req 2.
+      globalThis.__leakedByReq1 = await svc.openSession('req-end-cleanup');
+      globalThis.__leakedByReq1 = null; // keep test free of global leak? No, hold until req2?
+      // Hold one inside closure/global so GC does NOT collect it before response ends:
+      const held = await svc.openSession('held-at-req-end');
+      globalThis.__heldAtReqEnd = held;
+      return new Response(JSON.stringify(out));
+    }
+    if (path === '/m4d-after') {
+      const held = globalThis.__heldAtReqEnd;
+      globalThis.__heldAtReqEnd = null;
+      let deadAfterReqEnd = false;
+      try { await held.inc(1); } catch (e) {
+        deadAfterReqEnd = (e instanceof DOMException) && e.name === 'InvalidStateError';
+      }
+      const st = await svc.stats();
+      return new Response(JSON.stringify({
+        deadAfterReqEnd,
+        disposedAtEnd: st.disposed.includes('held-at-req-end'),
+      }));
+    }
+    return new Response('404', { status: 404 });
+  }
+};
+)JS";
+
+    WorkerHarness harness(worker_path, {{"svc", binding_src}}, app_src);
+    const HttpResponse r1 = harness.get(1, "/m4d-main");
+    require(r1.status == 200, "m4d-main status != 200: " + r1.body);
+    require(r1.body ==
+                "{\"noUserRpcTarget\":true,\"stubShape\":true,\"basic\":true,"
+                "\"lease\":true,\"gcFallback\":true,\"malicious\":true,\"quota\":true}",
+            "m4d-main assertions failed: " + r1.body);
+
+    const HttpResponse r2 = harness.get(2, "/m4d-after");
+    require(r2.status == 200, "m4d-after status != 200: " + r2.body);
+    require(r2.body == "{\"deadAfterReqEnd\":true,\"disposedAtEnd\":true}",
+            "m4d-after assertions failed: " + r2.body);
+}
+
+// M4D: Cross-request handle ownership fencing (call, dispose, and pass-through
+// from another concurrent request all fail closed with InvalidStateError).
+void test_m4d_cross_request_handle_fencing(const char* worker_path) {
+    const std::string binding_src = R"JS(
+class Guarded extends RpcTarget {
+  secret() { return 'req1-only'; }
+}
+export default () => ({
+  open() { return new Guarded(); },
+  accept(v) { return v; },
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+let releaseHold = null;
+export default {
+  async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === '/hold') {
+      const h = await svc.open();
+      globalThis.__heldHandle = h;
+      const p = new Promise((resolve) => { releaseHold = resolve; });
+      console.log('handle-ready');
+      await p;
+      const ownVal = await h.secret();
+      h.dispose();
+      globalThis.__heldHandle = null;
+      releaseHold = null;
+      return new Response('hold:' + ownVal);
+    }
+    if (path === '/steal') {
+      const foreign = globalThis.__heldHandle;
+      let callFenced = false;
+      try { await foreign.secret(); } catch (e) {
+        callFenced = (e instanceof DOMException) && e.name === 'InvalidStateError';
+      }
+      let disposeFenced = false;
+      try { foreign.dispose(); } catch (e) {
+        disposeFenced = (e instanceof DOMException) && e.name === 'InvalidStateError';
+      }
+      let passFenced = false;
+      try { await svc.accept(foreign); } catch (e) {
+        passFenced = (e instanceof DOMException) && e.name === 'InvalidStateError';
+      }
+      const wake = releaseHold;
+      releaseHold = null;
+      if (wake) wake();
+      return new Response(
+        (callFenced && disposeFenced && passFenced) ? 'handle-fenced-ok' : 'handle-fenced-fail'
+      );
+    }
+    return new Response('404', { status: 404 });
+  }
+};
+)JS";
+
+    capsid_worker_config config;
+    capsid_worker_config_init(&config);
+    config.worker_path = worker_path;
+    config.strict_sandbox = 0;
+    config.process_memory_limit = 0;
+    config.request_timeout_ms = 5000;
+    capsid_worker* worker = nullptr;
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn handle fence worker");
+    capsid::host::EffectiveBinding b;
+    b.id = "svc";
+    b.package.source = binding_src;
+    b.request.config_json = "{}";
+    b.profiles = {"network-client"};
+    std::string err;
+    require(capsid::host::load_effective_bindings_into_worker(worker, {b}, &err), err);
+    require_result(capsid_worker_load_bundle_named(
+                       worker, reinterpret_cast<const std::uint8_t*>(app_src.data()),
+                       app_src.size(), "file:///handle-fence.js"),
+                   "load handle fence bundle");
+
+    auto wait_events = [&](auto predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const capsid_result flush = capsid_worker_flush(worker);
+            require(flush == CAPSID_OK || flush == CAPSID_WOULD_BLOCK, "flush");
+            capsid_event ev = {};
+            ev.struct_size = sizeof(ev);
+            const capsid_result r = capsid_worker_next_event(worker, &ev);
+            if (r == CAPSID_OK) {
+                require(ev.type != CAPSID_EVENT_ERROR && ev.type != CAPSID_EVENT_EXIT,
+                        "unexpected worker error/exit in handle fence test");
+                if (predicate(ev)) return;
+                continue;
+            }
+            require(r == CAPSID_WOULD_BLOCK, "next_event");
+            capsid_pollfd pfd = {};
+            pfd.fd = capsid_worker_fd(worker);
+            pfd.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+            require(capsid::win32::capsid_poll(&pfd, 1, 20) >= 0, "poll");
+        }
+        require(false, "handle fence test timed out");
+    };
+
+    wait_events([](const capsid_event& ev) { return ev.type == CAPSID_EVENT_READY; });
+    require_result(capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/hold",
+                                                        nullptr, 0),
+                   "begin hold");
+    wait_events([](const capsid_event& ev) {
+        if (ev.type != CAPSID_EVENT_LOG) return false;
+        const std::string text(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
+        return text.find("handle-ready") != std::string::npos;
+    });
+    require_result(capsid_worker_begin_bodyless_request(worker, 2, "GET", "https://v2.test/steal",
+                                                        nullptr, 0),
+                   "begin steal");
+
+    std::string body1, body2;
+    bool end1 = false, end2 = false;
+    wait_events([&](const capsid_event& ev) {
+        if (ev.type == CAPSID_EVENT_RESPONSE_BODY) {
+            if (ev.request_id == 1)
+                body1.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
+            if (ev.request_id == 2)
+                body2.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
+            capsid_worker_grant_response_credit(worker, ev.request_id,
+                                                static_cast<std::uint32_t>(ev.payload.size));
+        } else if (ev.type == CAPSID_EVENT_RESPONSE_END) {
+            if (ev.request_id == 1) end1 = true;
+            if (ev.request_id == 2) end2 = true;
+        }
+        return end1 && end2;
+    });
+    require(body1 == "hold:req1-only" && body2 == "handle-fenced-ok",
+            "cross-request handle fencing failed: body1=" + body1 + " body2=" + body2);
+
+    const auto exit = capsid_test::shutdown_and_wait(worker, 3000);
+    capsid_worker_destroy(worker);
+    require(exit.clean(), "handle fence worker did not exit cleanly");
+}
+
+// M4D: Malicious Binding whose [Symbol.dispose]() enters an infinite CPU loop
+// is interrupted within the bounded disposal window and cleanly poisons/exits
+// the worker instead of hanging.
+void test_m4d_malicious_dispose_cpu_loop(const char* worker_path) {
+    const std::string binding_src = R"JS(
+class InfiniteDispose extends RpcTarget {
+  ping() { return 'ok'; }
+  [Symbol.dispose]() {
+    while (true) {}
+  }
+}
+export default () => ({
+  open() { return new InfiniteDispose(); }
+});
+)JS";
+
+    const std::string app_src = R"JS(
+import svc from 'capsid:binding/svc';
+export default {
+  async fetch() {
+    const h = await svc.open();
+    h.dispose();
+    await new Promise((r) => setTimeout(r, 300));
+    return new Response('done');
+  }
+};
+)JS";
+
+    capsid_worker_config config;
+    capsid_worker_config_init(&config);
+    config.worker_path = worker_path;
+    config.strict_sandbox = 0;
+    config.process_memory_limit = 0;
+    config.request_timeout_ms = 5000;
+    capsid_worker* worker = nullptr;
+    require_result(capsid_worker_spawn_ex(&config, NULL, &worker), "spawn cpu-dispose worker");
+    capsid::host::EffectiveBinding b;
+    b.id = "svc";
+    b.package.source = binding_src;
+    b.request.config_json = "{}";
+    b.profiles = {"network-client"};
+    std::string err;
+    require(capsid::host::load_effective_bindings_into_worker(worker, {b}, &err), err);
+    require_result(capsid_worker_load_bundle_named(
+                       worker, reinterpret_cast<const std::uint8_t*>(app_src.data()),
+                       app_src.size(), "file:///cpu-dispose.js"),
+                   "load cpu-dispose bundle");
+
+    bool ready = false;
+    bool exited = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline && !exited) {
+        const capsid_result flush = capsid_worker_flush(worker);
+        require(flush == CAPSID_OK || flush == CAPSID_WOULD_BLOCK, "flush");
+        capsid_event ev = {};
+        ev.struct_size = sizeof(ev);
+        const capsid_result r = capsid_worker_next_event(worker, &ev);
+        if (r == CAPSID_OK) {
+            if (ev.type == CAPSID_EVENT_READY && !ready) {
+                ready = true;
+                require_result(capsid_worker_begin_bodyless_request(
+                                   worker, 1, "GET", "https://v2.test/loop", nullptr, 0),
+                               "begin loop");
+            } else if (ev.type == CAPSID_EVENT_EXIT) {
+                exited = true;
+            }
+            continue;
+        }
+        require(r == CAPSID_WOULD_BLOCK, "next_event");
+        capsid_pollfd pfd = {};
+        pfd.fd = capsid_worker_fd(worker);
+        pfd.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
+        require(capsid::win32::capsid_poll(&pfd, 1, 20) >= 0, "poll");
+    }
+    require(ready && exited, "malicious CPU-loop [Symbol.dispose]() did not interrupt and exit");
+    capsid_worker_destroy(worker);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1066,5 +1530,8 @@ int main(int argc, char** argv) {
     test_m4b_writable_streams(argv[1]);
     test_m4b_cross_request_fencing(argv[1]);
     test_m4c_request_response_proxies(argv[1]);
+    test_m4d_rpc_target_handles(argv[1]);
+    test_m4d_cross_request_handle_fencing(argv[1]);
+    test_m4d_malicious_dispose_cpu_loop(argv[1]);
     return 0;
 }
