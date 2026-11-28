@@ -2226,6 +2226,33 @@ export default () => ({
   echoObj(x) {
     return x;
   },
+  async inspectTwoBodies(pair) {
+    return [await pair.a.text(), await pair.b.text()];
+  },
+  returnTwoBodiesOk() {
+    const a = new Response('b-res-1');
+    const b = Object.freeze(new Request('https://u2.test/b-req', { method: 'POST', body: 'b-req-2' }));
+    globalThis.__lastBindingBatch = [a, b];
+    return { a, b };
+  },
+  returnTwoBodiesFail() {
+    const a = new Response('b-fail-1');
+    const b = Object.freeze(new Response('b-fail-2'));
+    globalThis.__lastBindingFailBatch = [a, b];
+    return { a, b, bad: Symbol('x') };
+  },
+  async inspectBindingBatches() {
+    const [okA, okB] = globalThis.__lastBindingBatch;
+    const [fA, fB] = globalThis.__lastBindingFailBatch;
+    let okALocked = false, okBLocked = false;
+    try { okA.body.getReader(); } catch { okALocked = true; }
+    try { okB.body.getReader(); } catch { okBLocked = true; }
+    return {
+      okConsumed: okA.bodyUsed === true && okB.bodyUsed === true && okALocked && okBLocked,
+      failUnread: fA.bodyUsed === false && fB.bodyUsed === false,
+      failTexts: [await fA.text(), await fB.text()],
+    };
+  },
   echoFidelity(v) {
     return {
       echoed: v,
@@ -2653,6 +2680,36 @@ export default {
       const frozenReqLen = await svc.inspectBodyLen(frozenReq);
       const frozenReqConsistent = await verifyConsumedLocally(frozenReq);
 
+      // Multi-body atomic batch transfer in BOTH directions (User->Binding and Binding->User).
+      const batchInA = new Response('in-1');
+      const batchInB = Object.freeze(
+        new Request('https://u2.test/in-2', { method: 'POST', body: 'in-2' }),
+      );
+      const batchInTexts = await svc.inspectTwoBodies({ a: batchInA, b: batchInB });
+      const batchInConsistent =
+        batchInTexts[0] === 'in-1' &&
+        batchInTexts[1] === 'in-2' &&
+        (await verifyConsumedLocally(batchInA)) &&
+        (await verifyConsumedLocally(batchInB));
+
+      const batchOut = await svc.returnTwoBodiesOk();
+      const batchOutTexts = [await batchOut.a.text(), await batchOut.b.text()];
+      let batchOutFailRejected = false;
+      try {
+        await svc.returnTwoBodiesFail();
+      } catch {
+        batchOutFailRejected = true;
+      }
+      const batchBindingCheck = await svc.inspectBindingBatches();
+      const batchOutConsistent =
+        batchOutTexts[0] === 'b-res-1' &&
+        batchOutTexts[1] === 'b-req-2' &&
+        batchOutFailRejected &&
+        batchBindingCheck.okConsumed === true &&
+        batchBindingCheck.failUnread === true &&
+        batchBindingCheck.failTexts[0] === 'b-fail-1' &&
+        batchBindingCheck.failTexts[1] === 'b-fail-2';
+
       out.u2RejectedPreserveOk =
         draftResRejected &&
         draftResStillUnused &&
@@ -2681,7 +2738,9 @@ export default {
         frozenResLen.len === 3 &&
         frozenResConsistent &&
         frozenReqLen.len === 3 &&
-        frozenReqConsistent;
+        frozenReqConsistent &&
+        batchInConsistent &&
+        batchOutConsistent;
 
       // T4: Bidirectional scalar string (embedded NUL) & record (empty + NUL key) fidelity.
       const sentPayload = {

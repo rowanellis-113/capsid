@@ -9,7 +9,7 @@
 // never exposed on globalThis.
 
 import {
-  commitHttpBodyConsumedForBinding,
+  applyHttpBodyConsumePlanForBinding,
   createHeadersFromIncomingPairs,
   enableBindingHttpTracking,
   finalizeProxyResponse,
@@ -17,6 +17,7 @@ import {
   isGenuineRequest,
   isGenuineResponse,
   markResponseHeadersImmutable,
+  prepareHttpBodyConsumePlanForBinding,
   snapshotRequestForBinding,
   snapshotResponseForBinding,
 } from './fetch.js';
@@ -815,8 +816,12 @@ export function installBindingRpcBridge(core) {
     return snapshotResponseForBinding(res, checkReadableTransferable, extractBytes);
   }
 
-  function commitHttpBodyConsumed(target) {
-    commitHttpBodyConsumedForBinding(target);
+  function prepareHttpBodyConsumePlan(targets) {
+    return prepareHttpBodyConsumePlanForBinding(targets);
+  }
+
+  function applyHttpBodyConsumePlan(plan) {
+    applyHttpBodyConsumePlanForBinding(plan);
   }
 
   function createProxyAbortController() {
@@ -1108,7 +1113,8 @@ export function installBindingRpcBridge(core) {
     inspectRequest,
     createProxyRequest,
     inspectResponse,
-    commitHttpBodyConsumed,
+    prepareHttpBodyConsumePlan,
+    applyHttpBodyConsumePlan,
     createProxyResponse,
     createProxyAbortController,
     RpcTarget,

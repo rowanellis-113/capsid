@@ -280,6 +280,33 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
                                 BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
                                 std::string* error, std::size_t* out_copies = nullptr);
 
+// Two-phase atomic HTTP inline-body consumption transaction shared by
+// User->Binding input commit and Binding->User result commit (U2):
+//   1. `prepare()` runs `prepare_fn(targets_array)` in `ctx` so every fallible
+//      allocation (terminal consumed streams and own-property writability
+//      masks) finishes BEFORE any source Request/Response is mutated.
+//   2. `commit()` invokes `apply_fn(plan)` once to perform allocation-free
+//      state replacement across the entire batch; any JS call failure is
+//      reported back to the caller rather than swallowed.
+//   3. `reset()` frees all held JSValues without touching any source object.
+struct BindingHttpConsumeBatch {
+    JSContext* ctx = nullptr;
+    std::vector<JSValue> targets;
+    JSValue prepared_plan = JS_UNDEFINED;
+
+    BindingHttpConsumeBatch() = default;
+    BindingHttpConsumeBatch(const BindingHttpConsumeBatch&) = delete;
+    BindingHttpConsumeBatch& operator=(const BindingHttpConsumeBatch&) = delete;
+    ~BindingHttpConsumeBatch() { reset(); }
+
+    bool contains(JSValueConst value) const;
+    bool add_target(JSContext* target_ctx, JSValueConst value);
+    bool empty() const { return targets.empty(); }
+    bool prepare(JSValueConst prepare_fn, std::string* error = nullptr);
+    bool commit(JSValueConst apply_fn, std::string* error = nullptr);
+    void reset();
+};
+
 // Internal Binding RPC identifiers are never Number/Int64 values: IDs above
 // 2^63 must survive the JS callback-data round trip exactly and zero is
 // reserved as invalid.

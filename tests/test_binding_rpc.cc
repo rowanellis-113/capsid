@@ -1230,6 +1230,238 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
     JS_FreeValue(ctx, obj_proto);
 }
 
+// U2 (Round-6 P2): Two-phase atomic HTTP inline-body consumption transaction
+// (`BindingHttpConsumeBatch`). Verifies controllable preparation failure on
+// item 2 of a 2-object batch in BOTH input (User->Binding) and result
+// (Binding->User) directions leaves EVERY source unread/unmodified and reports
+// failure (never a false success), rollback after prepare mutates nothing, and
+// successful commit transitions all targets atomically together.
+void test_http_consume_batch_two_phase_atomicity() {
+    RuntimeFixture user_rt;
+    RuntimeFixture binding_rt;
+
+    auto run_direction_checks = [](RuntimeFixture& rt, const char* dir_label) {
+        JSContext* ctx = rt.ctx();
+        JSValue harness = rt.eval(
+            "(() => {"
+            "  const slots = new WeakMap();"
+            "  const makeSource = (payload, freezeObj) => {"
+            "    const obj = { _bodyFastKind: 1, _bodyFastData: payload, _bodyStream: null,"
+            "                  _bodyConsumed: false };"
+            "    slots.set(obj, { bodyFastKind: 1, bodyFastData: payload, bodyStream: null,"
+            "                     bodyConsumed: false });"
+            "    if (freezeObj) Object.freeze(obj);"
+            "    return obj;"
+            "  };"
+            "  const readState = (obj) => {"
+            "    const s = slots.get(obj);"
+            "    return { used: s.bodyConsumed, data: s.bodyFastData,"
+            "             locked: s.bodyStream !== null && s.bodyStream.locked === true,"
+            "             pubUsed: obj._bodyConsumed };"
+            "  };"
+            "  let failOnIndex = -1;"
+            "  let prepareCalls = 0;"
+            "  let applyCalls = 0;"
+            "  const preparePlan = (targets) => {"
+            "    prepareCalls++;"
+            "    const plan = Object.create(null);"
+            "    plan.count = targets.length;"
+            "    plan.targets = targets;"
+            "    plan.slots = Object.create(null);"
+            "    plan.streams = Object.create(null);"
+            "    plan.writable = Object.create(null);"
+            "    for (let i = 0; i < targets.length; ++i) {"
+            "      if (i === failOnIndex) {"
+            "        throw new RangeError('simulated OOM during terminal stream allocation');"
+            "      }"
+            "      const s = slots.get(targets[i]);"
+            "      if (!s) throw new TypeError('missing slot');"
+            "      const desc = Object.getOwnPropertyDescriptor(targets[i], '_bodyConsumed');"
+            "      plan.slots[i] = s;"
+            "      plan.streams[i] = { closed: true, disturbed: true, locked: true };"
+            "      plan.writable[i] = Boolean(desc && desc.writable);"
+            "    }"
+            "    return plan;"
+            "  };"
+            "  const applyPlan = (plan) => {"
+            "    applyCalls++;"
+            "    for (let i = 0; i < plan.count; ++i) {"
+            "      const s = plan.slots[i];"
+            "      s.bodyConsumed = true;"
+            "      s.bodyFastKind = 0;"
+            "      s.bodyFastData = null;"
+            "      s.bodyStream = plan.streams[i];"
+            "      if (plan.writable[i]) {"
+            "        plan.targets[i]._bodyConsumed = true;"
+            "        plan.targets[i]._bodyFastKind = 0;"
+            "        plan.targets[i]._bodyFastData = null;"
+            "        plan.targets[i]._bodyStream = plan.streams[i];"
+            "      }"
+            "    }"
+            "  };"
+            "  const throwingApply = () => { throw new Error('commit call failed'); };"
+            "  const setFailIndex = (idx) => { failOnIndex = idx; };"
+            "  const stats = () => ({ prepareCalls, applyCalls });"
+            "  return { makeSource, readState, preparePlan, applyPlan, throwingApply,"
+            "           setFailIndex, stats };"
+            "})()");
+        require(!JS_IsException(harness) && JS_IsObject(harness), "atomicity harness init");
+        JSValue make_source = JS_GetPropertyStr(ctx, harness, "makeSource");
+        JSValue read_state = JS_GetPropertyStr(ctx, harness, "readState");
+        JSValue prepare_fn = JS_GetPropertyStr(ctx, harness, "preparePlan");
+        JSValue apply_fn = JS_GetPropertyStr(ctx, harness, "applyPlan");
+        JSValue throwing_apply_fn = JS_GetPropertyStr(ctx, harness, "throwingApply");
+        JSValue set_fail_idx = JS_GetPropertyStr(ctx, harness, "setFailIndex");
+
+        auto make_src = [&](const char* text, bool freeze_obj) -> JSValue {
+            JSValue args[2] = {JS_NewString(ctx, text), freeze_obj ? JS_TRUE : JS_FALSE};
+            JSValue out = JS_Call(ctx, make_source, JS_UNDEFINED, 2, args);
+            JS_FreeValue(ctx, args[0]);
+            JS_FreeValue(ctx, args[1]);
+            require(!JS_IsException(out) && JS_IsObject(out), "makeSource failed");
+            return out;
+        };
+        auto check_unread = [&](JSValueConst src, const char* expected_text, const char* msg) {
+            JSValue arg = JS_DupValue(ctx, src);
+            JSValue st = JS_Call(ctx, read_state, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            JSValue used_v = JS_GetPropertyStr(ctx, st, "used");
+            JSValue data_v = JS_GetPropertyStr(ctx, st, "data");
+            JSValue locked_v = JS_GetPropertyStr(ctx, st, "locked");
+            const bool used = JS_ToBool(ctx, used_v) != 0;
+            const bool locked = JS_ToBool(ctx, locked_v) != 0;
+            const char* ds = JS_ToCString(ctx, data_v);
+            const bool ok = !used && !locked && ds != NULL && std::strcmp(ds, expected_text) == 0;
+            if (ds != NULL)
+                JS_FreeCString(ctx, ds);
+            JS_FreeValue(ctx, used_v);
+            JS_FreeValue(ctx, data_v);
+            JS_FreeValue(ctx, locked_v);
+            JS_FreeValue(ctx, st);
+            require(ok, (std::string(dir_label) + ": " + msg).c_str());
+        };
+        auto check_consumed = [&](JSValueConst src, bool expect_pub_used, const char* msg) {
+            JSValue arg = JS_DupValue(ctx, src);
+            JSValue st = JS_Call(ctx, read_state, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            JSValue used_v = JS_GetPropertyStr(ctx, st, "used");
+            JSValue data_v = JS_GetPropertyStr(ctx, st, "data");
+            JSValue locked_v = JS_GetPropertyStr(ctx, st, "locked");
+            JSValue pub_v = JS_GetPropertyStr(ctx, st, "pubUsed");
+            const bool ok = (JS_ToBool(ctx, used_v) != 0) && JS_IsNull(data_v) &&
+                            (JS_ToBool(ctx, locked_v) != 0) &&
+                            ((JS_ToBool(ctx, pub_v) != 0) == expect_pub_used);
+            JS_FreeValue(ctx, used_v);
+            JS_FreeValue(ctx, data_v);
+            JS_FreeValue(ctx, locked_v);
+            JS_FreeValue(ctx, pub_v);
+            JS_FreeValue(ctx, st);
+            require(ok, (std::string(dir_label) + ": " + msg).c_str());
+        };
+        auto set_fail = [&](int idx) {
+            JSValue a = JS_NewInt32(ctx, idx);
+            JSValue r = JS_Call(ctx, set_fail_idx, JS_UNDEFINED, 1, &a);
+            JS_FreeValue(ctx, a);
+            JS_FreeValue(ctx, r);
+        };
+
+        // 1. Controllable preparation failure on object #2 of 2 (item 0 prepared
+        // successfully before item 1 threw): ZERO partial consumption, caller
+        // receives false + error (no false success).
+        {
+            JSValue s1 = make_src("body-one", false);
+            JSValue s2 = make_src("body-two", true);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
+            require(batch.contains(s1) && batch.contains(s2), "contains mismatch");
+            set_fail(1);
+            std::string err;
+            require(
+                !batch.prepare(prepare_fn, &err),
+                (std::string(dir_label) + ": prepare failure on item 2 must fail closed").c_str());
+            require(!err.empty(),
+                    (std::string(dir_label) + ": prepare error message missing").c_str());
+            // Calling commit() after failed prepare must also fail closed.
+            std::string commit_err;
+            require(!batch.commit(apply_fn, &commit_err) && !commit_err.empty(),
+                    (std::string(dir_label) + ": commit after failed prepare must reject").c_str());
+            check_unread(s1, "body-one", "item 1 must stay unread when item 2 prepare fails");
+            check_unread(s2, "body-two", "item 2 must stay unread when item 2 prepare fails");
+            JS_FreeValue(ctx, s1);
+            JS_FreeValue(ctx, s2);
+        }
+
+        // 2. Prepare succeeds for 2 objects, then simulated downstream failure
+        // (e.g. materialization/enqueue abort) resets batch BEFORE commit:
+        // proves Phase 1 never mutates any source object.
+        {
+            JSValue s1 = make_src("mat-one", false);
+            JSValue s2 = make_src("mat-two", true);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
+            set_fail(-1);
+            std::string err;
+            require(batch.prepare(prepare_fn, &err),
+                    (std::string(dir_label) + ": prepare unexpectedly failed: " + err).c_str());
+            check_unread(s1, "mat-one", "prepare must not mutate item 1 before commit");
+            check_unread(s2, "mat-two", "prepare must not mutate item 2 before commit");
+            batch.reset();
+            require(batch.empty() && !batch.contains(s1), "reset must clear targets");
+            check_unread(s1, "mat-one", "reset after prepare must keep item 1 unread");
+            check_unread(s2, "mat-two", "reset after prepare must keep item 2 unread");
+            JS_FreeValue(ctx, s1);
+            JS_FreeValue(ctx, s2);
+        }
+
+        // 3. Prepare succeeds, but commit JS_Call throws: commit() propagates
+        // failure (returns false + error) instead of swallowing the exception.
+        {
+            JSValue s1 = make_src("throw-one", false);
+            JSValue s2 = make_src("throw-two", false);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
+            set_fail(-1);
+            std::string err;
+            require(batch.prepare(prepare_fn, &err), "prepare before throwing apply failed");
+            require(!batch.commit(throwing_apply_fn, &err) && !err.empty(),
+                    (std::string(dir_label) + ": commit exception must propagate failure").c_str());
+            check_unread(s1, "throw-one", "throwing apply left item 1 unread");
+            check_unread(s2, "throw-two", "throwing apply left item 2 unread");
+            JS_FreeValue(ctx, s1);
+            JS_FreeValue(ctx, s2);
+        }
+
+        // 4. Happy path: 2 objects (one normal, one frozen) prepare + commit
+        // atomically together.
+        {
+            JSValue s1 = make_src("ok-one", false);
+            JSValue s2 = make_src("ok-two", true);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
+            set_fail(-1);
+            std::string err;
+            require(batch.prepare(prepare_fn, &err), ("happy-path prepare failed: " + err).c_str());
+            require(batch.commit(apply_fn, &err), ("happy-path commit failed: " + err).c_str());
+            require(batch.empty(), "commit must reset batch");
+            check_consumed(s1, true, "normal item 1 must be consumed after commit");
+            check_consumed(s2, false, "frozen item 2 private slot must be consumed after commit");
+            JS_FreeValue(ctx, s1);
+            JS_FreeValue(ctx, s2);
+        }
+
+        JS_FreeValue(ctx, make_source);
+        JS_FreeValue(ctx, read_state);
+        JS_FreeValue(ctx, prepare_fn);
+        JS_FreeValue(ctx, apply_fn);
+        JS_FreeValue(ctx, throwing_apply_fn);
+        JS_FreeValue(ctx, set_fail_idx);
+        JS_FreeValue(ctx, harness);
+    };
+
+    run_direction_checks(user_rt, "input(User->Binding)");
+    run_direction_checks(binding_rt, "result(Binding->User)");
+}
+
 } // namespace
 
 int main() {
@@ -1247,5 +1479,6 @@ int main() {
     test_neutral_byte_estimation_and_incremental_reservation();
     test_string_and_object_key_fidelity();
     test_precopy_quota_boundaries_and_zero_copy_on_reject();
+    test_http_consume_batch_two_phase_atomicity();
     return 0;
 }

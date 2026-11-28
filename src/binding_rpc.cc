@@ -2286,6 +2286,105 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
     return true;
 }
 
+bool BindingHttpConsumeBatch::contains(JSValueConst value) const {
+    if (!JS_IsObject(value)) {
+        return false;
+    }
+    void* target_ptr = JS_VALUE_GET_PTR(value);
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        if (JS_VALUE_GET_PTR(targets[i]) == target_ptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BindingHttpConsumeBatch::add_target(JSContext* target_ctx, JSValueConst value) {
+    if (target_ctx == NULL || !JS_IsObject(value)) {
+        return false;
+    }
+    if (ctx != NULL && ctx != target_ctx) {
+        return false;
+    }
+    ctx = target_ctx;
+    targets.push_back(JS_DupValue(target_ctx, value));
+    return true;
+}
+
+bool BindingHttpConsumeBatch::prepare(JSValueConst prepare_fn, std::string* error) {
+    if (targets.empty()) {
+        return true;
+    }
+    if (ctx == NULL || !JS_IsFunction(ctx, prepare_fn)) {
+        return fail_closed(error, "HTTP body consumption prepare helper unavailable");
+    }
+    if (!JS_IsUndefined(prepared_plan)) {
+        JS_FreeValue(ctx, prepared_plan);
+        prepared_plan = JS_UNDEFINED;
+    }
+    JSValue arr = JS_NewArray(ctx);
+    if (JS_IsException(arr)) {
+        clear_pending_exception(ctx);
+        return fail_closed(error, "failed to allocate HTTP body commit batch");
+    }
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        if (JS_DefinePropertyValueUint32(ctx, arr, static_cast<uint32_t>(i),
+                                         JS_DupValue(ctx, targets[i]), JS_PROP_C_W_E) < 0) {
+            clear_pending_exception(ctx);
+            JS_FreeValue(ctx, arr);
+            return fail_closed(error, "failed to populate HTTP body commit batch");
+        }
+    }
+    JSValue plan = JS_Call(ctx, prepare_fn, JS_UNDEFINED, 1, &arr);
+    JS_FreeValue(ctx, arr);
+    if (JS_IsException(plan) || !JS_IsObject(plan)) {
+        if (JS_IsException(plan)) {
+            clear_pending_exception(ctx);
+        } else {
+            JS_FreeValue(ctx, plan);
+        }
+        return fail_closed(error, "failed to prepare HTTP body consumption");
+    }
+    prepared_plan = plan;
+    return true;
+}
+
+bool BindingHttpConsumeBatch::commit(JSValueConst apply_fn, std::string* error) {
+    if (targets.empty()) {
+        reset();
+        return true;
+    }
+    if (ctx == NULL || !JS_IsFunction(ctx, apply_fn) || !JS_IsObject(prepared_plan)) {
+        reset();
+        return fail_closed(error, "HTTP body consumption commit state is missing");
+    }
+    JSValue arg = prepared_plan;
+    JSValue ret = JS_Call(ctx, apply_fn, JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(ret)) {
+        clear_pending_exception(ctx);
+        reset();
+        return fail_closed(error, "failed to commit HTTP body consumption");
+    }
+    JS_FreeValue(ctx, ret);
+    reset();
+    return true;
+}
+
+void BindingHttpConsumeBatch::reset() {
+    if (ctx != NULL) {
+        if (!JS_IsUndefined(prepared_plan)) {
+            JS_FreeValue(ctx, prepared_plan);
+            prepared_plan = JS_UNDEFINED;
+        }
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            JS_FreeValue(ctx, targets[i]);
+        }
+    }
+    targets.clear();
+    prepared_plan = JS_UNDEFINED;
+    ctx = NULL;
+}
+
 JSValue binding_call_id_to_js(JSContext* ctx, std::uint64_t call_id) {
     if (ctx == NULL || call_id == 0) {
         return ctx != NULL ? JS_ThrowRangeError(ctx, "binding call id zero is invalid")
