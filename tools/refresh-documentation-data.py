@@ -63,10 +63,12 @@ def derive(root):
     assert source_manifest["sourceCommit"] == publication["productCheckout"]
     assert source_manifest["sourceTree"] == publication["productTree"]
     checkout = source_manifest["checkout"]
-    if checkout["kind"] != "engine-integration-successor":
-        assert version == beta["runtimeVersion"]
-    else:
+    if checkout["kind"] == "runtime-feature-successor":
+        assert re.fullmatch(r"0\.[34]\.\d+", version)
+    elif checkout["kind"] == "engine-integration-successor":
         assert re.fullmatch(r"0\.3\.\d+", version)
+    else:
+        assert version == beta["runtimeVersion"]
     assert checkout["kind"] in {
         "docs-successor",
         "formatting-successor",
@@ -74,6 +76,7 @@ def derive(root):
         "test-harness-successor",
         "runtime-optimization-successor",
         "engine-integration-successor",
+        "runtime-feature-successor",
     }
     assert checkout["baseCommit"] == publication["productCheckout"]
     assert checkout["releaseQualificationInherited"] is False
@@ -108,6 +111,14 @@ def derive(root):
             "engine-integration-successor requires explicit buildInputChanges"
         )
         assert checkout.get("changeScope"), "engine integration scope must be described"
+    elif checkout["kind"] == "runtime-feature-successor":
+        assert declared_build_changes, (
+            "runtime-feature-successor requires explicit buildInputChanges"
+        )
+        assert declared_runtime_changes, (
+            "runtime-feature-successor requires explicit runtimeInputChanges"
+        )
+        assert checkout.get("changeScope"), "runtime feature scope must be described"
     elif checkout["kind"] == "test-harness-successor":
         assert not declared_runtime_changes, "test harness changes cannot change runtime inputs"
         assert not declared_vendor_patch_changes, (
@@ -141,9 +152,10 @@ def derive(root):
             assert current["mode"] == original["mode"]
         if name.startswith(("patches/", "vendor/")):
             if current != original:
-                assert checkout["kind"] == "engine-integration-successor", (
-                    "locked vendor/patch input changed"
-                )
+                assert checkout["kind"] in {
+                    "engine-integration-successor",
+                    "runtime-feature-successor",
+                }, "locked vendor/patch input changed"
                 actual_vendor_patch_changes.add(name)
                 assert declared_vendor_patch_changes.get(name) == {
                     "qualifiedGitObject": original["gitObject"] if original else None,
@@ -249,7 +261,7 @@ def derive(root):
     status = {
         "schema": 1,
         "asOfUTC": release["observedAtUTC"],
-        "developmentBranch": release["developmentBranch"],
+        "developmentBranch": checkout.get("branch", release["developmentBranch"]),
         "sourceChangeScope": checkout.get(
             "changeScope",
             "mechanical source formatting and development tooling; no new runtime binary qualification",

@@ -2,15 +2,99 @@
   "asOfUTC": "2026-11-28T00:09:21Z",
   "checkout": {
     "baseCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
-    "buildInputChanges": {},
-    "changeScope": "post-v0.3.2-beta.1 release publication metadata, streamlined README/perf-site installer cutover, and documentation alignment; runtime/build/vendor inputs match qualified v0.3.2-beta.1 identically",
+    "branch": "dev/v0.4.0",
+    "buildInputChanges": {
+      "CMakeLists.txt": {
+        "currentGitObject": "6309f92ece89d01b818feb863acfdd0f0183dd85",
+        "qualifiedGitObject": "cbe63c098e8256e98ee9135728a6f7df4211b7bc"
+      },
+      "cmake/AuditTxikiVendor.cmake": {
+        "currentGitObject": "5cf06f7311b28c5e712e3a95cd4af5abd0a0dc9b",
+        "qualifiedGitObject": "910b22b1720b769a5f04971fdb1357beddb01eca"
+      },
+      "cmake/ComputeTxikiOverlayKey.cmake": {
+        "currentGitObject": "e648524d910e1c5660a7a8043261a53d5aed5517",
+        "qualifiedGitObject": "6b167aa78ab7665910d3a0cef69870f44601be70"
+      },
+      "cmake/build_tests.cmake": {
+        "currentGitObject": "242f18fd4fe9c1b0d2f4b1ee23479f766d3bb65a",
+        "qualifiedGitObject": "f827b1dc4a4808ad2698b177cbcfdfef472e3761"
+      },
+      "cmake/build_worker.cmake": {
+        "currentGitObject": "59b3e2ebb45a672661478d12e6403d5199c742fe",
+        "qualifiedGitObject": "1c1a330b6e12b1603fe383b8d9d29e16f0e0daae"
+      }
+    },
+    "changeScope": "Binding RPC v2 (v0.4.0 M4A-M4D): fair shared-loop scheduler, three-tier quota ledger, structured remote errors, { signal, timeoutMs } call options and late-result disposal, bidirectional credit-based ReadableStream/WritableStream proxies, controlled Request/Response proxies, native-branded RpcTarget handles with leases and disposal, plus Binding v2 and WebSocket guides/examples; C ABI v8, FetchRPC v4, and zero-Binding fast path preserved; no new published binary release yet.",
     "headerSHA256": "73954203a46c5357dd80cbc3d249d887c06a1442fffa408de4ebda94688a5a38",
     "inputManifest": "docs/data/runtime-source-manifest.json",
-    "kind": "docs-successor",
+    "kind": "runtime-feature-successor",
     "protocolSHA256": "d4615f3fbeecf16a0fe4b07363649da0d7882da112d33f7421d3ab6695924507",
     "releaseQualificationInherited": false,
-    "runtimeInputChanges": {},
-    "vendorPatchChanges": {}
+    "runtimeInputChanges": {
+      "js/binding-rpc-bridge.js": {
+        "currentGitObject": "dbd00b7e9253ab775ac5f41128ee99a52f4c3bd1",
+        "qualifiedGitObject": null
+      },
+      "js/bootstrap.js": {
+        "currentGitObject": "70b40413bdb3426dad0c5f83fbfb88a9cdcd6c19",
+        "qualifiedGitObject": "c1ed420ad10e1be366f3118a2593d7c51368a27d"
+      },
+      "js/fetch.js": {
+        "currentGitObject": "988cec58ef90848e6d6abc111c270cf2ab928472",
+        "qualifiedGitObject": "49d1dc08aeaa594e9e1b1bfd5dcf51d2d32b4bae"
+      },
+      "src/binding_handle_table.cc": {
+        "currentGitObject": "bb4d52744ed1b9371177bdff777423915bf5f867",
+        "qualifiedGitObject": null
+      },
+      "src/binding_handle_table.h": {
+        "currentGitObject": "6feef42e1f7bb3db30ce5eba0f85fb14e37f8341",
+        "qualifiedGitObject": null
+      },
+      "src/binding_rpc.cc": {
+        "currentGitObject": "7dd86bd1859a0c3e8b0e3d0cd442c68cec52f472",
+        "qualifiedGitObject": "b4efefb12fe1819b52d77644c12f930a8445a2cf"
+      },
+      "src/binding_rpc.h": {
+        "currentGitObject": "66a2a7aba3979f4a16f796b4f3e59e643819bc6d",
+        "qualifiedGitObject": "eb14b23469fc29829226aa4be664ad521c55a65e"
+      },
+      "src/binding_rpc_ledger.cc": {
+        "currentGitObject": "cce7c12e075bad77775ea5dacb4a84838e9dfa90",
+        "qualifiedGitObject": null
+      },
+      "src/binding_rpc_ledger.h": {
+        "currentGitObject": "79037c5262a928a140e7035840690b8faee3efb5",
+        "qualifiedGitObject": null
+      },
+      "src/binding_scheduler.cc": {
+        "currentGitObject": "403966ebfa7765b73252d6498cd29bfaa6d49947",
+        "qualifiedGitObject": null
+      },
+      "src/binding_scheduler.h": {
+        "currentGitObject": "41f5cd5265a73fde1164bdd1090f6787a5562bd9",
+        "qualifiedGitObject": null
+      },
+      "src/binding_stream_table.cc": {
+        "currentGitObject": "49a753dcade89bed203d4493d7cbdfeb628c4f00",
+        "qualifiedGitObject": null
+      },
+      "src/binding_stream_table.h": {
+        "currentGitObject": "43927554d31ca02f44cc295e43db018505d36e8c",
+        "qualifiedGitObject": null
+      },
+      "src/worker_runtime.cc": {
+        "currentGitObject": "52b33ad4d4d66eabbda2477dc3f61816e85486b5",
+        "qualifiedGitObject": "7b334d3a1dd51a18ce87e1d81eb8363fb334fa54"
+      }
+    },
+    "vendorPatchChanges": {
+      "patches/txiki/0080-capsid-fair-job-budget.patch": {
+        "currentGitObject": "2083ec8a92f549c372a9d3c76dc875fdf79d7eba",
+        "qualifiedGitObject": null
+      }
+    }
   },
   "conformance": {
     "executedFiles": 84,
@@ -46,7 +130,7 @@
     "standardsConformanceClaimed": false,
     "wptCommit": "1985b47aa8972a970f005957f2bfa036da1787c6"
   },
-  "developmentBranch": "dev/v0.3.2",
+  "developmentBranch": "dev/v0.4.0",
   "githubLatest": {
     "prerelease": false,
     "releaseId": 461174945,
@@ -281,10 +365,10 @@
     "protocolSHA256": "d4615f3fbeecf16a0fe4b07363649da0d7882da112d33f7421d3ab6695924507",
     "publicAbi": 8,
     "quickjsCommit": "8fcb4751a66986bd42b11de3012e967d77790923",
-    "sdkPatchCount": 79,
+    "sdkPatchCount": 80,
     "sourceCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
     "sourceManifest": "docs/data/runtime-source-manifest.json",
-    "sourceScope": "qualified 0.3.2-beta interface baseline (v0.3.2-beta.1); current checkout runtime inputs match",
+    "sourceScope": "qualified 0.3.2-beta interface baseline (v0.3.2-beta.1); current checkout has declared engine, build, and runtime changes",
     "sourceTree": "8e5bafde59408ffeb2344e0bdae15b699c939d3b",
     "txiki": {
       "commit": "1a230d31183f062fae7a6c4fd2cff466cecc1787",
@@ -304,10 +388,10 @@
       "capsid:utils",
       "capsid:uuid"
     ],
-    "version": "0.3.2"
+    "version": "0.4.0"
   },
   "schema": 1,
-  "sourceChangeScope": "post-v0.3.2-beta.1 release publication metadata, streamlined README/perf-site installer cutover, and documentation alignment; runtime/build/vendor inputs match qualified v0.3.2-beta.1 identically",
+  "sourceChangeScope": "Binding RPC v2 (v0.4.0 M4A-M4D): fair shared-loop scheduler, three-tier quota ledger, structured remote errors, { signal, timeoutMs } call options and late-result disposal, bidirectional credit-based ReadableStream/WritableStream proxies, controlled Request/Response proxies, native-branded RpcTarget handles with leases and disposal, plus Binding v2 and WebSocket guides/examples; C ABI v8, FetchRPC v4, and zero-Binding fast path preserved; no new published binary release yet.",
   "stable": {
     "githubLatest": false,
     "prerelease": false,

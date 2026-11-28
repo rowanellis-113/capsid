@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "reviewedDate": "2026-11-24",
+  "reviewedDate": "2026-11-28",
   "sourceBaseline": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
   "meaning": "Reviewed means current maintained claims or explicit historical disposition reviewed; not every page rewritten, every command executed, or historical result requalified.",
   "counts": {
-    "current-reference": 46,
+    "current-reference": 50,
     "historical-translation": 38,
     "immutable-evidence": 1,
     "historical-plan-or-journal": 18,
@@ -24,16 +24,16 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "b4918b4ff76a04f27590a871d4802d95e1fb7b88f7350aceb76c9faf291c1df3",
-      "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, architecture diagram, runnable webhook handler, C/C++ SDK embedding and release-specific entry points."
+      "sha256": "afe448e04fdaf3a97890af3ebe8f31be91ac7634fd3584c0bd7107c718bfeb47",
+      "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, Binding RPC v2 (dev/v0.4.0) and WebSocket showcases, architecture diagram, runnable examples, C/C++ ABI v8 SDK embedding and release-specific entry points."
     },
     {
       "path": "ROADMAP.md",
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "3480bae24419cba1ebfbfa766e6a520442ed957b0ad87b6964279359806b2d8f",
-      "review": "Records delivered v0.3.0/v0.3.1/v0.3.2 milestones (FetchRPC v4, quickjs-turbo, Config v2, Elastic OS Process Pools, C ABI v8), prioritizes hardening v0.4.0-v0.6.0 core runtime foundations first, and separates future Binding-v2/Wrangler work."
+      "sha256": "1a7e9f5e31c20b0efe2301133e17a1dcf0ceeec3e02029601b21d79799a9b927",
+      "review": "Records delivered v0.3.0/v0.3.1/v0.3.2 milestones and v0.4.0 Binding RPC v2 (dev/v0.4.0) implementation, prioritizing v0.5.0-v0.6.0 runtime foundations ahead of platform facades and Wrangler work."
     },
     {
       "path": "SECURITY.md",
@@ -72,7 +72,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "b5e27c183cbd9c52a12e901936aca39eb100b8f1cb9532c353c7c58acfb0df1f",
+      "sha256": "36c29817d0a5dcf739dfefdd5d48d41a94d961f869d9462dba2aa68458e95821",
       "review": "Task-oriented index and physical filing rules for guides, reference, design, history, evidence and data."
     },
     {
@@ -80,7 +80,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "20ec235e522448aca7214553c0f25184b9a6d1621d49c0c45033c6ef279cca9e",
+      "sha256": "713deef846e25193a8562cdc0d4757bff3087f37b9ab3b1c9d2c65d4c0394687",
       "review": "Binding RPC v2 (v0.4.0) design: fair shared-loop scheduler, 3-tier quota ledger, structured errors, AbortSignal/timeoutMs, bidirectional credit stream proxies, Request/Response proxies, and RpcTarget handles with leases and GC disposal."
     },
     {
@@ -434,7 +434,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "a9a3e98027f8c74cd9af6b9117d5cd981b10918342813f1e2cda182d784338d7",
+      "sha256": "a43559093090283718f428eb9af112c3fb20ab0836edb13e2dc54e8e6d9ec422",
       "review": "Config v2 package layout, required manifest, permissions, port lists, resource ceilings and elastic pools."
     },
     {
@@ -458,7 +458,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "7aa5f6b5c96073c85f7215ddfd0eef69765c8d9a1b56bc3a4521c3e930826b7d",
+      "sha256": "71327918ea63e0b0de0fc81437852749df96df0b57a7c50dac6f52dd1bba63d8",
       "review": "Shared Fetch example with separate configuration, host commands, readiness and request URLs for the published beta and v0.3.2 development branch."
     },
     {
@@ -469,6 +469,22 @@
       "sha256": "b5578f76adb237cad803a881cde57ddcc83c534eda59eb548a047051cd2e9869",
       "review": "Single validation workflow including test selection, pinned references, platform controls, release-data scope and archived journal anchors.",
       "archivedSource": "docs/history/archives/2026-11-17/testing.md.txt"
+    },
+    {
+      "path": "docs/guides/use-binding-rpc-v2.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "545f7ba4bd0f5408dca0f57f0134452fcb9dbdffd5cb1dd9149e7d0547c6f977",
+      "review": "Practical Binding RPC v2 (v0.4.0) developer guide covering manifest/app setup, M4A scheduling/options/errors/quotas, M4B credit stream proxies, M4C Request/Response proxies, and M4D RpcTarget handles with leases and disposal."
+    },
+    {
+      "path": "docs/guides/use-websockets.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "a8be3f30f2da007c689a83a7a5348e5828745ada5951af59bac3eb341202cd37",
+      "review": "Practical WebSocket developer guide covering inbound WebSocketPair, allowHalfOpen, delayed accept, binaryType blob/arraybuffer, egress-gated outbound ws/wss, gzip Upgrade fallback, and FetchRPC v4 limits."
     },
     {
       "path": "docs/history/README.md",
@@ -811,7 +827,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "11a3071f8dc15261e23f7ce64a8ecc5d31b52607449e64b2e5f3ddbfedfe7e80",
+      "sha256": "3883ad3574553df1cce372ab65ddfc3bc04a7c53c6a3d4e0c47d35a8a388096a",
       "review": "Development-branch scope and dated published-release, compatibility and benchmark records."
     },
     {
@@ -835,9 +851,17 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "a34830e6a2e230bcd073f882f5509835bd6471485033a11b9d5d13d55bbd3fdf",
+      "sha256": "70a11090df1f2a97c10e3b7f30ee00fb7a332b9932638246c03a77b686d14502",
       "review": "Delivered bounded inbound/outbound/Upgrade behavior, retained incoming owner and pinned independent references; no complete Workers platform parity.",
       "archivedSource": "docs/history/archives/2026-11-17/workerd-websocket-semantics.md.txt"
+    },
+    {
+      "path": "examples/binding-rpc-v2/README.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "297f306f04c1702b51b1d9ed7699e8d61aa7eb1f8b0e6f234c815e8c1c28c4fc",
+      "review": "Zero-dependency runnable 14-route Binding RPC v2 showcase and Python 3 end-to-end verifier covering M4A-M4D."
     },
     {
       "path": "examples/h3-v2-reference/README.md",
@@ -864,11 +888,19 @@
       "review": "Locked example setup and actual worker driver/test names, not full CI."
     },
     {
+      "path": "examples/websocket-showcase/README.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "5ebac8247eb2b117db12798f994a35787a4fbbb7280e93ce0d4da8d034308fdf",
+      "review": "Zero-dependency runnable 8-route WebSocket showcase and RFC 6455 Python 3 verifier covering inbound/outbound WebSockets, allowHalfOpen, and gzip Upgrade fallback."
+    },
+    {
       "path": "perf-site/README.md",
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "590dee5e9697f84f7588ed4ed5031612339836490f30fd6a4503c77dbf8b5209",
+      "sha256": "92dabbe0a4eb672ffb2823d9a0705d6c7ad1f8619c79abc89d14b23d9661f35a",
       "review": "Generated files, verified archive replay, current prerelease versus measured source boundaries and deployment requirements."
     },
     {

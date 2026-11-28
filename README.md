@@ -19,6 +19,7 @@ Run untrusted AI-generated code, customer plugins, and webhooks in **dedicated L
 - **`705` warm OS workers in 2 GiB** (`10 KiB` app, 99.4% warm retention; `501` @ `100 KiB`, `135` @ `1 MiB`)
 - **`8.89 ms` C ABI cold start** to first response (`10 KiB` trusted bytecode, `8.2 MiB` PSS; `9.29 ms` source)
 - **`Zero-JIT` (`quickjs-turbo`)** — no RWX pages, fenced by Linux `namespaces` + `Landlock` + `seccomp` + `cgroup v2`
+- **Binding RPC v2 (`dev/v0.4.0`) &amp; WebSockets (`FetchRPC v4`)** — isolated Binding heaps with bidirectional credit streams, `Request`/`Response` proxies, and `RpcTarget` handles, plus inbound `WebSocketPair` and egress-gated outbound `ws`/`wss`
 
 **[Explore interactive Multi-Axis &amp; Frontier charts &rarr;](https://rowanellis-113.github.io/capsid/)**
 
@@ -28,9 +29,10 @@ Run untrusted AI-generated code, customer plugins, and webhooks in **dedicated L
 
 Running untrusted tenant or AI-generated JavaScript usually forces a trade-off: **V8 isolates** share one JIT process address space and balloon in memory under concurrent load, while **containers and microVMs** pay `100 ms – 1 s+` cold starts and tens to hundreds of MiB per tenant.
 
-1. **Hard OS Isolation, Zero JIT** — Every worker runs in its own Linux process (`namespaces` + `Landlock` + `seccomp` + delegated `cgroup v2`), with deny-by-default egress, zero RWX JIT pages, and host-owned credentials kept out of untrusted JS via [Trusted Bindings](docs/design/bindings-v1.md).
-2. **Elastic OS Process Pools (`dev/v0.3.2`)** — Idle apps scale to zero (`0` processes, `0 B` worker RAM) while bounded cold queues absorb bursts. Two-stage tenant-fair eviction (`85% / 75%` hysteresis) reclaims over-share bursty replicas before touching quiet tenants and keeps active HTTP, SSE, and WebSocket streams exempt from idle eviction. Capacity slots hand off immediately while evicted worker processes exit asynchronously so Linux reclaims **100% of private physical pages**; rolling deployments drain live traffic up to `drain_deadline` under a shared delegated tenant `cgroup v2` `memory.max`.
-3. **Zero External Dependencies, Standalone or Embedded** — Standard Web `fetch(Request)` handlers with no S3 coordinator or cloud state layer required. Run standalone via `capsid-host` for **AI Agent Code Mode**, **SaaS webhooks/plugins**, and **private on-prem functions**, or embed `libcapsid_runtime` directly into a C/C++ gateway.
+1. **Hard OS Isolation, Zero JIT** — Every worker runs in its own Linux process (`namespaces` + `Landlock` + `seccomp` + delegated `cgroup v2`), with deny-by-default egress, zero RWX JIT pages, and host-owned credentials kept out of untrusted JS via isolated Binding Runtimes ([Binding RPC v2 guide](docs/guides/use-binding-rpc-v2.md)).
+2. **Elastic OS Process Pools (`v0.3.2-beta.1`)** — Idle apps scale to zero (`0` processes, `0 B` worker RAM) while bounded cold queues absorb bursts. Two-stage tenant-fair eviction (`85% / 75%` hysteresis) reclaims over-share bursty replicas before touching quiet tenants and keeps active HTTP, SSE, and WebSocket streams exempt from idle eviction. Capacity slots hand off immediately while evicted worker processes exit asynchronously so Linux reclaims **100% of private physical pages**; rolling deployments drain live traffic up to `drain_deadline` under a shared delegated tenant `cgroup v2` `memory.max`.
+3. **Binding RPC v2 (`dev/v0.4.0`) &amp; Full-Duplex WebSockets (`FetchRPC v4`)** — Extend untrusted workers with Host-trusted `capsid/binding-v1` packages running in dedicated QuickJS heaps: fair multi-runtime scheduling, 3-tier quotas, typed remote errors, `{ signal, timeoutMs }` call options, bidirectional credit-based `ReadableStream`/`WritableStream` proxies, controlled `Request`/`Response` proxies, and native-branded `RpcTarget` handles with leases and explicit/GC disposal — with **zero overhead** when no Binding is attached. Serve real-time traffic via inbound `WebSocketPair` (`allowHalfOpen`, binary/text, subprotocols) and egress-gated outbound `ws`/`wss` ([WebSocket guide](docs/guides/use-websockets.md)).
+4. **Zero External Dependencies, Standalone or Embedded** — Standard Web `fetch(Request)` handlers with no S3 coordinator or cloud state layer required. Run standalone via `capsid-host` for **AI Agent Code Mode**, **SaaS webhooks/plugins**, and **private on-prem functions**, or embed `libcapsid_runtime` directly into a C/C++ gateway.
 
 | | V8 Isolates (`workerd`) | **Capsid** |
 | :--- | :--- | :--- |
@@ -127,6 +129,33 @@ curl -sS http://127.0.0.1:8080/ -H 'Content-Type: application/json' -d '{"type":
 
 Add `"pool":{"minReady":0,"maxWorkers":8,"idleTimeout":"60s"}` in Linux managed mode for scale-to-zero elastic pools. **Hono**, **itty-router**, **H3**, and **Elysia** all run on Capsid ([framework matrix](docs/reference/frameworks/README.md)).
 
+### Binding RPC v2 (`dev/v0.4.0`) &amp; WebSocket Examples
+
+Keep secrets, streams, and stateful capabilities inside a trusted Binding Runtime while untrusted application JS receives only frozen proxies and `RpcTarget` stubs:
+
+```js
+import vault from "capsid:binding/vault";
+
+export default {
+  async fetch(request) {
+    const session = await vault.openSession("orders", { timeoutMs: 2000 });
+    try {
+      await session.append(await request.text());
+      return await session.exportResponse(); // immutable proxy Response (inline or streaming)
+    } finally {
+      session.dispose(); // deterministic cleanup (plus lease & GC-finalizer fallback)
+    }
+  },
+};
+```
+
+Run the exhaustive zero-dependency showcases directly with `capsid-host`:
+
+- **Binding RPC v2 (14 routes — `M4A`–`M4D`):** [`examples/binding-rpc-v2/`](examples/binding-rpc-v2/README.md) · [Developer guide](docs/guides/use-binding-rpc-v2.md) · [Technical design](docs/design/binding-rpc-v2.md)
+  - Fair multi-Binding scheduling &amp; microtask-storm preemption, 3-tier quota ledger, structured remote errors, `{ signal, timeoutMs }` + late-result disposal, bidirectional credit-based `ReadableStream`/`WritableStream` proxies, inline &amp; streaming `Request`/`Response` proxies, and `RpcTarget` handles (nested cursors, leases, `.dispose()`/`[Symbol.dispose]()`/`[Symbol.asyncDispose]()`, cross-request fencing).
+- **WebSockets (8 routes — `FetchRPC v4`):** [`examples/websocket-showcase/`](examples/websocket-showcase/README.md) · [Developer guide](docs/guides/use-websockets.md) · [Semantics reference](docs/reference/websocket-semantics.md)
+  - Inbound `WebSocketPair` + `101` Upgrade (text &amp; 32 KiB binary, `blob` vs `arraybuffer`, Ping/Pong, custom close codes), `Sec-WebSocket-Protocol`, `allowHalfOpen` final drain, delayed `accept()`, egress-gated outbound `ws`/`wss`, and gzip HTTP Upgrade fallback.
+
 ### Install
 
 > **Stable**: [`v0.2.2`](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2)
@@ -139,14 +168,14 @@ curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-bet
 ```
 
 <details>
-<summary><strong>Build <code>dev/v0.3.2</code> from source (Config v2, Elastic Pools &amp; C ABI v8)</strong></summary>
+<summary><strong>Build <code>dev/v0.4.0</code> from source (Binding RPC v2, Config v2, Elastic Pools &amp; C ABI v8)</strong></summary>
 
 <br />
 
 [Linux / macOS build guide](docs/guides/build-from-source.md) &middot; [Windows MSVC build guide](docs/guides/build-on-windows.md)
 
 ```sh
-git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git
+git clone --branch dev/v0.4.0 --recurse-submodules https://github.com/rowanellis-113/capsid.git
 cd capsid && npm ci --ignore-scripts --prefix vendor/txiki.js
 cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF
 cmake --build build-release --parallel
@@ -160,7 +189,7 @@ export PATH="$HOME/opt/capsid-sdk/bin:$PATH"
 
 ## Embed the C/C++ SDK (ABI v8)
 
-The v0.3.2 development SDK uses C ABI v8. Embed `libcapsid_runtime` via `<capsid/runtime.h>` (C11) or `<capsid/runtime.hpp>` (C++11 RAII) and register `capsid_worker_fd()` with your POSIX event loop:
+The v0.4.0 development SDK uses C ABI v8 (matching published `v0.3.2-beta.1`). Embed `libcapsid_runtime` via `<capsid/runtime.h>` (C11) or `<capsid/runtime.hpp>` (C++11 RAII) and register `capsid_worker_fd()` with your POSIX event loop:
 
 ```cpp
 #include <capsid/runtime.hpp>
@@ -215,8 +244,8 @@ flowchart LR
 ```
 
 - **Lazy property inline caches** — Purges startup inline caches before `READY` so idle workers stay compact (`src/worker_main.cc`, `src/worker_runtime.cc`).
-- **Credit-based IPC backpressure** — Explicit byte credits on [FetchRPC v4](docs/reference/fetchrpc-v4.md) protect Host–worker buffers across HTTP, SSE, and WebSockets.
-- **Zero-cost Trusted Bindings** — Credentials live in an isolated Binding heap only when granted ([Binding v1](docs/design/bindings-v1.md)).
+- **Credit-based IPC backpressure** — Explicit byte credits on [FetchRPC v4](docs/reference/fetchrpc-v4.md) protect Host–worker buffers across HTTP, SSE, and [WebSockets](docs/guides/use-websockets.md).
+- **Zero-cost Trusted Bindings (RPC v2)** — Credentials, credit-based streams, `Request`/`Response` proxies, and `RpcTarget` handles run in isolated per-Binding heaps only when declared ([Binding RPC v2](docs/design/binding-rpc-v2.md) &middot; [Binding v1](docs/design/bindings-v1.md)).
 - **Scale-to-zero &amp; tenant `memory.max`** — Delegated Linux `cgroup v2` parent ceilings cover sibling apps and overlapping blue-green rollouts ([Config v2](docs/design/config-v2.md)).
 
 </details>
@@ -226,8 +255,9 @@ flowchart LR
 ## Documentation
 
 - **Get Started:** [Docs index](docs/README.md) &middot; [Run an app](docs/guides/run-application.md) &middot; [Install packages](docs/guides/install-packages.md) &middot; [Build from source](docs/guides/build-from-source.md)
-- **Architecture &amp; Scaling:** [Config v2 &amp; elastic pools](docs/design/config-v2.md) &middot; [Runtime](docs/design/runtime-architecture.md) &middot; [Host](docs/design/host-architecture.md) &middot; [Platform support](docs/reference/platform-support.md)
-- **Embed &amp; Protocol:** [C/C++ API (ABI v8)](docs/reference/embedding-api.md) &middot; [FetchRPC v4](docs/reference/fetchrpc-v4.md) &middot; [Trusted Bindings](docs/design/bindings-v1.md) &middot; [Host config](docs/reference/host-configuration.md)
+- **Bindings &amp; WebSockets:** [Use Binding RPC v2](docs/guides/use-binding-rpc-v2.md) &middot; [Binding RPC v2 example](examples/binding-rpc-v2/README.md) &middot; [Use WebSockets](docs/guides/use-websockets.md) &middot; [WebSocket example](examples/websocket-showcase/README.md)
+- **Architecture &amp; Scaling:** [Config v2 &amp; elastic pools](docs/design/config-v2.md) &middot; [Binding RPC v2 design](docs/design/binding-rpc-v2.md) &middot; [Runtime](docs/design/runtime-architecture.md) &middot; [Host](docs/design/host-architecture.md) &middot; [Platform support](docs/reference/platform-support.md)
+- **Embed &amp; Protocol:** [C/C++ API (ABI v8)](docs/reference/embedding-api.md) &middot; [FetchRPC v4](docs/reference/fetchrpc-v4.md) &middot; [WebSocket semantics](docs/reference/websocket-semantics.md) &middot; [Binding permissions](docs/reference/binding-permissions.md) &middot; [Host config](docs/reference/host-configuration.md)
 - **Benchmarks &amp; Roadmap:** [Benchmarks](docs/reference/benchmarks.md) &middot; [Frameworks](docs/reference/frameworks/README.md) &middot; [Web conformance](docs/reference/web-conformance.md) &middot; [Release status](docs/reference/release-status.md) &middot; [Roadmap](ROADMAP.md)
 
 <div align="center">

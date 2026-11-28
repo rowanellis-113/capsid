@@ -1,12 +1,13 @@
 # Capsid documentation
 
-**Start here:** [Run a Fetch application](guides/run-application.md). The quick start covers the unified `capsid-host --app-dir .` CLI shipped in `v0.3.2-beta.1` and `dev/v0.3.2`. [Release status](reference/release-status.md) identifies the source behind each published result.
+**Start here:** [Run a Fetch application](guides/run-application.md). The quick start covers the unified `capsid-host --app-dir .` CLI shipped in `v0.3.2-beta.1` and continued on `dev/v0.4.0` (which adds Binding RPC v2). [Release status](reference/release-status.md) identifies the source behind each published result.
 
 ## Guides
 
 | Task | Guide |
 | --- | --- |
 | Install and run | [Install a package](guides/install-packages.md) · [Run an application](guides/run-application.md) · [Configure an application](guides/configure-application.md) |
+| Bindings and WebSockets | [Use Binding RPC v2 (`v0.4.0`)](guides/use-binding-rpc-v2.md) · [Use WebSockets (`FetchRPC v4`)](guides/use-websockets.md) |
 | Build the runtime or SDK | [Build from source](guides/build-from-source.md) · [Build on Windows](guides/build-on-windows.md) |
 | Contribute a change | [Format source](guides/format-source.md) · [Run tests](guides/run-tests.md) · [Contributing](../CONTRIBUTING.md) |
 

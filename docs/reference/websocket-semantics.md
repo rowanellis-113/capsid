@@ -45,7 +45,12 @@ export default {
 ```
 
 This is a minimal bundle, not a complete Host launch; supply an actual Upgrade
-request using the [quick-start tools/configuration](../guides/run-application.md). Acceptance
+request using the [quick-start tools/configuration](../guides/run-application.md),
+the practical [WebSocket guide](../guides/use-websockets.md), or the runnable
+8-route [WebSocket showcase](../../examples/websocket-showcase/README.md) (which
+exercises text/binary frames, subprotocols, `allowHalfOpen`, delayed `accept()`,
+`blob` vs `arraybuffer`, outbound `ws://` egress gating, and gzip Upgrade
+fallback). Acceptance
 and response coupling apply to different endpoints. Repeated ordinary accept
 returns; accepting a coupled endpoint is an error. The option is
 `allowHalfOpen`, not a hibernation-only extension.

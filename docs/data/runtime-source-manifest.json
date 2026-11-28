@@ -7,7 +7,7 @@
     "CMakeLists.txt": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "cbe63c098e8256e98ee9135728a6f7df4211b7bc"
+      "gitObject": "6309f92ece89d01b818feb863acfdd0f0183dd85"
     },
     "cmake/AuditEscapeCapabilityDefaults.cmake": {
       "mode": "100644",
@@ -22,7 +22,7 @@
     "cmake/AuditTxikiVendor.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "910b22b1720b769a5f04971fdb1357beddb01eca"
+      "gitObject": "5cf06f7311b28c5e712e3a95cd4af5abd0a0dc9b"
     },
     "cmake/AuditWasmLimits.cmake": {
       "mode": "100644",
@@ -62,7 +62,7 @@
     "cmake/ComputeTxikiOverlayKey.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6b167aa78ab7665910d3a0cef69870f44601be70"
+      "gitObject": "e648524d910e1c5660a7a8043261a53d5aed5517"
     },
     "cmake/GeneratePackageArtifacts.cmake": {
       "mode": "100644",
@@ -162,12 +162,12 @@
     "cmake/build_tests.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f827b1dc4a4808ad2698b177cbcfdfef472e3761"
+      "gitObject": "242f18fd4fe9c1b0d2f4b1ee23479f766d3bb65a"
     },
     "cmake/build_worker.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1c1a330b6e12b1603fe383b8d9d29e16f0e0daae"
+      "gitObject": "59b3e2ebb45a672661478d12e6403d5199c742fe"
     },
     "cmake/capability_manifest_hash.h.in": {
       "mode": "100644",
@@ -199,10 +199,15 @@
       "kind": "blob",
       "gitObject": "b660690f2912470053fb0f5c38f5fba4c022ae46"
     },
+    "js/binding-rpc-bridge.js": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "dbd00b7e9253ab775ac5f41128ee99a52f4c3bd1"
+    },
     "js/bootstrap.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c1ed420ad10e1be366f3118a2593d7c51368a27d"
+      "gitObject": "70b40413bdb3426dad0c5f83fbfb88a9cdcd6c19"
     },
     "js/dom-exception.js": {
       "mode": "100644",
@@ -237,7 +242,7 @@
     "js/fetch.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "49d1dc08aeaa594e9e1b1bfd5dcf51d2d32b4bae"
+      "gitObject": "988cec58ef90848e6d6abc111c270cf2ab928472"
     },
     "js/file.js": {
       "mode": "100644",
@@ -714,6 +719,11 @@
       "kind": "blob",
       "gitObject": "037bd06213f231e444c888537e393a931b49778a"
     },
+    "patches/txiki/0080-capsid-fair-job-budget.patch": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "2083ec8a92f549c372a9d3c76dc875fdf79d7eba"
+    },
     "patches/web-streams/0001-workerd-byte-profile.patch": {
       "mode": "100644",
       "kind": "blob",
@@ -724,15 +734,55 @@
       "kind": "blob",
       "gitObject": "ee2daf31a72c72dbcfe3c390044bbc32fd355780"
     },
+    "src/binding_handle_table.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "bb4d52744ed1b9371177bdff777423915bf5f867"
+    },
+    "src/binding_handle_table.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "6feef42e1f7bb3db30ce5eba0f85fb14e37f8341"
+    },
     "src/binding_rpc.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b4efefb12fe1819b52d77644c12f930a8445a2cf"
+      "gitObject": "7dd86bd1859a0c3e8b0e3d0cd442c68cec52f472"
     },
     "src/binding_rpc.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "eb14b23469fc29829226aa4be664ad521c55a65e"
+      "gitObject": "66a2a7aba3979f4a16f796b4f3e59e643819bc6d"
+    },
+    "src/binding_rpc_ledger.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "cce7c12e075bad77775ea5dacb4a84838e9dfa90"
+    },
+    "src/binding_rpc_ledger.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "79037c5262a928a140e7035840690b8faee3efb5"
+    },
+    "src/binding_scheduler.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "403966ebfa7765b73252d6498cd29bfaa6d49947"
+    },
+    "src/binding_scheduler.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "41f5cd5265a73fde1164bdd1090f6787a5562bd9"
+    },
+    "src/binding_stream_table.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "49a753dcade89bed203d4493d7cbdfeb628c4f00"
+    },
+    "src/binding_stream_table.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "43927554d31ca02f44cc295e43db018505d36e8c"
     },
     "src/build_info.cc": {
       "mode": "100644",
@@ -1417,7 +1467,7 @@
     "src/worker_runtime.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "7b334d3a1dd51a18ce87e1d81eb8363fb334fa54"
+      "gitObject": "52b33ad4d4d66eabbda2477dc3f61816e85486b5"
     },
     "src/worker_runtime.h": {
       "mode": "100644",
@@ -3192,12 +3242,96 @@
     "protocolSHA256": "d4615f3fbeecf16a0fe4b07363649da0d7882da112d33f7421d3ab6695924507"
   },
   "checkout": {
-    "kind": "docs-successor",
+    "kind": "runtime-feature-successor",
+    "branch": "dev/v0.4.0",
     "baseCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
     "releaseQualificationInherited": false,
-    "changeScope": "post-v0.3.2-beta.1 release publication metadata, streamlined README/perf-site installer cutover, and documentation alignment; runtime/build/vendor inputs match qualified v0.3.2-beta.1 identically",
-    "buildInputChanges": {},
-    "runtimeInputChanges": {},
-    "vendorPatchChanges": {}
+    "changeScope": "Binding RPC v2 (v0.4.0 M4A-M4D): fair shared-loop scheduler, three-tier quota ledger, structured remote errors, { signal, timeoutMs } call options and late-result disposal, bidirectional credit-based ReadableStream/WritableStream proxies, controlled Request/Response proxies, native-branded RpcTarget handles with leases and disposal, plus Binding v2 and WebSocket guides/examples; C ABI v8, FetchRPC v4, and zero-Binding fast path preserved; no new published binary release yet.",
+    "buildInputChanges": {
+      "CMakeLists.txt": {
+        "qualifiedGitObject": "cbe63c098e8256e98ee9135728a6f7df4211b7bc",
+        "currentGitObject": "6309f92ece89d01b818feb863acfdd0f0183dd85"
+      },
+      "cmake/AuditTxikiVendor.cmake": {
+        "qualifiedGitObject": "910b22b1720b769a5f04971fdb1357beddb01eca",
+        "currentGitObject": "5cf06f7311b28c5e712e3a95cd4af5abd0a0dc9b"
+      },
+      "cmake/ComputeTxikiOverlayKey.cmake": {
+        "qualifiedGitObject": "6b167aa78ab7665910d3a0cef69870f44601be70",
+        "currentGitObject": "e648524d910e1c5660a7a8043261a53d5aed5517"
+      },
+      "cmake/build_tests.cmake": {
+        "qualifiedGitObject": "f827b1dc4a4808ad2698b177cbcfdfef472e3761",
+        "currentGitObject": "242f18fd4fe9c1b0d2f4b1ee23479f766d3bb65a"
+      },
+      "cmake/build_worker.cmake": {
+        "qualifiedGitObject": "1c1a330b6e12b1603fe383b8d9d29e16f0e0daae",
+        "currentGitObject": "59b3e2ebb45a672661478d12e6403d5199c742fe"
+      }
+    },
+    "runtimeInputChanges": {
+      "js/binding-rpc-bridge.js": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "dbd00b7e9253ab775ac5f41128ee99a52f4c3bd1"
+      },
+      "js/bootstrap.js": {
+        "qualifiedGitObject": "c1ed420ad10e1be366f3118a2593d7c51368a27d",
+        "currentGitObject": "70b40413bdb3426dad0c5f83fbfb88a9cdcd6c19"
+      },
+      "js/fetch.js": {
+        "qualifiedGitObject": "49d1dc08aeaa594e9e1b1bfd5dcf51d2d32b4bae",
+        "currentGitObject": "988cec58ef90848e6d6abc111c270cf2ab928472"
+      },
+      "src/binding_handle_table.cc": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "bb4d52744ed1b9371177bdff777423915bf5f867"
+      },
+      "src/binding_handle_table.h": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "6feef42e1f7bb3db30ce5eba0f85fb14e37f8341"
+      },
+      "src/binding_rpc.cc": {
+        "qualifiedGitObject": "b4efefb12fe1819b52d77644c12f930a8445a2cf",
+        "currentGitObject": "7dd86bd1859a0c3e8b0e3d0cd442c68cec52f472"
+      },
+      "src/binding_rpc.h": {
+        "qualifiedGitObject": "eb14b23469fc29829226aa4be664ad521c55a65e",
+        "currentGitObject": "66a2a7aba3979f4a16f796b4f3e59e643819bc6d"
+      },
+      "src/binding_rpc_ledger.cc": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "cce7c12e075bad77775ea5dacb4a84838e9dfa90"
+      },
+      "src/binding_rpc_ledger.h": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "79037c5262a928a140e7035840690b8faee3efb5"
+      },
+      "src/binding_scheduler.cc": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "403966ebfa7765b73252d6498cd29bfaa6d49947"
+      },
+      "src/binding_scheduler.h": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "41f5cd5265a73fde1164bdd1090f6787a5562bd9"
+      },
+      "src/binding_stream_table.cc": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "49a753dcade89bed203d4493d7cbdfeb628c4f00"
+      },
+      "src/binding_stream_table.h": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "43927554d31ca02f44cc295e43db018505d36e8c"
+      },
+      "src/worker_runtime.cc": {
+        "qualifiedGitObject": "7b334d3a1dd51a18ce87e1d81eb8363fb334fa54",
+        "currentGitObject": "52b33ad4d4d66eabbda2477dc3f61816e85486b5"
+      }
+    },
+    "vendorPatchChanges": {
+      "patches/txiki/0080-capsid-fair-job-budget.patch": {
+        "qualifiedGitObject": null,
+        "currentGitObject": "2083ec8a92f549c372a9d3c76dc875fdf79d7eba"
+      }
+    }
   }
 }

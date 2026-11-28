@@ -1,0 +1,28 @@
+{
+  "apiVersion": "capsid/app-v2",
+  "entry": "bundle.mjs",
+  "bindings": {
+    "vault": {
+      "config": {
+        "namespace": "showcase-v2"
+      },
+      "secrets": {
+        "signingKey": {
+          "valueFrom": "signing-key"
+        }
+      }
+    },
+    "telemetry": {
+      "config": {
+        "service": "capsid-showcase"
+      }
+    }
+  },
+  "request": {
+    "timeout": "15s",
+    "maxInflight": 32
+  },
+  "pool": {
+    "workers": 1
+  }
+}

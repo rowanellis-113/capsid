@@ -377,7 +377,7 @@ const currentStatus = JSON.parse(
 const profileV2 = JSON.parse(
   await readFile(path.join(root, 'tests/wpt/workerd-default-profile-v2.json'), 'utf8'),
 );
-assert.equal(currentStatus.developmentBranch, 'dev/v0.3.2');
+assert.equal(currentStatus.developmentBranch, 'dev/v0.4.0');
 assert.equal(currentStatus.prerelease.channel, '0.3.2-beta');
 assert.equal(currentStatus.prerelease.tag, 'v0.3.2-beta.1');
 assert.equal(currentStatus.prerelease.draft, false);
@@ -395,7 +395,7 @@ for (const [label, release] of [
 }
 const sdkHeader = await readFile(path.join(root, 'include/capsid/runtime.h'), 'utf8');
 const abiVersion = sdkHeader.match(/^#define CAPSID_ABI_VERSION (\d+)u$/m)[1];
-assert.ok(readme.includes(`v0.3.2 development SDK uses C ABI v${abiVersion}.`));
+assert.ok(readme.includes(`v0.4.0 development SDK uses C ABI v${abiVersion}`));
 const embeddingApi = documents.get('docs/reference/embedding-api.md');
 assert.ok(
   embeddingApi.includes(`The v0.3.2 SDK uses ABI v${abiVersion},`),
@@ -416,17 +416,19 @@ assert.ok(
 );
 assert.equal(currentStatus.runtime.sourceCommit, currentStatus.prerelease.sourceCommit);
 assert.equal(currentStatus.runtime.sourceTree, currentStatus.prerelease.sourceTree);
+assert.equal(currentStatus.runtime.version, '0.4.0');
 assert.equal(currentStatus.runtime.publicAbi, 8);
 assert.equal(currentStatus.runtime.defaultWireVersion, 4);
-assert.equal(currentStatus.checkout.kind, 'docs-successor');
+assert.equal(currentStatus.checkout.kind, 'runtime-feature-successor');
+assert.equal(currentStatus.checkout.branch, 'dev/v0.4.0');
 assert.equal(currentStatus.checkout.baseCommit, currentStatus.prerelease.sourceCommit);
-assert.deepEqual(Object.keys(currentStatus.checkout.buildInputChanges), []);
-assert.equal(Object.keys(currentStatus.checkout.runtimeInputChanges).length, 0);
-assert.equal(Object.keys(currentStatus.checkout.vendorPatchChanges).length, 0);
+assert.equal(Object.keys(currentStatus.checkout.buildInputChanges).length, 5);
+assert.equal(Object.keys(currentStatus.checkout.runtimeInputChanges).length, 14);
+assert.equal(Object.keys(currentStatus.checkout.vendorPatchChanges).length, 1);
 assert.equal(
   currentStatus.checkout.releaseQualificationInherited,
   false,
-  'docs successors do not inherit binary qualification beyond the tagged release',
+  'development successors do not inherit binary qualification beyond the tagged release',
 );
 assert.match(currentStatus.runtime.sourceScope, /qualified 0\.3\.2-beta interface baseline/);
 assert.equal(currentStatus.conformance.referenceProfile, profileV2.id);

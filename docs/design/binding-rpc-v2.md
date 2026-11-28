@@ -3,6 +3,9 @@
 > Target branch: `dev/v0.4.0` (C ABI v8, FetchRPC v4, `capsid/binding-v1`
 > manifest compatible). Builds on [Binding v1](bindings-v1.md) and the
 > FetchRPC v4 stream/lifetime state machines ([FetchRPC v4](../reference/fetchrpc-v4.md)).
+> For hands-on usage and a runnable 14-route example covering every `M4A`–`M4D`
+> capability, see [Use Binding RPC v2](../guides/use-binding-rpc-v2.md) and
+> [examples/binding-rpc-v2](../../examples/binding-rpc-v2/README.md).
 
 ## 1. Goals and Compatibility Boundary
 

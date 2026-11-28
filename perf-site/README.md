@@ -14,7 +14,7 @@ See [current status](../docs/reference/release-status.md) and
 
 | Path | Role |
 | --- | --- |
-| `index.html` | Product landing page and verifiable benchmark hub: Dark/Light themes, Elastic OS Process Pools architecture showcase, `dev/v0.3.2` Config v2 Quick Start timeline, self-contained SVG charts, three-tier reference UX, scenario guide and explicit source/verification labels |
+| `index.html` | Product landing page and verifiable benchmark hub: Dark/Light themes, Elastic OS Process Pools, `dev/v0.4.0` Binding RPC v2 &amp; FetchRPC v4 WebSocket showcases, Config v2 Quick Start timeline, self-contained SVG charts, three-tier reference UX, scenario guide and explicit source/verification labels |
 | `logo.png` | Repository brand artwork staged for OpenGraph / social sharing previews |
 | `data.js` | Collector-generated points: four verified `v3` points, archived verified `v1`, and one unverified historical observation |
 | `status.js` | Generated release/source/measurement context from `tools/refresh-documentation-data.py` |
@@ -38,10 +38,10 @@ python3 tests/test_perf_archive.py
 python3 bench/prepare-perf-site.py --repo . --output /path/to/new-site-output
 ```
 
-To also validate the generated `v0.3.1-beta.1` release/status data, run
-`python3 tools/refresh-documentation-data.py --check` in the clean recorded
-`dev/v0.3.1` checkout at `a7fd47e` (on `dev/v0.3.2`, `CMakeLists.txt` is `0.3.2`
-while the captured `v0.3.1-beta.1` release record pins `0.3.1`).
+To also validate the generated release/status data on `dev/v0.4.0`, run
+`python3 tools/refresh-documentation-data.py --check` in a clean checkout
+(verifying the declared `runtime-feature-successor` inputs against the pinned
+`v0.3.2-beta.1` qualified release record).
 
 The output must be new and outside `perf-site`. Allow at least 16 GiB of scratch:
 replaying `23201` evidence files plus 15 checksum manifests (`23216` files total)
@@ -108,7 +108,7 @@ through a version string, source-tree equality or release CI.
 ## Publishing
 
 `.github/workflows/perf-pages.yml` publishes an Actions artifact, not a
-`gh-pages` branch. Its push filter follows **`dev/v0.3.1`** and **`dev/v0.3.2`** and includes the
+`gh-pages` branch. Its push filter follows **`dev/v0.3.1`**, **`dev/v0.3.2`**, and **`dev/v0.4.0`** and includes the
 site, data, archive/staging and status-generation inputs. It checks generated
 status, restores/revalidates evidence, uploads the staged site and deploys it.
 GitHub Pages must use **GitHub Actions** as its source; environment protection

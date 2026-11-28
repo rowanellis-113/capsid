@@ -147,7 +147,41 @@ Use `pool.workers` for a fixed fleet, or set `pool.minReady` and `pool.maxWorker
 }
 ```
 
-Each requested target must fit the Host's egress ceiling. For `bindings.<id>.permissions.net.allow`, every requested port must also be granted by the installed Binding's manifest. The application can use one comma-separated list for ports granted by separate manifest entries. [Binding packages and permissions](../design/bindings-v1.md)
+Each requested target must fit the Host's egress ceiling. For `bindings.<id>.permissions.net.allow`, every requested port must also be granted by the installed Binding's manifest. The application can use one comma-separated list for ports granted by separate manifest entries. For outbound WebSocket connections, `permissions.fetch.allow` governs the allowed `ws://` / `wss://` host and port targets; see [Use WebSockets](use-websockets.md).
+
+## Trusted Bindings (`bindings.<id>`)
+
+Declare Host-installed `capsid/binding-v1` packages under `bindings`, keyed
+directly by their Binding ID (matching the directory name under `--bindings-dir`
+or `paths.bindings` and the User import `capsid:binding/<id>`):
+
+```json
+{
+  "apiVersion": "capsid/app-v2",
+  "entry": "bundle.mjs",
+  "bindings": {
+    "vault": {
+      "config": { "namespace": "orders" },
+      "secrets": { "signingKey": { "valueFrom": "signing-key" } }
+    }
+  }
+}
+```
+
+- `config` is an opaque JSON object (up to 256 KiB) deeply frozen inside the
+  Binding Runtime;
+- `secrets` accepts only `{"valueFrom":"<secret-key>"}` references resolved from
+  `--secrets-dir` or `paths.secrets`; inline secret literals are rejected;
+- `permissions` (`net`, `fs`, `env`, `stdio`) may only narrow the Binding
+  manifest maximum; omitting a class denies it;
+- on `dev/v0.4.0`, Bindings execute over **Binding RPC v2** with fair
+  scheduling, 3-tier quotas, bidirectional credit-based streams, controlled
+  `Request`/`Response` proxies, and `RpcTarget` remote object handles.
+
+See [Use Binding RPC v2](use-binding-rpc-v2.md),
+[examples/binding-rpc-v2](../../examples/binding-rpc-v2/README.md),
+[Binding packages and permissions](../design/bindings-v1.md), and
+[Binding RPC v2 design](../design/binding-rpc-v2.md).
 
 ## Deployment in three steps
 

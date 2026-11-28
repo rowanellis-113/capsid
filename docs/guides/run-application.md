@@ -70,8 +70,15 @@ Earlier prebuilt releases used the retired `capsid/app-v1` manifest and `--mode 
 
 ## Next Steps
 
-- [Application configuration](configure-application.md): modules, egress, resources and
+- [Application configuration](configure-application.md): modules, egress, bindings, resources and
   entry points.
+- [Use Binding RPC v2 (`v0.4.0`)](use-binding-rpc-v2.md) and the runnable
+  [Binding RPC v2 showcase](../../examples/binding-rpc-v2/README.md): isolated
+  dual-runtime RPC, credit-based stream proxies, `Request`/`Response` proxies,
+  and `RpcTarget` handles.
+- [Use WebSockets (`FetchRPC v4`)](use-websockets.md) and the runnable
+  [WebSocket showcase](../../examples/websocket-showcase/README.md): inbound
+  `WebSocketPair`, `allowHalfOpen`, outbound `ws`/`wss`, and Upgrade fallback.
 - [Host modes and options](../reference/host-configuration.md) for local packages and Linux managed deployment.
 - [Framework guides](../reference/frameworks/README.md): bundling TypeScript or
   npm dependencies (e.g. with `esbuild`) into a self-contained ESM.

@@ -6,7 +6,7 @@ The [machine-readable release record](../data/current-status.json) binds the 202
 
 The published `v0.3.2-beta.1` prerelease (`288955124e23eb88060b8267ea93e3d0e6a4fbbe`, also set as GitHub `Latest`) ships **C ABI v8** and **FetchRPC v4-only** with Build Info v2 and Capability Policy v2. Rebuild embedders against this SDK. It delivers Config v2 (`capsid/host-v2` / `capsid/app-v2`, retiring `host-v1` / `app-v1` and legacy `single-worker` / `static-pool` CLI modes), Elastic OS Process Pools (scale-to-zero, two-stage tenant-fair eviction, and tenant-wide `cgroup v2` `memory.max`), and retains `vendor/quickjs-turbo` (`v0.15.1-turbo.8`, commit `8fcb4751a66986bd42b11de3012e967d77790923`) on top of pinned `vendor/txiki.js` (`v26.6.0`, 79 SDK patches).
 
-The current `dev/v0.3.2` checkout is a `docs-successor` (`releaseQualificationInherited:false`) that records release publication metadata and streamlines `README.md`, `perf-site/index.html`, and documentation on top of `28895512` with **identical** runtime, build, and vendor inputs. Its [design](../design/config-v2.md) and [verification record](../history/v0.3.2/README.md) track implementation and verification.
+The current `dev/v0.4.0` checkout is a `runtime-feature-successor` (`releaseQualificationInherited:false`) built on top of `28895512` (`v0.3.2-beta.1`) that delivers **Binding RPC v2 (`v0.4.0`, `M4A`–`M4D`)** — fair multi-runtime scheduling, three-tier quota ledger, structured remote errors, `{ signal, timeoutMs }` call options and late-result disposal, bidirectional credit-based `ReadableStream`/`WritableStream` proxies, controlled `Request`/`Response` proxies, and native-branded `RpcTarget` remote object handles — while keeping **C ABI v8**, **FetchRPC v4**, `capsid/binding-v1` manifests, and the zero-Binding fast path intact. No `v0.4.0` binary release or new formal benchmark session has been published yet; `v0.3.2-beta.1` remains the latest published prebuilt binary release. See [Use Binding RPC v2](../guides/use-binding-rpc-v2.md), [Binding RPC v2 design](../design/binding-rpc-v2.md), [Config v2 design](../design/config-v2.md), and the [v0.3.2 verification record](../history/v0.3.2/README.md).
 
 Via the upstream `quickjs-turbo::qjs` CMake target (with local LTO isolation),
 non-sanitizer builds auto-enable the zero-JIT native register-frame interpreter
@@ -29,7 +29,7 @@ for the five-platform archive matrix.
 
 | Item | Current recorded value | Boundary |
 | --- | --- | --- |
-| Recorded release-data branch | `dev/v0.3.2` | Post-release docs successor; runtime/build/vendor inputs match `v0.3.2-beta.1` identically |
+| Recorded development branch | `dev/v0.4.0` | Runtime-feature successor (`0.4.0`, Binding RPC v2) on top of `v0.3.2-beta.1`; `releaseQualificationInherited:false` |
 | Experimental prerelease | [v0.3.2-beta.1](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1) | Current `0.3.2-beta` (Config v2, Elastic Pools, C ABI v8, FetchRPC v4-only); also GitHub `Latest` |
 | GitHub Latest (recorded default) | [v0.3.2-beta.1](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1) | Experimental prerelease default download, not the `0.2.x` stable line |
 | Stable `0.2.x` release | [v0.2.2](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2) | Install by tag |
@@ -51,7 +51,7 @@ tenant-fair eviction, and delegated tenant `cgroup v2` `memory.max`), C ABI v8,
 and FetchRPC v4-only WebSocket support (inbound `WebSocketPair`/101, outbound
 `ws`/`wss`, channel/result/terminal confirmation, Upgrade-fetch metadata/body
 fallback and retained incoming connection ownership).
-Bindings remain v1 with independent User/Binding runtimes and operation gates.
+On `dev/v0.4.0`, Bindings advance to **Binding RPC v2** (preserving `capsid/binding-v1` manifests and the zero-Binding single-runtime path) with fair multi-runtime scheduling, three-tier quotas, bidirectional credit-based stream proxies, controlled `Request`/`Response` proxies, and `RpcTarget` remote object handles; published `v0.3.2-beta.1` binaries retain Binding v1.
 The ordinary handler is still `fetch(request)`, not a complete Wrangler,
 Cloudflare platform or `fetch(request, env, ctx)` compatibility layer.
 

@@ -1001,6 +1001,7 @@
     <div class="nav-links">
       <a href="#why-capsid">Why Capsid</a>
       <a href="#elastic-pools">Elastic Pools</a>
+      <a href="#binding-rpc-v2">Binding RPC v2</a>
       <a href="#use-cases">Use Cases</a>
       <a href="#overview">Benchmarks</a>
       <a href="#quickstart">Quick Start</a>
@@ -1029,12 +1030,12 @@
   <!-- ================= 01. Product Hero ================= -->
   <header class="hero">
     <div>
-      <div class="hero-eyebrow"><span class="pulse"></span>v0.3.2-beta.1 &middot; ELASTIC OS PROCESS POOLS &middot; C/C++ ABI v8</div>
+      <div class="hero-eyebrow"><span class="pulse"></span>v0.3.2-beta.1 &middot; BINDING RPC v2 (dev/v0.4.0) &middot; C/C++ ABI v8</div>
       <h1>Run untrusted AI code <span class="grad">in elastic OS process pools.</span></h1>
       <p class="hero-desc" id="hero-desc">
         Dedicated Linux OS sandboxes (<b>Namespaces, Landlock, Seccomp, cgroup v2</b>) powered by
         <b>Zero-JIT</b> <span class="mono">quickjs-turbo</span> — sub-20&nbsp;MiB serving PSS, scale-to-zero elastic
-        pools, and zero external storage dependencies.
+        pools, isolated <b>Binding RPC v2</b> streams &amp; <span class="mono">RpcTarget</span> handles, and full-duplex <b>WebSockets</b>.
       </p>
 
       <div class="hero-cta">
@@ -1066,6 +1067,8 @@
         <div class="stage-dots"><span></span><span></span><span></span></div>
         <div class="stage-tabs">
           <button type="button" class="stage-tab active" id="code-tab-js">worker.mjs</button>
+          <button type="button" class="stage-tab" id="code-tab-binding">binding-v2.mjs</button>
+          <button type="button" class="stage-tab" id="code-tab-ws">websocket.mjs</button>
           <button type="button" class="stage-tab" id="code-tab-cpp">host.cc</button>
         </div>
       </div>
@@ -1079,6 +1082,31 @@
       path: url.pathname,
       sandbox: <span class="tok-s">"namespaces + landlock + seccomp"</span>,
     });
+  },
+};</pre>
+
+      <pre class="stage-code is-hidden" id="code-panel-binding"><span class="tok-c">// Binding RPC v2 (dev/v0.4.0) — isolated Binding heap, streams &amp; RpcTarget</span>
+<span class="tok-k">import</span> vault <span class="tok-k">from</span> <span class="tok-s">"capsid:binding/vault"</span>;
+
+<span class="tok-k">export default</span> {
+  <span class="tok-k">async</span> <span class="tok-f">fetch</span>(req) {
+    <span class="tok-k">const</span> s = <span class="tok-k">await</span> vault.<span class="tok-f">openSession</span>(<span class="tok-s">"orders"</span>, { timeoutMs: <span class="tok-n">2000</span> });
+    <span class="tok-k">try</span> {
+      <span class="tok-k">await</span> s.<span class="tok-f">append</span>(<span class="tok-k">await</span> req.<span class="tok-f">text</span>());
+      <span class="tok-k">return await</span> s.<span class="tok-f">exportResponse</span>(); <span class="tok-c">// credit-backed immutable proxy</span>
+    } <span class="tok-k">finally</span> { s.<span class="tok-f">dispose</span>(); }         <span class="tok-c">// + lease &amp; GC fallback</span>
+  },
+};</pre>
+
+      <pre class="stage-code is-hidden" id="code-panel-ws"><span class="tok-c">// Full-duplex WebSocketPair over FetchRPC v4 byte-credit channels</span>
+<span class="tok-k">export default</span> {
+  <span class="tok-f">fetch</span>(request) {
+    <span class="tok-k">const</span> [client, server] = <span class="tok-t">Object</span>.<span class="tok-f">values</span>(<span class="tok-k">new</span> <span class="tok-t">WebSocketPair</span>());
+    server.<span class="tok-f">accept</span>({ allowHalfOpen: <span class="tok-n">true</span> });
+    server.binaryType = <span class="tok-s">"arraybuffer"</span>;
+    server.<span class="tok-f">addEventListener</span>(<span class="tok-s">"message"</span>, (e) =&gt; server.<span class="tok-f">send</span>(e.data));
+    server.<span class="tok-f">addEventListener</span>(<span class="tok-s">"close"</span>, () =&gt; server.<span class="tok-f">close</span>(<span class="tok-n">1000</span>, <span class="tok-s">"bye"</span>));
+    <span class="tok-k">return new</span> <span class="tok-t">Response</span>(<span class="tok-k">null</span>, { status: <span class="tok-n">101</span>, webSocket: client });
   },
 };</pre>
 
@@ -1164,7 +1192,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
   <section id="elastic-pools">
     <div class="eyebrow">Elastic OS Process Pools</div>
     <h2>Serverless elasticity with real OS-process memory reclamation</h2>
-    <p class="lede">Scale-to-zero Linux worker processes (<span class="mono">dev/v0.3.2</span>) — sub-10&nbsp;ms C ABI cold starts, tenant-fair LRU, and 100% kernel page reclamation on exit.</p>
+    <p class="lede">Scale-to-zero Linux worker processes (<span class="mono">v0.3.2-beta.1</span>) — sub-10&nbsp;ms C ABI cold starts, tenant-fair LRU, and 100% kernel page reclamation on exit.</p>
 
     <div class="card featured">
       <div class="card-head">
@@ -1172,7 +1200,7 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <h3>Elastic worker lifecycle — 0&nbsp;B idle to kernel-reclaimed exit</h3>
           <div class="sub">Cold queueing, active-stream exemption, and async reaping off the spawn critical path</div>
         </div>
-        <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md#section-6" target="_blank" rel="noopener">Spec &rarr;</a>
+        <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/design/config-v2.md#section-6" target="_blank" rel="noopener">Spec &rarr;</a>
       </div>
       <div class="elastic-flow">
         <div class="ef-step">
@@ -1227,6 +1255,78 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
     </div>
   </section>
 
+  <!-- ================= 02c. Binding RPC v2 & WebSockets (dev/v0.4.0) ================= -->
+  <section id="binding-rpc-v2">
+    <div class="eyebrow">Binding RPC v2 (dev/v0.4.0) &middot; FetchRPC v4 WebSockets</div>
+    <h2>Isolated capabilities, credit streams, and remote object handles</h2>
+    <p class="lede">Host-trusted <span class="mono">capsid/binding-v1</span> packages run in isolated QuickJS heaps inside the worker with <b>zero cost when unused</b> — adding streams, HTTP proxies, and <span class="mono">RpcTarget</span> handles on <span class="mono">dev/v0.4.0</span> alongside full-duplex WebSockets.</p>
+
+    <div class="card featured">
+      <div class="card-head">
+        <div>
+          <h3>Dual-runtime capability bridge — User JS never sees native handles or secrets</h3>
+          <div class="sub">M4A–M4D Binding RPC v2 on C ABI v8 + inbound/outbound WebSockets over FetchRPC v4</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-binding-rpc-v2.md" target="_blank" rel="noopener">Binding v2 Guide &rarr;</a>
+          <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/examples/binding-rpc-v2/README.md" target="_blank" rel="noopener">14-Route Example &rarr;</a>
+          <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/examples/websocket-showcase/README.md" target="_blank" rel="noopener">WebSocket Example &rarr;</a>
+        </div>
+      </div>
+
+      <div class="elastic-flow">
+        <div class="ef-step">
+          <div class="ef-k">M4A &middot; Scheduling &amp; Quotas</div>
+          <div class="ef-t">Fair Loop + 3-Tier Cap</div>
+          <div class="ef-s">Round-robin slices, typed errors, <span class="mono">{ signal, timeoutMs }</span>, and late-result disposal.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step is-hl">
+          <div class="ef-k">M4B &middot; Credit Streams</div>
+          <div class="ef-t">Readable &amp; Writable</div>
+          <div class="ef-s">Bidirectional <span class="mono">64 KiB</span> credit window, backpressure, cancel/abort reasons, request fencing.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step">
+          <div class="ef-k">M4C &middot; HTTP Proxies</div>
+          <div class="ef-t">Request &amp; Response</div>
+          <div class="ef-s">Inline &le;64&nbsp;KiB fast path, streaming bodies, immutable headers, <span class="mono">Request.signal</span>, rollback.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step is-hl">
+          <div class="ef-k">M4D &middot; Remote Objects</div>
+          <div class="ef-t">RpcTarget Stubs</div>
+          <div class="ef-s">Frozen null-proto stubs, nested handles, <span class="mono">leaseMs</span>, <span class="mono">Symbol.dispose</span>, GC fallback.</div>
+        </div>
+        <div class="ef-arr">&rarr;</div>
+        <div class="ef-step">
+          <div class="ef-k">FetchRPC v4 &middot; Duplex</div>
+          <div class="ef-t">Inbound &amp; Outbound WS</div>
+          <div class="ef-s"><span class="mono">WebSocketPair</span> (<span class="mono">allowHalfOpen</span>), egress-gated <span class="mono">ws</span>/<span class="mono">wss</span>, gzip Upgrade fallback.</div>
+        </div>
+      </div>
+
+      <div class="elastic-facts">
+        <div class="ef-fact">
+          <strong>Zero-Binding Invariance</strong>
+          <span>Workers declaring zero Bindings allocate no Binding heap, scheduler, or extra sandbox profile — keeping the single-runtime fast path intact.</span>
+        </div>
+        <div class="ef-fact">
+          <strong>Secrets &amp; Ownership Fencing</strong>
+          <span><span class="mono">valueFrom</span> secrets stay inside the Binding Runtime (redacted in logs); cross-request stream/handle access fails closed with <span class="mono">InvalidStateError</span>.</span>
+        </div>
+        <div class="ef-fact">
+          <strong>Bounded Three-Tier Quotas</strong>
+          <span>Per-request, per-Binding, and per-worker ledgers cap calls (64/1024), streams (16/64/256), handles (32/128/512), and queued bytes (4/8/16&nbsp;MiB).</span>
+        </div>
+        <div class="ef-fact">
+          <strong>Full-Duplex WebSockets</strong>
+          <span>Host-owned RFC&nbsp;6455 framing &amp; Ping/Pong, <span class="mono">blob</span>/<span class="mono">arraybuffer</span> modes, subprotocols, and <span class="mono">permissions.fetch.allow</span> egress checks.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= 03. Built For (Use Cases) ================= -->
   <section id="use-cases">
     <div class="eyebrow">Use Cases</div>
@@ -1251,9 +1351,9 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <span class="usecase-pill">High Density</span>
         </div>
         <h3>Customer Plugins &amp; Webhooks</h3>
-        <p>Run custom tenant hooks without per-tenant containers — fair eviction and delegated <span class="mono">cgroup v2</span> contain OOMs.</p>
+        <p>Run custom tenant hooks without per-tenant containers — fair eviction, delegated <span class="mono">cgroup v2</span>, and isolated <b>Binding RPC v2</b> (<span class="mono">RpcTarget</span> + credit streams) keep secrets out of tenant JS.</p>
         <div class="usecase-chips">
-          <span id="uc-dens-2g">705 workers / 2 GiB</span><span>Tenant cgroup v2</span><span>Binding RPC</span>
+          <span id="uc-dens-2g">705 workers / 2 GiB</span><span>Binding RPC v2</span><span>RpcTarget &amp; Streams</span>
         </div>
       </div>
 
@@ -1486,8 +1586,8 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
           <div class="qs-badge"><span class="qs-idx">01</span>Install</div>
           <h3>Install prebuilt v0.3.2-beta.1</h3>
           <p>Downloads &amp; SHA-256 verifies <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>, bytecode compiler, and ABI v8 SDK.
-             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/install-packages.md" target="_blank" rel="noopener">All 5 packages</a> &middot;
-             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">Build from source</a>.</p>
+             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/install-packages.md" target="_blank" rel="noopener">All 5 packages</a> &middot;
+             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/build-from-source.md" target="_blank" rel="noopener">Build dev/v0.4.0 from source</a>.</p>
           <div class="qs-meta"><span>v0.3.2-beta.1 &middot; ABI v8</span><span>SHA-256 verified</span></div>
         </div>
         <div class="qs-term">
@@ -1589,14 +1689,15 @@ export default {
       <div class="qs-row is-optional">
         <div class="qs-info">
           <div class="qs-badge"><span class="qs-idx">04</span>Production</div>
-          <h3>Elastic pools, npm &amp; bytecode</h3>
-          <p>Add <span class="mono">pool.minReady: 0</span> for scale-to-zero, bundle npm apps with <span class="mono">esbuild</span>, or precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode (<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host config</a>).</p>
-          <div class="qs-meta"><span>Scale-to-zero</span><span>8.9 / 21.4 ms C ABI</span><span>Signed attestation</span></div>
+          <h3>Elastic pools, Binding v2, npm &amp; bytecode</h3>
+          <p>Add <span class="mono">pool.minReady: 0</span> for scale-to-zero, attach isolated <b>Binding RPC v2</b> packages (<span class="mono">dev/v0.4.0</span>), bundle npm apps with <span class="mono">esbuild</span>, or precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode (<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host config</a>).</p>
+          <div class="qs-meta"><span>Scale-to-zero</span><span>Binding RPC v2</span><span>Signed attestation</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
             <div class="qs-term-tabs">
               <button type="button" class="qs-term-tab active" id="qs-tab-elastic">Elastic pool (app-v2)</button>
+              <button type="button" class="qs-term-tab" id="qs-tab-binding">Binding v2 CLI</button>
               <button type="button" class="qs-term-tab" id="qs-tab-bc">capsid-bytecode-compile</button>
               <button type="button" class="qs-term-tab" id="qs-tab-esbuild">esbuild (npm / TS)</button>
             </div>
@@ -1614,6 +1715,14 @@ export default {
     "queueTimeout": "5s"
   }
 }</pre>
+          <pre class="qs-code is-hidden" id="step-code-binding"><span class="tok-c"># Run the 14-route Binding RPC v2 showcase (dev/v0.4.0)</span>
+capsid-host \
+  --app-dir ./examples/binding-rpc-v2/app \
+  --bindings-dir ./examples/binding-rpc-v2/bindings \
+  --secrets-dir ./examples/binding-rpc-v2/secrets \
+  --listen 127.0.0.1:8080 --ready-fd 1
+
+python3 ./examples/binding-rpc-v2/verify.py --url http://127.0.0.1:8080</pre>
           <pre class="qs-code is-hidden" id="step-code-bc-unix">capsid-bytecode-compile \
   --source ./bundle.mjs \
   --source-name "file://$PWD/bundle.mjs" \
@@ -1636,10 +1745,12 @@ capsid-bytecode-compile.exe `
     </div>
 
     <div class="quick-links">
-      <a class="btn-primary" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/run-application.md" target="_blank" rel="noopener">Getting Started &rarr;</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/design/config-v2.md" target="_blank" rel="noopener">Config v2 &amp; Pools</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/embedding-api.md" target="_blank" rel="noopener">C/C++ SDK (ABI v8)</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/linux-sandbox.md" target="_blank" rel="noopener">Linux Sandbox</a>
+      <a class="btn-primary" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/run-application.md" target="_blank" rel="noopener">Getting Started &rarr;</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-binding-rpc-v2.md" target="_blank" rel="noopener">Binding RPC v2</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-websockets.md" target="_blank" rel="noopener">WebSockets</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/design/config-v2.md" target="_blank" rel="noopener">Config v2 &amp; Pools</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/reference/embedding-api.md" target="_blank" rel="noopener">C/C++ SDK (ABI v8)</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/reference/linux-sandbox.md" target="_blank" rel="noopener">Linux Sandbox</a>
       <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/releases" target="_blank" rel="noopener">Releases</a>
     </div>
   </section>
@@ -1673,10 +1784,10 @@ capsid-bytecode-compile.exe `
     </div>
     <div class="foot-links">
       <a href="https://github.com/rowanellis-113/capsid" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/README.md" target="_blank" rel="noopener">Docs</a>
-      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/SECURITY.md" target="_blank" rel="noopener">Security</a>
+      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/README.md" target="_blank" rel="noopener">Docs</a>
+      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/SECURITY.md" target="_blank" rel="noopener">Security</a>
       <a href="https://github.com/rowanellis-113/capsid/releases" target="_blank" rel="noopener">Releases</a>
-      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/LICENSE" target="_blank" rel="noopener">Apache-2.0</a>
+      <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/LICENSE" target="_blank" rel="noopener">Apache-2.0</a>
     </div>
   </footer>
 </div>
@@ -1905,18 +2016,24 @@ function initInteractiveChrome() {
   var tBtn = $("theme-toggle");
   if (tBtn) tBtn.onclick = function () { applyTheme(THEME === "dark" ? "light" : "dark", true); };
 
-  var jsTab = $("code-tab-js"), cppTab = $("code-tab-cpp");
-  var jsPanel = $("code-panel-js"), cppPanel = $("code-panel-cpp");
-  if (jsTab && cppTab && jsPanel && cppPanel) {
-    jsTab.onclick = function () {
-      jsTab.className = "stage-tab active"; cppTab.className = "stage-tab";
-      jsPanel.className = "stage-code"; cppPanel.className = "stage-code is-hidden";
+  var stageTabs = [
+    ["code-tab-js", "code-panel-js"],
+    ["code-tab-binding", "code-panel-binding"],
+    ["code-tab-ws", "code-panel-ws"],
+    ["code-tab-cpp", "code-panel-cpp"]
+  ];
+  stageTabs.forEach(function (pair) {
+    var btn = $(pair[0]);
+    if (!btn) return;
+    btn.onclick = function () {
+      stageTabs.forEach(function (other) {
+        var ob = $(other[0]), op = $(other[1]);
+        var active = other[0] === pair[0];
+        if (ob) ob.className = "stage-tab" + (active ? " active" : "");
+        if (op) op.className = "stage-code" + (active ? "" : " is-hidden");
+      });
     };
-    cppTab.onclick = function () {
-      cppTab.className = "stage-tab active"; jsTab.className = "stage-tab";
-      cppPanel.className = "stage-code"; jsPanel.className = "stage-code is-hidden";
-    };
-  }
+  });
 
   function wireCopy(btnId, textId, baseCls, label) {
     var btn = $(btnId), src = $(textId);
@@ -1952,7 +2069,7 @@ function initInteractiveChrome() {
     },
     manual: {
       prompt: "$",
-      cmd: "git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git && cd capsid && npm ci --ignore-scripts --prefix vendor/txiki.js && cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF && cmake --build build-release --parallel"
+      cmd: "git clone --branch dev/v0.4.0 --recurse-submodules https://github.com/rowanellis-113/capsid.git && cd capsid && npm ci --ignore-scripts --prefix vendor/txiki.js && cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF && cmake --build build-release --parallel"
     }
   };
   function syncHeroInstall() {
@@ -1991,12 +2108,14 @@ function initInteractiveChrome() {
     if ($("qs-t3-label")) $("qs-t3-label").textContent = isWin ? "Terminal 1 · PowerShell (Start Host)" : "Terminal 1 · Start Host";
     if ($("qs-t4-label")) $("qs-t4-label").textContent = isWin ? "Terminal 2 · PowerShell (curl.exe)" : "Terminal 2 · Send Request";
 
-    var elTab = $("qs-tab-elastic"), bcTab = $("qs-tab-bc"), esTab = $("qs-tab-esbuild");
-    var elCode = $("step-code-elastic"), bcU = $("step-code-bc-unix"), bcW = $("step-code-bc-win"), esEl = $("step-code-esbuild");
+    var elTab = $("qs-tab-elastic"), bindTab = $("qs-tab-binding"), bcTab = $("qs-tab-bc"), esTab = $("qs-tab-esbuild");
+    var elCode = $("step-code-elastic"), bindCode = $("step-code-binding"), bcU = $("step-code-bc-unix"), bcW = $("step-code-bc-win"), esEl = $("step-code-esbuild");
     if (elTab) elTab.className = "qs-term-tab" + (QS_EXTRA_TAB === "elastic" ? " active" : "");
+    if (bindTab) bindTab.className = "qs-term-tab" + (QS_EXTRA_TAB === "binding" ? " active" : "");
     if (bcTab) bcTab.className = "qs-term-tab" + (QS_EXTRA_TAB === "bc" ? " active" : "");
     if (esTab) esTab.className = "qs-term-tab" + (QS_EXTRA_TAB === "esbuild" ? " active" : "");
     if (elCode) elCode.className = "qs-code" + (QS_EXTRA_TAB === "elastic" ? "" : " is-hidden");
+    if (bindCode) bindCode.className = "qs-code" + (QS_EXTRA_TAB === "binding" ? "" : " is-hidden");
     if (bcU) bcU.className = "qs-code" + (QS_EXTRA_TAB === "bc" && !isWin ? "" : " is-hidden");
     if (bcW) bcW.className = "qs-code" + (QS_EXTRA_TAB === "bc" && isWin ? "" : " is-hidden");
     if (esEl) esEl.className = "qs-code" + (QS_EXTRA_TAB === "esbuild" ? "" : " is-hidden");
@@ -2004,6 +2123,7 @@ function initInteractiveChrome() {
   if ($("qs-os-unix")) $("qs-os-unix").onclick = function () { QS_OS = "unix"; HERO_INST_MODE = "unix"; syncHeroInstall(); syncQuickStartUi(); };
   if ($("qs-os-win")) $("qs-os-win").onclick = function () { QS_OS = "win"; HERO_INST_MODE = "win"; syncHeroInstall(); syncQuickStartUi(); };
   if ($("qs-tab-elastic")) $("qs-tab-elastic").onclick = function () { QS_EXTRA_TAB = "elastic"; syncQuickStartUi(); };
+  if ($("qs-tab-binding")) $("qs-tab-binding").onclick = function () { QS_EXTRA_TAB = "binding"; syncQuickStartUi(); };
   if ($("qs-tab-bc")) $("qs-tab-bc").onclick = function () { QS_EXTRA_TAB = "bc"; syncQuickStartUi(); };
   if ($("qs-tab-esbuild")) $("qs-tab-esbuild").onclick = function () { QS_EXTRA_TAB = "esbuild"; syncQuickStartUi(); };
   syncHeroInstall();
@@ -2036,6 +2156,7 @@ function initInteractiveChrome() {
   wireDynamicCopy("copy-step-curl", function () { return QS_OS === "win" ? "step-code-curl-win" : "step-code-curl-unix"; });
   wireDynamicCopy("copy-step-bc", function () {
     if (QS_EXTRA_TAB === "elastic") return "step-code-elastic";
+    if (QS_EXTRA_TAB === "binding") return "step-code-binding";
     if (QS_EXTRA_TAB === "esbuild") return "step-code-esbuild";
     return QS_OS === "win" ? "step-code-bc-win" : "step-code-bc-unix";
   });
@@ -2081,15 +2202,20 @@ function renderReleaseContext() {
     return;
   }
   var s = STATUS;
+  var devBranch = s.developmentBranch || "dev/v0.4.0";
+  var devVersion = (s.runtime && s.runtime.version) || "";
   $("release-context").innerHTML = "<b>Release status:</b> stable " +
     '<a href="' + esc(s.stable.url) + '">' + esc(s.stable.tag) + "</a>; experimental prerelease " +
-    '<a href="' + esc(s.prerelease.url) + '">' + esc(s.prerelease.tag) + "</a>." +
+    '<a href="' + esc(s.prerelease.url) + '">' + esc(s.prerelease.tag) + "</a>" +
+    (devVersion && devVersion !== s.prerelease.runtimeVersion
+      ? "; active branch <span class=\"mono\">" + esc(devBranch) + "</span> (v" + esc(devVersion) + ", unpublished)."
+      : ".") +
     " Latest accepted local measurement: <b>" + esc(s.performance.displayLabel) + "</b>, " + esc(s.performance.date) + "." +
     (s.performance.publishedBetaPerformanceMeasured ? "" : s.performance.matchesPublishedBetaSource ?
       " <b>The prerelease source was rebuilt locally; the distributed binaries were not measured.</b>" :
       " <b>The measured local rebuild does not measure distributed release binaries.</b>") +
     " The archival v0.3.0 label is not a stable-release claim. " +
-    '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/reference/release-status.md">Sources and limits</a>' +
+    '<a href="https://github.com/rowanellis-113/capsid/blob/' + esc(devBranch) + '/docs/reference/release-status.md">Sources and limits</a>' +
     " · status captured " + esc(s.asOfUTC.slice(0, 10)) + ".";
 }
 function renderRecordSelector() {
@@ -3808,7 +3934,7 @@ function renderMethod() {
       ' archived files rehashed before staging. Binary identities are recorded in each lane manifest.</div>' +
       (packed ? '<p class="footnote">Complete compressed transport; restore into a new scratch root, then replay the ordinary validators. ' +
         '<a href="evidence-index.json">Full original file/digest index</a> · <a href="archive-index.json">Transport/part index</a> · ' +
-        '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/perf-site/README.md">Replay instructions</a></p>' : "") +
+        '<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/perf-site/README.md">Replay instructions</a></p>' : "") +
       '<details style="margin-top:12px"><summary>Archive downloads and SHA-256</summary>' +
       '<ul class="archive-list">' + links + "</ul></details>" :
       '<div class="footnote" style="margin-top:20px">Historical observation: the current provenance and ' +

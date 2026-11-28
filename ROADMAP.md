@@ -1,10 +1,10 @@
 # Capsid Roadmap: Progressive workerd Compatibility
 
-> Updated 2026-11-27 against published `0.3.1-beta` (`v0.3.1-beta.1`, `quickjs-turbo`
-> integration) and the `dev/v0.3.2` candidate (Config v2, Elastic OS Process Pools,
-> C ABI v8). Stable is `v0.2.2`; this roadmap separates delivered scope from future
-> milestones and does not claim complete workerd/Cloudflare parity. See
-> [current status](docs/reference/release-status.md).
+> Updated 2026-11-28 against published `0.3.2-beta` (`v0.3.2-beta.1`, Config v2,
+> Elastic OS Process Pools, C ABI v8) and the `dev/v0.4.0` branch (Binding RPC
+> v2 `M4A`–`M4D`). Stable is `v0.2.2`; this roadmap separates delivered scope
+> from future milestones and does not claim complete workerd/Cloudflare parity.
+> See [current status](docs/reference/release-status.md).
 
 ## Purpose
 
@@ -298,28 +298,39 @@ governance, and the ABI v8 / FetchRPC v4 baseline:
 
 ### v0.4.0: Binding RPC v2
 
-Build Binding v2 on the lifetime and stream state-machine lessons proven by
-the WebSocket vertical slice. Binding v2 adds:
+Design spec: [docs/design/binding-rpc-v2.md](docs/design/binding-rpc-v2.md) ·
+developer guide: [docs/guides/use-binding-rpc-v2.md](docs/guides/use-binding-rpc-v2.md) ·
+runnable showcase: [examples/binding-rpc-v2/README.md](examples/binding-rpc-v2/README.md).
 
-- bidirectional credit-based Stream proxies;
-- controlled Request, Response, ReadableStream, and WritableStream proxies;
-- remote object and method stubs with leases and explicit disposal;
-- deadline, AbortSignal, cancellation, late-result disposal, and structured
-  remote errors;
-- per-request, per-Binding, and per-worker limits for handles, streams, queued
-  frames, and bytes;
-- fair scheduling across User and Binding runtimes;
+Implemented on `dev/v0.4.0` (C ABI v8, FetchRPC v4, `capsid/binding-v1`
+compatible). Built on the lifetime and stream state-machine lessons proven by
+the WebSocket vertical slice, Binding RPC v2 delivers:
+
+- bidirectional credit-based `ReadableStream` and `WritableStream` proxies
+  (`64 KiB` window/chunk slicing, `2 MiB` staging ceiling, cancel/abort/error
+  propagation, cross-request ownership fencing);
+- controlled `Request` and `Response` proxies (inline `<= 64 KiB` fast path,
+  credit-backed streaming bodies, immutable headers, multi-value `Set-Cookie`,
+  `Request.signal` propagation, atomic rollback);
+- native-branded `RpcTarget` remote object and method stubs with nested handles,
+  request-bounded leases, explicit `.dispose()` / `[Symbol.dispose]()` /
+  `[Symbol.asyncDispose]()`, fault-isolated bounded disposal, and asynchronous
+  QuickJS GC-finalizer fallback;
+- `{ signal, timeoutMs }` call options (deadline tightening only), cancellation,
+  recursive cycle-safe late-result disposal, and structured remote errors
+  (`DOMException`, `QuotaExceededError`, `TypeError`, `RangeError`,
+  `SyntaxError`, `URIError`, `Error`);
+- three-tier quota ledger (per-request, per-Binding, and per-worker) across
+  inflight calls, active streams, active handles, queued frames, and queued
+  bytes;
+- fair immediate shared-loop scheduling across User and Binding runtimes with
+  per-turn call/frame/job budgets and reentrancy guarding;
 - deterministic cleanup during request end, Binding failure, worker shutdown,
   and worker poisoning.
 
-Real Socket, file, Cache backend, and other native handles remain in the
-trusted Binding Runtime. The User Runtime receives proxies only. Existing
-Binding v1 packages and the zero-Binding fast path remain supported.
-
-Acceptance: stream backpressure, cancellation, remote-object disposal, GC
-fallback, deadline races, quota exhaustion, cross-request handle misuse,
-malicious providers, and zero-Binding performance all have positive and
-negative tests.
+Real Socket, file, SQLite, WASI, and future Cache handles remain strictly inside
+the trusted Binding Runtime. The User Runtime receives proxies only. Existing
+`capsid/binding-v1` packages and the zero-Binding fast path remain intact.
 
 ### v0.5.0: Module Worker Runtime Model
 

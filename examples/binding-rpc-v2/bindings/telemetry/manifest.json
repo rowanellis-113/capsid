@@ -1,0 +1,10 @@
+{
+  "apiVersion": "capsid/binding-v1",
+  "permissions": {
+    "modules": ["capsid:utils"],
+    "net": { "allow": [] },
+    "fs": { "read": [], "write": [] },
+    "env": [],
+    "stdio": []
+  }
+}
