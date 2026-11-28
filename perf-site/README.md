@@ -14,7 +14,7 @@ See [current status](../docs/reference/release-status.md) and
 
 | Path | Role |
 | --- | --- |
-| `index.html` | Product landing page and verifiable benchmark hub: Dark/Light themes, Elastic OS Process Pools, `dev/v0.4.0` Binding RPC v2 &amp; FetchRPC v4 WebSocket showcases, Config v2 Quick Start timeline, self-contained SVG charts, three-tier reference UX, scenario guide and explicit source/verification labels |
+| `index.html` | Product landing page and verifiable benchmark hub: Dark/Light themes, Elastic OS Process Pools &amp; Dual-Runtime Trusted Bindings (`dev/v0.4.0` Binding RPC v2) architecture showcases, Config v2 Quick Start timeline, self-contained SVG charts, three-tier reference UX, scenario guide and explicit source/verification labels |
 | `logo.png` | Repository brand artwork staged for OpenGraph / social sharing previews |
 | `data.js` | Collector-generated points: four verified `v3` points, archived verified `v1`, and one unverified historical observation |
 | `status.js` | Generated release/source/measurement context from `tools/refresh-documentation-data.py` |

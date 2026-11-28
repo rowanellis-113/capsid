@@ -19,7 +19,7 @@ Run untrusted AI-generated code, customer plugins, and webhooks in **dedicated L
 - **`705` warm OS workers in 2 GiB** (`10 KiB` app, 99.4% warm retention; `501` @ `100 KiB`, `135` @ `1 MiB`)
 - **`8.89 ms` C ABI cold start** to first response (`10 KiB` trusted bytecode, `8.2 MiB` PSS; `9.29 ms` source)
 - **`Zero-JIT` (`quickjs-turbo`)** — no RWX pages, fenced by Linux `namespaces` + `Landlock` + `seccomp` + `cgroup v2`
-- **Binding RPC v2 (`dev/v0.4.0`) &amp; WebSockets (`FetchRPC v4`)** — isolated Binding heaps with bidirectional credit streams, `Request`/`Response` proxies, and `RpcTarget` handles, plus inbound `WebSocketPair` and egress-gated outbound `ws`/`wss`
+- **Dual-Runtime Trusted Bindings (`dev/v0.4.0`)** — run Host-trusted capability packages (DBs, SQLite, vaults, APIs) in isolated per-Binding QuickJS heaps with credit streams, HTTP proxies, and `RpcTarget` handles; zero overhead when unused
 
 **[Explore interactive Multi-Axis &amp; Frontier charts &rarr;](https://rowanellis-113.github.io/capsid/)**
 
@@ -29,10 +29,10 @@ Run untrusted AI-generated code, customer plugins, and webhooks in **dedicated L
 
 Running untrusted tenant or AI-generated JavaScript usually forces a trade-off: **V8 isolates** share one JIT process address space and balloon in memory under concurrent load, while **containers and microVMs** pay `100 ms – 1 s+` cold starts and tens to hundreds of MiB per tenant.
 
-1. **Hard OS Isolation, Zero JIT** — Every worker runs in its own Linux process (`namespaces` + `Landlock` + `seccomp` + delegated `cgroup v2`), with deny-by-default egress, zero RWX JIT pages, and host-owned credentials kept out of untrusted JS via isolated Binding Runtimes ([Binding RPC v2 guide](docs/guides/use-binding-rpc-v2.md)).
+1. **Hard OS Isolation, Zero JIT** — Every worker runs in its own Linux process (`namespaces` + `Landlock` + `seccomp` + delegated `cgroup v2`), with deny-by-default egress, zero RWX JIT pages, and zero ambient credentials or filesystem access.
 2. **Elastic OS Process Pools (`v0.3.2-beta.1`)** — Idle apps scale to zero (`0` processes, `0 B` worker RAM) while bounded cold queues absorb bursts. Two-stage tenant-fair eviction (`85% / 75%` hysteresis) reclaims over-share bursty replicas before touching quiet tenants and keeps active HTTP, SSE, and WebSocket streams exempt from idle eviction. Capacity slots hand off immediately while evicted worker processes exit asynchronously so Linux reclaims **100% of private physical pages**; rolling deployments drain live traffic up to `drain_deadline` under a shared delegated tenant `cgroup v2` `memory.max`.
-3. **Binding RPC v2 (`dev/v0.4.0`) &amp; Full-Duplex WebSockets (`FetchRPC v4`)** — Extend untrusted workers with Host-trusted `capsid/binding-v1` packages running in dedicated QuickJS heaps: fair multi-runtime scheduling, 3-tier quotas, typed remote errors, `{ signal, timeoutMs }` call options, bidirectional credit-based `ReadableStream`/`WritableStream` proxies, controlled `Request`/`Response` proxies, and native-branded `RpcTarget` handles with leases and explicit/GC disposal — with **zero overhead** when no Binding is attached. Serve real-time traffic via inbound `WebSocketPair` (`allowHalfOpen`, binary/text, subprotocols) and egress-gated outbound `ws`/`wss` ([WebSocket guide](docs/guides/use-websockets.md)).
-4. **Zero External Dependencies, Standalone or Embedded** — Standard Web `fetch(Request)` handlers with no S3 coordinator or cloud state layer required. Run standalone via `capsid-host` for **AI Agent Code Mode**, **SaaS webhooks/plugins**, and **private on-prem functions**, or embed `libcapsid_runtime` directly into a C/C++ gateway.
+3. **Dual-Runtime Trusted Bindings (`dev/v0.4.0`)** — Give untrusted code safe access to databases, SQLite, secrets, or internal APIs without leaking credentials or adding external sidecars. Host-installed `capsid/binding-v1` packages run in separate per-Binding QuickJS heaps inside the same OS-sandboxed worker; untrusted JS receives only asynchronous proxies (credit-backed Web Streams, controlled `Request`/`Response`, and `RpcTarget` handles) while real sockets, files, and `valueFrom` secrets remain strictly inside the Binding Runtime — with **zero cost** when no Binding is declared.
+4. **Web-Native &amp; Embeddable, Zero External Dependencies** — Standard `fetch(Request)` and full-duplex WebSockets ([FetchRPC v4](docs/reference/fetchrpc-v4.md), inbound `WebSocketPair` + egress-gated outbound `ws`/`wss`) with no S3 coordinator or cloud state layer required. Run standalone via `capsid-host` for **AI Agent Code Mode**, **SaaS webhooks/plugins**, and **private on-prem functions**, or embed `libcapsid_runtime` directly into a C/C++ gateway.
 
 | | V8 Isolates (`workerd`) | **Capsid** |
 | :--- | :--- | :--- |
@@ -127,34 +127,50 @@ curl -sS http://127.0.0.1:8080/ -H 'Content-Type: application/json' -d '{"type":
 # {"queue":"on-call"}
 ```
 
-Add `"pool":{"minReady":0,"maxWorkers":8,"idleTimeout":"60s"}` in Linux managed mode for scale-to-zero elastic pools. **Hono**, **itty-router**, **H3**, and **Elysia** all run on Capsid ([framework matrix](docs/reference/frameworks/README.md)).
+Add `"pool":{"minReady":0,"maxWorkers":8,"idleTimeout":"60s"}` in Linux managed mode for scale-to-zero elastic pools. **Hono**, **itty-router**, **H3**, and **Elysia** all run on Capsid ([framework matrix](docs/reference/frameworks/README.md)), alongside full-duplex inbound `WebSocketPair` and egress-gated outbound `ws`/`wss` ([WebSocket guide](docs/guides/use-websockets.md) &middot; [semantics](docs/reference/websocket-semantics.md)).
 
-### Binding RPC v2 (`dev/v0.4.0`) &amp; WebSocket Examples
+---
 
-Keep secrets, streams, and stateful capabilities inside a trusted Binding Runtime while untrusted application JS receives only frozen proxies and `RpcTarget` stubs:
+## Trusted Bindings (Dual-Runtime Capability Isolation)
+
+Giving untrusted AI or tenant JavaScript access to databases, secrets, or internal services usually forces a bad choice: hand credentials/network egress directly to untrusted code, or push every call across an external sidecar over the network.
+
+Capsid solves this **inside the same OS-sandboxed worker** with **Trusted Bindings** (`capsid/binding-v1` packages powered by **Binding RPC v2** on `dev/v0.4.0`):
+
+- **Separate QuickJS heap per Binding, zero cost when unused:** Untrusted app JS runs in the **User Runtime**; each declared Host-trusted Binding runs in its own isolated **Binding Runtime** with separate heap, globals, module cache, and native origin tag. Workers with zero Bindings allocate no Binding heap, scheduler, or extra sandbox profile.
+- **Process union &ne; User authority:** The Host approves each Binding's maximum modules and versioned Linux sandbox profiles (`network-client`, `filesystem-read/write`, `sqlite`, `wasi`); the App can only narrow resources and pass `valueFrom` secret references (automatically redacted from authenticated logs). Unforgeable native origin tags ensure a Binding's DB socket or write path is never reachable from User JS.
+- **Web-native proxies only — real handles never cross:** User code interacts over a fair, 3-tier quota-bounded asynchronous bridge supporting `{ signal, timeoutMs }` cancellation, typed remote errors, bidirectional credit-based `ReadableStream`/`WritableStream` proxies, controlled `Request`/`Response` proxies (inline `<= 64 KiB` fast path + streaming bodies, immutable headers, `Request.signal`), and native-branded **`RpcTarget` remote object handles** (stateful sessions/cursors with bounded leases, explicit `.dispose()` / `Symbol.dispose`, GC-finalizer fallback, and strict cross-request ownership fencing).
 
 ```js
-import vault from "capsid:binding/vault";
+// Host-trusted Binding (bindings/orders/index.js) — holds secrets & native authority
+class OrderSession extends RpcTarget {
+  constructor(db, tenant) { super({ leaseMs: 5000 }); this.db = db; this.tenant = tenant; }
+  async query(filter, call) { return this.db.streamRows(this.tenant, filter, { signal: call.signal }); }
+  [Symbol.dispose]() { this.db.release(this.tenant); }
+}
+export default ({ config, secrets }) => ({
+  open(tenant) { return new OrderSession(connect(config, secrets.dbPassword), tenant); },
+});
+```
+
+```js
+// Untrusted Application (app/bundle.mjs) — zero secrets, zero ambient sockets
+import orders from "capsid:binding/orders";
 
 export default {
   async fetch(request) {
-    const session = await vault.openSession("orders", { timeoutMs: 2000 });
+    const session = await orders.open("acme", { timeoutMs: 2000 });
     try {
-      await session.append(await request.text());
-      return await session.exportResponse(); // immutable proxy Response (inline or streaming)
+      const rows = await session.query(await request.json()); // credit-backed ReadableStream proxy
+      return new Response(rows, { headers: { "content-type": "application/x-ndjson" } });
     } finally {
-      session.dispose(); // deterministic cleanup (plus lease & GC-finalizer fallback)
+      session.dispose(); // deterministic cleanup (+ lease, request-end & GC fallback)
     }
   },
 };
 ```
 
-Run the exhaustive zero-dependency showcases directly with `capsid-host`:
-
-- **Binding RPC v2 (14 routes — `M4A`–`M4D`):** [`examples/binding-rpc-v2/`](examples/binding-rpc-v2/README.md) · [Developer guide](docs/guides/use-binding-rpc-v2.md) · [Technical design](docs/design/binding-rpc-v2.md)
-  - Fair multi-Binding scheduling &amp; microtask-storm preemption, 3-tier quota ledger, structured remote errors, `{ signal, timeoutMs }` + late-result disposal, bidirectional credit-based `ReadableStream`/`WritableStream` proxies, inline &amp; streaming `Request`/`Response` proxies, and `RpcTarget` handles (nested cursors, leases, `.dispose()`/`[Symbol.dispose]()`/`[Symbol.asyncDispose]()`, cross-request fencing).
-- **WebSockets (8 routes — `FetchRPC v4`):** [`examples/websocket-showcase/`](examples/websocket-showcase/README.md) · [Developer guide](docs/guides/use-websockets.md) · [Semantics reference](docs/reference/websocket-semantics.md)
-  - Inbound `WebSocketPair` + `101` Upgrade (text &amp; 32 KiB binary, `blob` vs `arraybuffer`, Ping/Pong, custom close codes), `Sec-WebSocket-Protocol`, `allowHalfOpen` final drain, delayed `accept()`, egress-gated outbound `ws`/`wss`, and gzip HTTP Upgrade fallback.
+[Binding RPC v2 guide](docs/guides/use-binding-rpc-v2.md) &middot; [RPC v2 design](docs/design/binding-rpc-v2.md) &middot; [Binding v1 model](docs/design/bindings-v1.md) &middot; [Binding permissions](docs/reference/binding-permissions.md) &middot; [Runnable showcase](examples/binding-rpc-v2/README.md)
 
 ### Install
 

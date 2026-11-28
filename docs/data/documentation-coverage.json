@@ -24,7 +24,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "afe448e04fdaf3a97890af3ebe8f31be91ac7634fd3584c0bd7107c718bfeb47",
+      "sha256": "21af09ab725e33e33006027c06042fc0d5d78c37b0b575fb2e7db533b5526028",
       "review": "Product overview with process isolation, scoped cold-start, density and throughput measurements, Binding RPC v2 (dev/v0.4.0) and WebSocket showcases, architecture diagram, runnable examples, C/C++ ABI v8 SDK embedding and release-specific entry points."
     },
     {
@@ -900,7 +900,7 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "92dabbe0a4eb672ffb2823d9a0705d6c7ad1f8619c79abc89d14b23d9661f35a",
+      "sha256": "79599c840e8a217755dcf10d7c3470e59cac914436d920113cd3c9415f203bac",
       "review": "Generated files, verified archive replay, current prerelease versus measured source boundaries and deployment requirements."
     },
     {

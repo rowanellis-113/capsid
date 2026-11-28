@@ -1001,7 +1001,7 @@
     <div class="nav-links">
       <a href="#why-capsid">Why Capsid</a>
       <a href="#elastic-pools">Elastic Pools</a>
-      <a href="#binding-rpc-v2">Binding RPC v2</a>
+      <a href="#trusted-bindings">Trusted Bindings</a>
       <a href="#use-cases">Use Cases</a>
       <a href="#overview">Benchmarks</a>
       <a href="#quickstart">Quick Start</a>
@@ -1030,12 +1030,12 @@
   <!-- ================= 01. Product Hero ================= -->
   <header class="hero">
     <div>
-      <div class="hero-eyebrow"><span class="pulse"></span>v0.3.2-beta.1 &middot; BINDING RPC v2 (dev/v0.4.0) &middot; C/C++ ABI v8</div>
+      <div class="hero-eyebrow"><span class="pulse"></span>v0.3.2-beta.1 &middot; ELASTIC POOLS &amp; TRUSTED BINDINGS &middot; C/C++ ABI v8</div>
       <h1>Run untrusted AI code <span class="grad">in elastic OS process pools.</span></h1>
       <p class="hero-desc" id="hero-desc">
         Dedicated Linux OS sandboxes (<b>Namespaces, Landlock, Seccomp, cgroup v2</b>) powered by
         <b>Zero-JIT</b> <span class="mono">quickjs-turbo</span> — sub-20&nbsp;MiB serving PSS, scale-to-zero elastic
-        pools, isolated <b>Binding RPC v2</b> streams &amp; <span class="mono">RpcTarget</span> handles, and full-duplex <b>WebSockets</b>.
+        pools, and <b>Dual-Runtime Trusted Bindings</b> (<span class="mono">dev/v0.4.0</span>) that keep secrets and sockets out of untrusted JS.
       </p>
 
       <div class="hero-cta">
@@ -1067,7 +1067,7 @@
         <div class="stage-dots"><span></span><span></span><span></span></div>
         <div class="stage-tabs">
           <button type="button" class="stage-tab active" id="code-tab-js">worker.mjs</button>
-          <button type="button" class="stage-tab" id="code-tab-binding">binding-v2.mjs</button>
+          <button type="button" class="stage-tab" id="code-tab-binding">binding.mjs</button>
           <button type="button" class="stage-tab" id="code-tab-ws">websocket.mjs</button>
           <button type="button" class="stage-tab" id="code-tab-cpp">host.cc</button>
         </div>
@@ -1085,16 +1085,16 @@
   },
 };</pre>
 
-      <pre class="stage-code is-hidden" id="code-panel-binding"><span class="tok-c">// Binding RPC v2 (dev/v0.4.0) — isolated Binding heap, streams &amp; RpcTarget</span>
-<span class="tok-k">import</span> vault <span class="tok-k">from</span> <span class="tok-s">"capsid:binding/vault"</span>;
+      <pre class="stage-code is-hidden" id="code-panel-binding"><span class="tok-c">// Dual-Runtime Trusted Binding — secrets &amp; sockets stay in isolated Binding heap</span>
+<span class="tok-k">import</span> orders <span class="tok-k">from</span> <span class="tok-s">"capsid:binding/orders"</span>;
 
 <span class="tok-k">export default</span> {
   <span class="tok-k">async</span> <span class="tok-f">fetch</span>(req) {
-    <span class="tok-k">const</span> s = <span class="tok-k">await</span> vault.<span class="tok-f">openSession</span>(<span class="tok-s">"orders"</span>, { timeoutMs: <span class="tok-n">2000</span> });
+    <span class="tok-k">const</span> s = <span class="tok-k">await</span> orders.<span class="tok-f">open</span>(<span class="tok-s">"acme"</span>, { timeoutMs: <span class="tok-n">2000</span> });
     <span class="tok-k">try</span> {
-      <span class="tok-k">await</span> s.<span class="tok-f">append</span>(<span class="tok-k">await</span> req.<span class="tok-f">text</span>());
-      <span class="tok-k">return await</span> s.<span class="tok-f">exportResponse</span>(); <span class="tok-c">// credit-backed immutable proxy</span>
-    } <span class="tok-k">finally</span> { s.<span class="tok-f">dispose</span>(); }         <span class="tok-c">// + lease &amp; GC fallback</span>
+      <span class="tok-k">const</span> rows = <span class="tok-k">await</span> s.<span class="tok-f">query</span>(<span class="tok-k">await</span> req.<span class="tok-f">json</span>()); <span class="tok-c">// credit-backed stream proxy</span>
+      <span class="tok-k">return new</span> <span class="tok-t">Response</span>(rows);
+    } <span class="tok-k">finally</span> { s.<span class="tok-f">dispose</span>(); } <span class="tok-c">// RpcTarget stub (+ lease &amp; GC fallback)</span>
   },
 };</pre>
 
@@ -1255,73 +1255,69 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
     </div>
   </section>
 
-  <!-- ================= 02c. Binding RPC v2 & WebSockets (dev/v0.4.0) ================= -->
-  <section id="binding-rpc-v2">
-    <div class="eyebrow">Binding RPC v2 (dev/v0.4.0) &middot; FetchRPC v4 WebSockets</div>
-    <h2>Isolated capabilities, credit streams, and remote object handles</h2>
-    <p class="lede">Host-trusted <span class="mono">capsid/binding-v1</span> packages run in isolated QuickJS heaps inside the worker with <b>zero cost when unused</b> — adding streams, HTTP proxies, and <span class="mono">RpcTarget</span> handles on <span class="mono">dev/v0.4.0</span> alongside full-duplex WebSockets.</p>
+  <!-- ================= 02c. Trusted Bindings (Dual-Runtime Capability Isolation) ================= -->
+  <section id="trusted-bindings">
+    <div class="eyebrow">Trusted Bindings &middot; Dual-Runtime Isolation</div>
+    <h2>Give untrusted code real capabilities without leaking secrets or sockets</h2>
+    <p class="lede">Host-authored <span class="mono">capsid/binding-v1</span> packages (databases, SQLite, secret vaults, internal APIs) execute in <b>isolated QuickJS heaps</b> inside the same OS-sandboxed worker — zero shared JS memory, zero cost when unused, and Web-native RPC proxies (<span class="mono">dev/v0.4.0</span>).</p>
 
     <div class="card featured">
       <div class="card-head">
         <div>
-          <h3>Dual-runtime capability bridge — User JS never sees native handles or secrets</h3>
-          <div class="sub">M4A–M4D Binding RPC v2 on C ABI v8 + inbound/outbound WebSockets over FetchRPC v4</div>
+          <h3>Dual-runtime capability architecture — real handles stay trusted, apps get proxies</h3>
+          <div class="sub">Host manifest ceilings, per-runtime native origin gates, credit-backed Web Streams, HTTP proxies, and RpcTarget stubs</div>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-binding-rpc-v2.md" target="_blank" rel="noopener">Binding v2 Guide &rarr;</a>
-          <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/examples/binding-rpc-v2/README.md" target="_blank" rel="noopener">14-Route Example &rarr;</a>
-          <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/examples/websocket-showcase/README.md" target="_blank" rel="noopener">WebSocket Example &rarr;</a>
-        </div>
+        <a class="btn-ghost" style="padding:6px 12px;font-size:12px" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-binding-rpc-v2.md" target="_blank" rel="noopener">Architecture &amp; Guide &rarr;</a>
       </div>
 
       <div class="elastic-flow">
         <div class="ef-step">
-          <div class="ef-k">M4A &middot; Scheduling &amp; Quotas</div>
-          <div class="ef-t">Fair Loop + 3-Tier Cap</div>
-          <div class="ef-s">Round-robin slices, typed errors, <span class="mono">{ signal, timeoutMs }</span>, and late-result disposal.</div>
+          <div class="ef-k">01 &middot; Host Registry</div>
+          <div class="ef-t">capsid/binding-v1</div>
+          <div class="ef-s">Host installs trusted package &amp; max profiles; App can only narrow targets and <span class="mono">valueFrom</span> secrets.</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step is-hl">
-          <div class="ef-k">M4B &middot; Credit Streams</div>
-          <div class="ef-t">Readable &amp; Writable</div>
-          <div class="ef-s">Bidirectional <span class="mono">64 KiB</span> credit window, backpressure, cancel/abort reasons, request fencing.</div>
+          <div class="ef-k">02 &middot; Isolated Heap</div>
+          <div class="ef-t">Per-Binding Runtime</div>
+          <div class="ef-s">Dedicated QuickJS heap, globals &amp; native origin tag; <b>0&nbsp;B overhead</b> when no Binding is declared.</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step">
-          <div class="ef-k">M4C &middot; HTTP Proxies</div>
-          <div class="ef-t">Request &amp; Response</div>
-          <div class="ef-s">Inline &le;64&nbsp;KiB fast path, streaming bodies, immutable headers, <span class="mono">Request.signal</span>, rollback.</div>
+          <div class="ef-k">03 &middot; Fair Bridge</div>
+          <div class="ef-t">Scheduled RPC</div>
+          <div class="ef-s">Round-robin slices, 3-tier quotas, <span class="mono">{ signal, timeoutMs }</span>, typed errors &amp; late disposal.</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step is-hl">
-          <div class="ef-k">M4D &middot; Remote Objects</div>
-          <div class="ef-t">RpcTarget Stubs</div>
-          <div class="ef-s">Frozen null-proto stubs, nested handles, <span class="mono">leaseMs</span>, <span class="mono">Symbol.dispose</span>, GC fallback.</div>
+          <div class="ef-k">04 &middot; Web Proxies</div>
+          <div class="ef-t">Streams &amp; HTTP</div>
+          <div class="ef-s">Bidirectional <span class="mono">64 KiB</span> credit-backed Web Streams plus inline &amp; streaming <span class="mono">Request</span>/<span class="mono">Response</span>.</div>
         </div>
         <div class="ef-arr">&rarr;</div>
         <div class="ef-step">
-          <div class="ef-k">FetchRPC v4 &middot; Duplex</div>
-          <div class="ef-t">Inbound &amp; Outbound WS</div>
-          <div class="ef-s"><span class="mono">WebSocketPair</span> (<span class="mono">allowHalfOpen</span>), egress-gated <span class="mono">ws</span>/<span class="mono">wss</span>, gzip Upgrade fallback.</div>
+          <div class="ef-k">05 &middot; Stateful Stubs</div>
+          <div class="ef-t">RpcTarget Handles</div>
+          <div class="ef-s">Frozen null-proto stubs for sessions &amp; cursors with <span class="mono">leaseMs</span>, <span class="mono">Symbol.dispose</span> &amp; request fencing.</div>
         </div>
       </div>
 
       <div class="elastic-facts">
         <div class="ef-fact">
-          <strong>Zero-Binding Invariance</strong>
-          <span>Workers declaring zero Bindings allocate no Binding heap, scheduler, or extra sandbox profile — keeping the single-runtime fast path intact.</span>
+          <strong>Process Union &ne; User Authority</strong>
+          <span>Enabling <span class="mono">network-client</span> or <span class="mono">sqlite</span> for a Binding never grants that socket or path to User JS — unforgeable native origin tags enforce separate policies per runtime.</span>
         </div>
         <div class="ef-fact">
-          <strong>Secrets &amp; Ownership Fencing</strong>
-          <span><span class="mono">valueFrom</span> secrets stay inside the Binding Runtime (redacted in logs); cross-request stream/handle access fails closed with <span class="mono">InvalidStateError</span>.</span>
+          <strong>Credentials Never Touch User JS</strong>
+          <span><span class="mono">valueFrom</span> secrets live exclusively in deeply frozen Binding memory and are auto-redacted from authenticated Binding logs; apps see only declared async methods.</span>
         </div>
         <div class="ef-fact">
-          <strong>Bounded Three-Tier Quotas</strong>
-          <span>Per-request, per-Binding, and per-worker ledgers cap calls (64/1024), streams (16/64/256), handles (32/128/512), and queued bytes (4/8/16&nbsp;MiB).</span>
+          <strong>Proxies Only, Deterministic Cleanup</strong>
+          <span>Real sockets, files, and DB handles stay in the Binding Runtime; cross-request proxy misuse fails closed with <span class="mono">InvalidStateError</span> and request end auto-disposes stubs.</span>
         </div>
         <div class="ef-fact">
-          <strong>Full-Duplex WebSockets</strong>
-          <span>Host-owned RFC&nbsp;6455 framing &amp; Ping/Pong, <span class="mono">blob</span>/<span class="mono">arraybuffer</span> modes, subprotocols, and <span class="mono">permissions.fetch.allow</span> egress checks.</span>
+          <strong>Zero-Binding Fast Path</strong>
+          <span>Workers declaring zero Bindings allocate no Binding runtime, scheduler, or extra Linux sandbox profile — preserving the single-runtime footprint and latency baseline.</span>
         </div>
       </div>
     </div>
@@ -1689,15 +1685,15 @@ export default {
       <div class="qs-row is-optional">
         <div class="qs-info">
           <div class="qs-badge"><span class="qs-idx">04</span>Production</div>
-          <h3>Elastic pools, Binding v2, npm &amp; bytecode</h3>
-          <p>Add <span class="mono">pool.minReady: 0</span> for scale-to-zero, attach isolated <b>Binding RPC v2</b> packages (<span class="mono">dev/v0.4.0</span>), bundle npm apps with <span class="mono">esbuild</span>, or precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode (<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host config</a>).</p>
-          <div class="qs-meta"><span>Scale-to-zero</span><span>Binding RPC v2</span><span>Signed attestation</span></div>
+          <h3>Elastic pools, Trusted Bindings, npm &amp; bytecode</h3>
+          <p>Add <span class="mono">pool.minReady: 0</span> for scale-to-zero, attach isolated <b>Trusted Bindings</b> with narrowed permissions &amp; <span class="mono">valueFrom</span> secrets, bundle npm apps with <span class="mono">esbuild</span>, or precompile trusted <span id="qs-engine-name">quickjs-turbo</span> bytecode (<a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/reference/host-configuration.md" target="_blank" rel="noopener">Host config</a>).</p>
+          <div class="qs-meta"><span>Scale-to-zero</span><span>Dual-runtime Bindings</span><span>Signed attestation</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
             <div class="qs-term-tabs">
               <button type="button" class="qs-term-tab active" id="qs-tab-elastic">Elastic pool (app-v2)</button>
-              <button type="button" class="qs-term-tab" id="qs-tab-binding">Binding v2 CLI</button>
+              <button type="button" class="qs-term-tab" id="qs-tab-binding">Trusted Binding (app-v2)</button>
               <button type="button" class="qs-term-tab" id="qs-tab-bc">capsid-bytecode-compile</button>
               <button type="button" class="qs-term-tab" id="qs-tab-esbuild">esbuild (npm / TS)</button>
             </div>
@@ -1715,14 +1711,17 @@ export default {
     "queueTimeout": "5s"
   }
 }</pre>
-          <pre class="qs-code is-hidden" id="step-code-binding"><span class="tok-c"># Run the 14-route Binding RPC v2 showcase (dev/v0.4.0)</span>
-capsid-host \
-  --app-dir ./examples/binding-rpc-v2/app \
-  --bindings-dir ./examples/binding-rpc-v2/bindings \
-  --secrets-dir ./examples/binding-rpc-v2/secrets \
-  --listen 127.0.0.1:8080 --ready-fd 1
-
-python3 ./examples/binding-rpc-v2/verify.py --url http://127.0.0.1:8080</pre>
+          <pre class="qs-code is-hidden" id="step-code-binding">{
+  "apiVersion": "capsid/app-v2",
+  "entry": "bundle.mjs",
+  "bindings": {
+    "orders": {
+      "permissions": { "net": { "allow": ["db.internal:5432"] } },
+      "config": { "database": "orders", "tls": true },
+      "secrets": { "dbPassword": { "valueFrom": "orders-db-pass" } }
+    }
+  }
+}</pre>
           <pre class="qs-code is-hidden" id="step-code-bc-unix">capsid-bytecode-compile \
   --source ./bundle.mjs \
   --source-name "file://$PWD/bundle.mjs" \
@@ -1746,7 +1745,7 @@ capsid-bytecode-compile.exe `
 
     <div class="quick-links">
       <a class="btn-primary" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/run-application.md" target="_blank" rel="noopener">Getting Started &rarr;</a>
-      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-binding-rpc-v2.md" target="_blank" rel="noopener">Binding RPC v2</a>
+      <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-binding-rpc-v2.md" target="_blank" rel="noopener">Trusted Bindings</a>
       <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/guides/use-websockets.md" target="_blank" rel="noopener">WebSockets</a>
       <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/design/config-v2.md" target="_blank" rel="noopener">Config v2 &amp; Pools</a>
       <a class="btn-ghost" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.4.0/docs/reference/embedding-api.md" target="_blank" rel="noopener">C/C++ SDK (ABI v8)</a>
