@@ -14,12 +14,12 @@ assert.deepEqual(
     .trim()
     .split(/\r?\n/)
     .map((line) => line.trim()),
-  ['- dev/v0.3.1', '- dev/v0.3.2'],
+  ['- dev/v0.3.1', '- dev/v0.3.2', '- dev/v0.4.0'],
   'validity push trigger follows the retained development branch',
 );
 assert.match(
   pagesWorkflow,
-  /^    branches: \[dev\/v0\.3\.1, dev\/v0\.3\.2\]\r?$/m,
+  /^    branches: \[dev\/v0\.3\.1, dev\/v0\.3\.2, dev\/v0\.4\.0\]\r?$/m,
   'Pages push trigger follows the retained development branch',
 );
 assert.match(
