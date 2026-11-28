@@ -2322,9 +2322,23 @@ bool BindingHttpConsumeBatch::prepare(JSValueConst prepare_fn, std::string* erro
         JS_FreeValue(ctx, prepared_plan);
         prepared_plan = JS_UNDEFINED;
     }
+    if (!JS_IsUndefined(prepared_tx)) {
+        JS_FreeValue(ctx, prepared_tx);
+        prepared_tx = JS_UNDEFINED;
+    }
+    if (committed_atom != JS_ATOM_NULL) {
+        JS_FreeAtom(ctx, committed_atom);
+        committed_atom = JS_ATOM_NULL;
+    }
+    JSAtom atom = JS_NewAtom(ctx, "committed");
+    if (atom == JS_ATOM_NULL) {
+        clear_pending_exception(ctx);
+        return fail_closed(error, "failed to allocate HTTP body commit atom");
+    }
     JSValue arr = JS_NewArray(ctx);
     if (JS_IsException(arr)) {
         clear_pending_exception(ctx);
+        JS_FreeAtom(ctx, atom);
         return fail_closed(error, "failed to allocate HTTP body commit batch");
     }
     for (std::size_t i = 0; i < targets.size(); ++i) {
@@ -2332,6 +2346,7 @@ bool BindingHttpConsumeBatch::prepare(JSValueConst prepare_fn, std::string* erro
                                          JS_DupValue(ctx, targets[i]), JS_PROP_C_W_E) < 0) {
             clear_pending_exception(ctx);
             JS_FreeValue(ctx, arr);
+            JS_FreeAtom(ctx, atom);
             return fail_closed(error, "failed to populate HTTP body commit batch");
         }
     }
@@ -2343,9 +2358,48 @@ bool BindingHttpConsumeBatch::prepare(JSValueConst prepare_fn, std::string* erro
         } else {
             JS_FreeValue(ctx, plan);
         }
+        JS_FreeAtom(ctx, atom);
         return fail_closed(error, "failed to prepare HTTP body consumption");
     }
+    JSValue tx = JS_GetPropertyStr(ctx, plan, "tx");
+    if (JS_IsException(tx) || !JS_IsObject(tx) || JS_IsProxy(tx)) {
+        if (JS_IsException(tx)) {
+            clear_pending_exception(ctx);
+        } else {
+            JS_FreeValue(ctx, tx);
+        }
+        JS_FreeValue(ctx, plan);
+        JS_FreeAtom(ctx, atom);
+        return fail_closed(error, "HTTP body consumption prepare plan missing commit token");
+    }
+    JSPropertyDescriptor desc;
+    const int present = JS_GetOwnProperty(ctx, &desc, tx, atom);
+    if (present <= 0) {
+        if (present < 0) {
+            clear_pending_exception(ctx);
+        }
+        JS_FreeValue(ctx, tx);
+        JS_FreeValue(ctx, plan);
+        JS_FreeAtom(ctx, atom);
+        return fail_closed(error, "HTTP body consumption commit token missing committed property");
+    }
+    const bool valid_token = (desc.flags & JS_PROP_GETSET) == 0 &&
+                             (desc.flags & JS_PROP_WRITABLE) != 0 && JS_IsUndefined(desc.getter) &&
+                             JS_IsUndefined(desc.setter) && JS_IsBool(desc.value) &&
+                             !JS_ToBool(ctx, desc.value);
+    JS_FreeValue(ctx, desc.getter);
+    JS_FreeValue(ctx, desc.setter);
+    JS_FreeValue(ctx, desc.value);
+    if (!valid_token) {
+        JS_FreeValue(ctx, tx);
+        JS_FreeValue(ctx, plan);
+        JS_FreeAtom(ctx, atom);
+        return fail_closed(error,
+                           "HTTP body consumption commit token must have writable false flag");
+    }
     prepared_plan = plan;
+    prepared_tx = tx;
+    committed_atom = atom;
     return true;
 }
 
@@ -2354,18 +2408,31 @@ bool BindingHttpConsumeBatch::commit(JSValueConst apply_fn, std::string* error) 
         reset();
         return true;
     }
-    if (ctx == NULL || !JS_IsFunction(ctx, apply_fn) || !JS_IsObject(prepared_plan)) {
+    if (ctx == NULL || !JS_IsFunction(ctx, apply_fn) || !JS_IsObject(prepared_plan) ||
+        !JS_IsObject(prepared_tx) || committed_atom == JS_ATOM_NULL) {
         reset();
         return fail_closed(error, "HTTP body consumption commit state is missing");
     }
+    // Single-store atomic publication: writes JS_TRUE directly into the
+    // validated own writable data slot `tx.committed` without executing JS
+    // bytecode, polling interrupts, or allocating heap memory.
+    const int published = JS_SetProperty(ctx, prepared_tx, committed_atom, JS_TRUE);
+    if (published <= 0) {
+        clear_pending_exception(ctx);
+        reset();
+        return fail_closed(error, "failed to publish HTTP body consumption");
+    }
+    // Best-effort eager flush of public mirrors & slot links. Even if a
+    // QuickJS interrupt stops this loop partway through, `tx.committed === true`
+    // is already published so every target in the batch materializes the
+    // committed consumed state atomically on demand.
     JSValue arg = prepared_plan;
     JSValue ret = JS_Call(ctx, apply_fn, JS_UNDEFINED, 1, &arg);
     if (JS_IsException(ret)) {
         clear_pending_exception(ctx);
-        reset();
-        return fail_closed(error, "failed to commit HTTP body consumption");
+    } else {
+        JS_FreeValue(ctx, ret);
     }
-    JS_FreeValue(ctx, ret);
     reset();
     return true;
 }
@@ -2376,12 +2443,22 @@ void BindingHttpConsumeBatch::reset() {
             JS_FreeValue(ctx, prepared_plan);
             prepared_plan = JS_UNDEFINED;
         }
+        if (!JS_IsUndefined(prepared_tx)) {
+            JS_FreeValue(ctx, prepared_tx);
+            prepared_tx = JS_UNDEFINED;
+        }
+        if (committed_atom != JS_ATOM_NULL) {
+            JS_FreeAtom(ctx, committed_atom);
+            committed_atom = JS_ATOM_NULL;
+        }
         for (std::size_t i = 0; i < targets.size(); ++i) {
             JS_FreeValue(ctx, targets[i]);
         }
     }
     targets.clear();
     prepared_plan = JS_UNDEFINED;
+    prepared_tx = JS_UNDEFINED;
+    committed_atom = JS_ATOM_NULL;
     ctx = NULL;
 }
 

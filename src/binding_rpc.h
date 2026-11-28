@@ -283,16 +283,23 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
 // Two-phase atomic HTTP inline-body consumption transaction shared by
 // User->Binding input commit and Binding->User result commit (U2):
 //   1. `prepare()` runs `prepare_fn(targets_array)` in `ctx` so every fallible
-//      allocation (terminal consumed streams and own-property writability
-//      masks) finishes BEFORE any source Request/Response is mutated.
-//   2. `commit()` invokes `apply_fn(plan)` once to perform allocation-free
-//      state replacement across the entire batch; any JS call failure is
-//      reported back to the caller rather than swallowed.
-//   3. `reset()` frees all held JSValues without touching any source object.
+//      allocation (shared commit token `plan.tx = { committed: false }`,
+//      terminal consumed streams, and own-property writability masks) finishes
+//      and links each private slot to `plan.tx` BEFORE any observable state
+//      changes. Any failure or QuickJS deadline interrupt during Phase 1 leaves
+//      `tx.committed === false` (0-of-N consumed).
+//   2. `commit()` publishes `plan.tx.committed = true` in a single uninterruptible
+//      C++ property store (`JS_SetProperty` on the validated own writable data
+//      slot — zero JS bytecode, zero interrupt checks, zero allocations), so
+//      every object in the batch transitions atomically from 0-of-N to N-of-N,
+//      then runs `apply_fn(plan)` as a best-effort eager mirror/slot flush.
+//   3. `reset()` frees all held JSValues/atoms without publishing `prepared_tx`.
 struct BindingHttpConsumeBatch {
     JSContext* ctx = nullptr;
     std::vector<JSValue> targets;
     JSValue prepared_plan = JS_UNDEFINED;
+    JSValue prepared_tx = JS_UNDEFINED;
+    JSAtom committed_atom = JS_ATOM_NULL;
 
     BindingHttpConsumeBatch() = default;
     BindingHttpConsumeBatch(const BindingHttpConsumeBatch&) = delete;

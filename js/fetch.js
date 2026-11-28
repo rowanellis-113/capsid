@@ -187,38 +187,53 @@ let responsePrivateSlots = null;
 let bindingRequestBrandCount = 0;
 let bindingResponseBrandCount = 0;
 // Lazy per-instance override map used ONLY when a frozen/non-writable Request
-// or Response updates its body stream (e.g. clone() tee) or consumed state on
-// a zero-Binding worker; stays null on all normal non-frozen traffic.
-let frozenBodyOverrides = null;
+// or Response materializes a body stream, consumed state, headers, or signal on
+// a zero-Binding worker; stays null until such a frozen wrapper is mutated.
+let frozenWrapperOverrides = null;
 
-function getFrozenBodyOverride(target) {
-  if (frozenBodyOverrides === null || !isObjectValue(target)) {
+function getFrozenWrapperOverride(target) {
+  if (frozenWrapperOverrides === null || !isObjectValue(target)) {
     return undefined;
   }
-  return weakMapGet.call(frozenBodyOverrides, target);
+  return weakMapGet.call(frozenWrapperOverrides, target);
 }
 
-function getOrCreateFrozenBodyOverride(target) {
-  if (frozenBodyOverrides === null) {
-    frozenBodyOverrides = new WeakMap();
+function getOrCreateFrozenWrapperOverride(target) {
+  if (frozenWrapperOverrides === null) {
+    frozenWrapperOverrides = new WeakMap();
   }
-  let entry = weakMapGet.call(frozenBodyOverrides, target);
+  let entry = weakMapGet.call(frozenWrapperOverrides, target);
   if (entry === undefined) {
     entry = {
       hasStream: false,
       bodyStream: null,
       bodyConsumed: false,
+      hasHeaders: false,
+      headers: null,
+      hasSignal: false,
+      signal: null,
     };
-    weakMapSet.call(frozenBodyOverrides, target, entry);
+    weakMapSet.call(frozenWrapperOverrides, target, entry);
   }
   return entry;
+}
+
+function getEffectiveFastKind(target, slot) {
+  if (slot !== undefined) {
+    return slot.bodyFastKind;
+  }
+  const override = getFrozenWrapperOverride(target);
+  if (override !== undefined && override.hasStream) {
+    return 0;
+  }
+  return target._bodyFastKind;
 }
 
 function getEffectiveBodyStream(target, slot) {
   if (slot !== undefined) {
     return slot.bodyStream;
   }
-  const override = getFrozenBodyOverride(target);
+  const override = getFrozenWrapperOverride(target);
   if (override !== undefined && override.hasStream) {
     return override.bodyStream;
   }
@@ -232,7 +247,7 @@ function isEffectiveBodyConsumed(target, slot) {
   if (target._bodyConsumed) {
     return true;
   }
-  const override = getFrozenBodyOverride(target);
+  const override = getFrozenWrapperOverride(target);
   return override !== undefined && override.bodyConsumed;
 }
 
@@ -253,6 +268,35 @@ export function getBindingHttpTrackingStats() {
   };
 }
 
+function syncSlotIfCommitted(slot, target) {
+  const tx = slot.pendingCommit;
+  if (tx !== null && tx.committed === true) {
+    const consumedStream = slot.pendingConsumedStream;
+    const mask = slot.pendingWritableMask;
+    slot.pendingCommit = null;
+    slot.pendingConsumedStream = null;
+    slot.pendingWritableMask = 0;
+    slot.bodyConsumed = true;
+    if (consumedStream !== null) {
+      slot.noBody = false;
+      slot.bodyFastKind = 0;
+      slot.bodyFastData = null;
+      slot.bodyStream = consumedStream;
+      if (target !== undefined) {
+        if (mask & 1) target._bodyExposed = true;
+        if (mask & 2) target._noBody = false;
+        if (mask & 4) target._bodySize = 0;
+        if (mask & 8) target._bodyFastKind = 0;
+        if (mask & 16) target._bodyFastData = null;
+        if (mask & 32) target._bodyStream = consumedStream;
+      }
+    }
+    if (target !== undefined && mask & 64) {
+      target._bodyConsumed = true;
+    }
+  }
+}
+
 function syncPrivateBodySlot(target, noBody, bodyStream, bodyFastKind, bodyFastData) {
   if (!bindingHttpTrackingEnabled) {
     return;
@@ -260,6 +304,9 @@ function syncPrivateBodySlot(target, noBody, bodyStream, bodyFastKind, bodyFastD
   const slot =
     weakMapGet.call(requestPrivateSlots, target) ?? weakMapGet.call(responsePrivateSlots, target);
   if (slot !== undefined) {
+    slot.pendingCommit = null;
+    slot.pendingConsumedStream = null;
+    slot.pendingWritableMask = 0;
     slot.noBody = noBody;
     slot.bodyStream = bodyStream;
     slot.bodyFastKind = bodyFastKind;
@@ -274,6 +321,12 @@ function syncPrivateBodyConsumed(target, consumed) {
   const slot =
     weakMapGet.call(requestPrivateSlots, target) ?? weakMapGet.call(responsePrivateSlots, target);
   if (slot !== undefined) {
+    syncSlotIfCommitted(slot, target);
+    if (!consumed) {
+      slot.pendingCommit = null;
+      slot.pendingConsumedStream = null;
+      slot.pendingWritableMask = 0;
+    }
     slot.bodyConsumed = consumed;
   }
 }
@@ -1157,9 +1210,12 @@ function getPrivateBodySlot(target) {
   if (!bindingHttpTrackingEnabled || !isObjectValue(target)) {
     return undefined;
   }
-  return (
-    weakMapGet.call(requestPrivateSlots, target) ?? weakMapGet.call(responsePrivateSlots, target)
-  );
+  const slot =
+    weakMapGet.call(requestPrivateSlots, target) ?? weakMapGet.call(responsePrivateSlots, target);
+  if (slot !== undefined) {
+    syncSlotIfCommitted(slot, target);
+  }
+  return slot;
 }
 
 export function getPrivateBodyStreamForBinding(value) {
@@ -1216,12 +1272,16 @@ const CONSUMED_PUBLIC_KEYS = [
   '_bodyConsumed',
 ];
 
-// U2 (two-phase atomic commit):
-// Phase 1 — allocate EVERY terminal consumed stream and precompute public
-// own-property writability masks for the whole batch BEFORE mutating ANY
-// source Request/Response. If any allocation throws, zero sources change.
+// U2 (single-store atomic commit epoch):
+// Phase 1 — allocate the shared commit token (`tx.committed = false`), every
+// terminal consumed stream, and every public own-property writability mask,
+// then link each slot to `tx`. Because `tx.committed` stays `false` until C++
+// flips it in a single uninterruptible property store, ANY failure or QuickJS
+// deadline interrupt during Phase 1 leaves ZERO observable state changes.
 export function prepareHttpBodyConsumePlanForBinding(targets) {
   const count = targets.length;
+  const tx = objectCreate(null);
+  tx.committed = false;
   const slots = objectCreate(null);
   const streams = objectCreate(null);
   const writableMasks = objectCreate(null);
@@ -1241,42 +1301,30 @@ export function prepareHttpBodyConsumePlanForBinding(targets) {
     streams[i] = slot.bodyFastKind !== 0 ? createConsumedFastBodyStream() : null;
     writableMasks[i] = mask;
   }
+  for (let i = 0; i < count; i++) {
+    const slot = slots[i];
+    slot.pendingCommit = tx;
+    slot.pendingConsumedStream = streams[i];
+    slot.pendingWritableMask = writableMasks[i];
+  }
   const plan = objectCreate(null);
+  plan.tx = tx;
   plan.targets = targets;
   plan.slots = slots;
-  plan.streams = streams;
-  plan.writableMasks = writableMasks;
   plan.count = count;
   return plan;
 }
 
-// Phase 2 — apply the prepared batch using strictly allocation-free state
-// swaps so every source Request/Response transitions together atomically.
+// Phase 2 — best-effort eager mirror/slot flush AFTER C++ has already
+// atomically published `plan.tx.committed = true`. Even if QuickJS interrupts
+// this loop partway through, every remaining slot already observes
+// `tx.committed === true` via `syncSlotIfCommitted`.
 export function applyHttpBodyConsumePlanForBinding(plan) {
   const targets = plan.targets;
   const slots = plan.slots;
-  const streams = plan.streams;
-  const writableMasks = plan.writableMasks;
   const count = plan.count;
   for (let i = 0; i < count; i++) {
-    const target = targets[i];
-    const slot = slots[i];
-    const consumedStream = streams[i];
-    const mask = writableMasks[i];
-    slot.bodyConsumed = true;
-    if (consumedStream !== null) {
-      slot.noBody = false;
-      slot.bodyFastKind = 0;
-      slot.bodyFastData = null;
-      slot.bodyStream = consumedStream;
-      if (mask & 1) target._bodyExposed = true;
-      if (mask & 2) target._noBody = false;
-      if (mask & 4) target._bodySize = 0;
-      if (mask & 8) target._bodyFastKind = 0;
-      if (mask & 16) target._bodyFastData = null;
-      if (mask & 32) target._bodyStream = consumedStream;
-    }
-    if (mask & 64) target._bodyConsumed = true;
+    syncSlotIfCommitted(slots[i], targets[i]);
   }
 }
 
@@ -1353,6 +1401,9 @@ function materializeFastBodyFromSlot(target, slot) {
   const kind = slot.bodyFastKind;
   const data = slot.bodyFastData;
   const stream = createFastBodyStream(kind, data);
+  slot.pendingCommit = null;
+  slot.pendingConsumedStream = null;
+  slot.pendingWritableMask = 0;
   slot.noBody = false;
   slot.bodyStream = stream;
   slot.bodyFastKind = 0;
@@ -1398,6 +1449,7 @@ export function snapshotRequestForBinding(req, checkReadableTransferable, extrac
   if (slot === undefined) {
     return null;
   }
+  syncSlotIfCommitted(slot, req);
   const usedCheck = isSlotBodyUsed(slot);
   if (!usedCheck.ok) {
     return { error: 'Request internal state was tampered with' };
@@ -1512,6 +1564,7 @@ export function snapshotResponseForBinding(res, checkReadableTransferable, extra
   if (slot === undefined) {
     return null;
   }
+  syncSlotIfCommitted(slot, res);
   if (getResponseWebSocket(res) !== null) {
     return { error: 'Response with attached WebSocket cannot cross Binding RPC' };
   }
@@ -1898,16 +1951,16 @@ export function consumeFastResponseBody(response) {
     return null;
   }
   const stream = getEffectiveBodyStream(response, slot);
+  const fastKind = getEffectiveFastKind(response, slot);
   if (slot !== undefined) {
-    if (slot.bodyFastKind !== 0 && !response._bodyExposed && stream === null) {
+    if (fastKind !== 0 && !response._bodyExposed && stream === null) {
       return slot.bodyFastData;
     }
   } else {
-    if (response._bodyFastKind !== 0 && !response._bodyExposed && stream === null) {
+    if (fastKind !== 0 && !response._bodyExposed && stream === null) {
       return response._bodyFastData;
     }
   }
-  const fastKind = slot !== undefined ? slot.bodyFastKind : response._bodyFastKind;
   if (fastKind === 0 && stream !== null && intrinsicReadableStreamProto !== null) {
     const ctrl =
       stream !== null && typeof stream === 'object' ? stream._readableStreamController : undefined;
@@ -1941,10 +1994,13 @@ export function consumeFastResponseBody(response) {
       stream._state = 'closed';
       stream._reader = consumedReaderSentinel;
       if (slot !== undefined) {
+        slot.pendingCommit = null;
+        slot.pendingConsumedStream = null;
+        slot.pendingWritableMask = 0;
         slot.bodyConsumed = true;
         safeSetOwnDataProp(response, '_bodyConsumed', true);
       } else if (!safeSetOwnDataProp(response, '_bodyConsumed', true)) {
-        getOrCreateFrozenBodyOverride(response).bodyConsumed = true;
+        getOrCreateFrozenWrapperOverride(response).bodyConsumed = true;
       }
       return data;
     }
@@ -1954,7 +2010,7 @@ export function consumeFastResponseBody(response) {
 
 export function getFastStreamResponseBody(response) {
   const slot = getPrivateBodySlot(response);
-  const fastKind = slot !== undefined ? slot.bodyFastKind : response._bodyFastKind;
+  const fastKind = getEffectiveFastKind(response, slot);
   const stream = getEffectiveBodyStream(response, slot);
   if (fastKind !== 0 || stream === null || objectHasOwn(response, 'body')) {
     return null;
@@ -1964,7 +2020,7 @@ export function getFastStreamResponseBody(response) {
 
 export function isNullFastResponseBody(response) {
   const slot = getPrivateBodySlot(response);
-  const fastKind = slot !== undefined ? slot.bodyFastKind : response._bodyFastKind;
+  const fastKind = getEffectiveFastKind(response, slot);
   const stream = getEffectiveBodyStream(response, slot);
   return (
     fastKind === 0 && !response._bodyExposed && stream === null && !objectHasOwn(response, 'body')
@@ -1985,7 +2041,7 @@ function materializeFastBody(target, exposed) {
   if (exposed) {
     safeSetOwnDataProp(target, '_bodyExposed', true);
   }
-  const override = getFrozenBodyOverride(target);
+  const override = getFrozenWrapperOverride(target);
   if (override !== undefined && override.hasStream) {
     return override.bodyStream;
   }
@@ -1994,7 +2050,7 @@ function materializeFastBody(target, exposed) {
     const data = target._bodyFastData;
     const stream = createFastBodyStream(kind, data);
     if (!canWriteOwnDataProp(target, '_bodyStream')) {
-      const entry = getOrCreateFrozenBodyOverride(target);
+      const entry = getOrCreateFrozenWrapperOverride(target);
       entry.hasStream = true;
       entry.bodyStream = stream;
       return stream;
@@ -2132,6 +2188,9 @@ function consumeBodyGuard(target) {
     if (target.bodyUsed) {
       return Promise.reject(new TypeError('Already read'));
     }
+    slot.pendingCommit = null;
+    slot.pendingConsumedStream = null;
+    slot.pendingWritableMask = 0;
     slot.bodyConsumed = true;
     safeSetOwnDataProp(target, '_bodyConsumed', true);
     return null;
@@ -2143,7 +2202,7 @@ function consumeBodyGuard(target) {
     return Promise.reject(new TypeError('Already read'));
   }
   if (!safeSetOwnDataProp(target, '_bodyConsumed', true)) {
-    getOrCreateFrozenBodyOverride(target).bodyConsumed = true;
+    getOrCreateFrozenWrapperOverride(target).bodyConsumed = true;
   }
   return null;
 }
@@ -2528,6 +2587,9 @@ function assignRequestSlots(
       bodyFastKind: 0,
       bodyFastData: null,
       bodyStream,
+      pendingCommit: null,
+      pendingConsumedStream: null,
+      pendingWritableMask: 0,
     });
   }
 }
@@ -2636,12 +2698,23 @@ class Request {
         return slot.headers;
       }
     }
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined && override.hasHeaders) {
+      return override.headers;
+    }
     if (this._headers === null && this._rawHeaders !== null) {
       const raw = this._rawHeaders;
       const canonical = this._rawHeadersCanonical;
-      this._rawHeaders = null;
-      this._rawHeadersCanonical = false;
-      this._headers = createHeadersFromIncomingPairs(raw, canonical);
+      const materialized = createHeadersFromIncomingPairs(raw, canonical);
+      if (!safeSetOwnDataProp(this, '_headers', materialized)) {
+        const entry = getOrCreateFrozenWrapperOverride(this);
+        entry.hasHeaders = true;
+        entry.headers = materialized;
+      } else {
+        safeSetOwnDataProp(this, '_rawHeaders', null);
+        safeSetOwnDataProp(this, '_rawHeadersCanonical', false);
+      }
+      return materialized;
     }
     return this._headers;
   }
@@ -2650,6 +2723,11 @@ class Request {
     this._rawHeaders = null;
     this._rawHeadersCanonical = false;
     this._headers = value;
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined) {
+      override.hasHeaders = false;
+      override.headers = null;
+    }
     if (bindingHttpTrackingEnabled) {
       const slot = weakMapGet.call(requestPrivateSlots, this);
       if (slot !== undefined) {
@@ -2681,18 +2759,28 @@ class Request {
         return null;
       }
     }
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined && override.hasSignal) {
+      return override.signal;
+    }
     if (this._signal !== null) return this._signal;
     const state = this._signalState;
     if (state !== null) {
-      this._signalState = null;
       if (state.abortController === null) {
         state.abortController = new AbortController();
         if (state.cancelled) {
           state.abortController.abort(state.cancelReason);
         }
       }
-      this._signal = state.abortController.signal;
-      return this._signal;
+      const signal = state.abortController.signal;
+      if (!safeSetOwnDataProp(this, '_signal', signal)) {
+        const entry = getOrCreateFrozenWrapperOverride(this);
+        entry.hasSignal = true;
+        entry.signal = signal;
+      } else {
+        safeSetOwnDataProp(this, '_signalState', null);
+      }
+      return signal;
     }
     return null;
   }
@@ -2700,6 +2788,11 @@ class Request {
   set signal(value) {
     this._signalState = null;
     this._signal = value;
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined) {
+      override.hasSignal = false;
+      override.signal = null;
+    }
     if (bindingHttpTrackingEnabled) {
       const slot = weakMapGet.call(requestPrivateSlots, this);
       if (slot !== undefined) {
@@ -2717,7 +2810,7 @@ class Request {
       }
       return slot.bodyStream;
     }
-    const override = getFrozenBodyOverride(this);
+    const override = getFrozenWrapperOverride(this);
     if (override !== undefined && override.hasStream) {
       return override.bodyStream;
     }
@@ -2732,6 +2825,11 @@ class Request {
     this._bodyFastKind = 0;
     this._bodyFastData = null;
     this._bodyStream = value;
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined) {
+      override.hasStream = false;
+      override.bodyStream = null;
+    }
     syncPrivateBodySlot(this, value === null || value === undefined, value, 0, null);
   }
 
@@ -2747,6 +2845,10 @@ class Request {
   set bodyUsed(value) {
     const consumed = Boolean(value);
     this._bodyConsumed = consumed;
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined) {
+      override.bodyConsumed = consumed;
+    }
     syncPrivateBodyConsumed(this, consumed);
   }
 
@@ -2775,7 +2877,7 @@ class Request {
       throw new TypeError('Already read');
     }
     const slot = getPrivateBodySlot(this);
-    const fastKind = slot !== undefined ? slot.bodyFastKind : this._bodyFastKind;
+    const fastKind = getEffectiveFastKind(this, slot);
     const fastData = slot !== undefined ? slot.bodyFastData : this._bodyFastData;
     const bodyStream = getEffectiveBodyStream(this, slot);
     let body2 = null;
@@ -2788,11 +2890,14 @@ class Request {
       // and Binding-enabled workers.
       const frozenOverride =
         slot === undefined && !canWriteOwnDataProp(this, '_bodyStream')
-          ? getOrCreateFrozenBodyOverride(this)
+          ? getOrCreateFrozenWrapperOverride(this)
           : null;
       const [body1, teeBody] = bodyStream.tee();
       if (slot !== undefined) {
         safeSetOwnDataProp(this, '_bodyStream', body1);
+        slot.pendingCommit = null;
+        slot.pendingConsumedStream = null;
+        slot.pendingWritableMask = 0;
         slot.noBody = false;
         slot.bodyStream = body1;
         slot.bodyFastKind = 0;
@@ -3106,6 +3211,9 @@ function assignResponseSlots(
       bodyFastKind,
       bodyFastData,
       bodyStream,
+      pendingCommit: null,
+      pendingConsumedStream: null,
+      pendingWritableMask: 0,
     });
   }
 }
@@ -3234,10 +3342,19 @@ class Response {
         return slot.headers;
       }
     }
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined && override.hasHeaders) {
+      return override.headers;
+    }
     if (this._headers === null && this._headersState !== null) {
       const headers = objectCreate(headersPrototype);
       setHeaderState(headers, this._headersState);
-      this._headers = headers;
+      if (!safeSetOwnDataProp(this, '_headers', headers)) {
+        const entry = getOrCreateFrozenWrapperOverride(this);
+        entry.hasHeaders = true;
+        entry.headers = headers;
+      }
+      return headers;
     }
     return this._headers;
   }
@@ -3245,6 +3362,11 @@ class Response {
   set headers(value) {
     this._headers = value;
     this._headersState = null;
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined) {
+      override.hasHeaders = false;
+      override.headers = null;
+    }
     if (bindingHttpTrackingEnabled) {
       const slot = weakMapGet.call(responsePrivateSlots, this);
       if (slot !== undefined) {
@@ -3262,7 +3384,7 @@ class Response {
       }
       return slot.bodyStream;
     }
-    const override = getFrozenBodyOverride(this);
+    const override = getFrozenWrapperOverride(this);
     if (override !== undefined && override.hasStream) {
       return override.bodyStream;
     }
@@ -3277,6 +3399,11 @@ class Response {
     this._bodyFastKind = 0;
     this._bodyFastData = null;
     this._bodyStream = value;
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined) {
+      override.hasStream = false;
+      override.bodyStream = null;
+    }
     syncPrivateBodySlot(this, value === null || value === undefined, value, 0, null);
   }
 
@@ -3292,6 +3419,10 @@ class Response {
   set bodyUsed(value) {
     const consumed = Boolean(value);
     this._bodyConsumed = consumed;
+    const override = getFrozenWrapperOverride(this);
+    if (override !== undefined) {
+      override.bodyConsumed = consumed;
+    }
     syncPrivateBodyConsumed(this, consumed);
   }
 
@@ -3357,7 +3488,7 @@ class Response {
       return wrapped;
     }
     const slot = getPrivateBodySlot(this);
-    const fastKind = slot !== undefined ? slot.bodyFastKind : this._bodyFastKind;
+    const fastKind = getEffectiveFastKind(this, slot);
     const fastData = slot !== undefined ? slot.bodyFastData : this._bodyFastData;
     const bodyStream = getEffectiveBodyStream(this, slot);
     let body2 = null;
@@ -3374,11 +3505,14 @@ class Response {
         // and Binding-enabled workers.
         const frozenOverride =
           slot === undefined && !canWriteOwnDataProp(this, '_bodyStream')
-            ? getOrCreateFrozenBodyOverride(this)
+            ? getOrCreateFrozenWrapperOverride(this)
             : null;
         const [body1, teeBody] = bodyStream.tee();
         if (slot !== undefined) {
           safeSetOwnDataProp(this, '_bodyStream', body1);
+          slot.pendingCommit = null;
+          slot.pendingConsumedStream = null;
+          slot.pendingWritableMask = 0;
           slot.noBody = false;
           slot.bodyStream = body1;
           slot.bodyFastKind = 0;

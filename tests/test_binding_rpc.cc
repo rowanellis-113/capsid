@@ -1230,88 +1230,189 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
     JS_FreeValue(ctx, obj_proto);
 }
 
-// U2 (Round-6 P2): Two-phase atomic HTTP inline-body consumption transaction
-// (`BindingHttpConsumeBatch`). Verifies controllable preparation failure on
-// item 2 of a 2-object batch in BOTH input (User->Binding) and result
-// (Binding->User) directions leaves EVERY source unread/unmodified and reports
-// failure (never a false success), rollback after prepare mutates nothing, and
-// successful commit transitions all targets atomically together.
+struct InterruptProbe {
+    bool armed = false;
+    int triggers = 0;
+};
+
+InterruptProbe* g_interrupt_probe = NULL;
+
+int test_interrupt_handler(JSRuntime*, void* opaque) {
+    InterruptProbe* probe = static_cast<InterruptProbe*>(opaque);
+    if (probe != NULL && probe->armed) {
+        probe->triggers++;
+        return 1;
+    }
+    return 0;
+}
+
+JSValue js_arm_interrupt(JSContext*, JSValueConst, int, JSValueConst*) {
+    if (g_interrupt_probe != NULL) {
+        g_interrupt_probe->armed = true;
+    }
+    return JS_UNDEFINED;
+}
+
+// U2 (Round-6/Round-7 P2): Single-store atomic HTTP inline-body consumption
+// transaction (`BindingHttpConsumeBatch`). Verifies in BOTH input
+// (User->Binding) and result (Binding->User) directions:
+//   1. Preparation failure on item 2 of 2 leaves 0/2 consumed (returns false).
+//   2. Post-prepare rollback (`reset()`) mutates nothing (0/2 consumed).
+//   3. Invalid/unwritable commit tokens reject at prepare(); freezing the token
+//      before commit() fails closed at publish with 0/2 consumed and 0 apply calls.
+//   4. Real QuickJS interrupt firing DURING prepare() after linking item 0 and
+//      before linking item 1 leaves tx.committed === false (0/2 consumed).
+//   5. Real QuickJS interrupt firing MID-LOOP DURING apply_fn after item 0
+//      flushed and before item 1 flushed still transitions ALL 2/2 objects
+//      atomically (single-store tx.committed === true already published).
+//   6. Happy-path 2-object (normal + frozen) commit transitions 2/2 atomically.
 void test_http_consume_batch_two_phase_atomicity() {
     RuntimeFixture user_rt;
     RuntimeFixture binding_rt;
 
     auto run_direction_checks = [](RuntimeFixture& rt, const char* dir_label) {
         JSContext* ctx = rt.ctx();
+        JSRuntime* js_rt = JS_GetRuntime(ctx);
+        InterruptProbe probe;
+        g_interrupt_probe = &probe;
+
+        JSValue arm_fn = JS_NewCFunction(ctx, js_arm_interrupt, "__testArmInterrupt", 0);
+        JSValue global = JS_GetGlobalObject(ctx);
+        JS_SetPropertyStr(ctx, global, "__testArmInterrupt", arm_fn);
+        JS_FreeValue(ctx, global);
+
         JSValue harness = rt.eval(
-            "(() => {"
-            "  const slots = new WeakMap();"
-            "  const makeSource = (payload, freezeObj) => {"
-            "    const obj = { _bodyFastKind: 1, _bodyFastData: payload, _bodyStream: null,"
-            "                  _bodyConsumed: false };"
-            "    slots.set(obj, { bodyFastKind: 1, bodyFastData: payload, bodyStream: null,"
-            "                     bodyConsumed: false });"
-            "    if (freezeObj) Object.freeze(obj);"
-            "    return obj;"
-            "  };"
-            "  const readState = (obj) => {"
-            "    const s = slots.get(obj);"
-            "    return { used: s.bodyConsumed, data: s.bodyFastData,"
-            "             locked: s.bodyStream !== null && s.bodyStream.locked === true,"
-            "             pubUsed: obj._bodyConsumed };"
-            "  };"
-            "  let failOnIndex = -1;"
-            "  let prepareCalls = 0;"
-            "  let applyCalls = 0;"
-            "  const preparePlan = (targets) => {"
-            "    prepareCalls++;"
-            "    const plan = Object.create(null);"
-            "    plan.count = targets.length;"
-            "    plan.targets = targets;"
-            "    plan.slots = Object.create(null);"
-            "    plan.streams = Object.create(null);"
-            "    plan.writable = Object.create(null);"
-            "    for (let i = 0; i < targets.length; ++i) {"
-            "      if (i === failOnIndex) {"
-            "        throw new RangeError('simulated OOM during terminal stream allocation');"
-            "      }"
-            "      const s = slots.get(targets[i]);"
-            "      if (!s) throw new TypeError('missing slot');"
-            "      const desc = Object.getOwnPropertyDescriptor(targets[i], '_bodyConsumed');"
-            "      plan.slots[i] = s;"
-            "      plan.streams[i] = { closed: true, disturbed: true, locked: true };"
-            "      plan.writable[i] = Boolean(desc && desc.writable);"
-            "    }"
-            "    return plan;"
-            "  };"
-            "  const applyPlan = (plan) => {"
-            "    applyCalls++;"
-            "    for (let i = 0; i < plan.count; ++i) {"
-            "      const s = plan.slots[i];"
-            "      s.bodyConsumed = true;"
-            "      s.bodyFastKind = 0;"
-            "      s.bodyFastData = null;"
-            "      s.bodyStream = plan.streams[i];"
-            "      if (plan.writable[i]) {"
-            "        plan.targets[i]._bodyConsumed = true;"
-            "        plan.targets[i]._bodyFastKind = 0;"
-            "        plan.targets[i]._bodyFastData = null;"
-            "        plan.targets[i]._bodyStream = plan.streams[i];"
-            "      }"
-            "    }"
-            "  };"
-            "  const throwingApply = () => { throw new Error('commit call failed'); };"
-            "  const setFailIndex = (idx) => { failOnIndex = idx; };"
-            "  const stats = () => ({ prepareCalls, applyCalls });"
-            "  return { makeSource, readState, preparePlan, applyPlan, throwingApply,"
-            "           setFailIndex, stats };"
+            "(() => {\n"
+            "  const slots = new WeakMap();\n"
+            "  const syncSlotIfCommitted = (s, target) => {\n"
+            "    const tx = s.pendingCommit;\n"
+            "    if (tx !== null && tx.committed === true) {\n"
+            "      const stream = s.pendingConsumedStream;\n"
+            "      const writable = s.pendingWritable;\n"
+            "      s.pendingCommit = null;\n"
+            "      s.pendingConsumedStream = null;\n"
+            "      s.pendingWritable = false;\n"
+            "      s.bodyConsumed = true;\n"
+            "      if (stream !== null) {\n"
+            "        s.bodyFastKind = 0;\n"
+            "        s.bodyFastData = null;\n"
+            "        s.bodyStream = stream;\n"
+            "        if (writable && target !== undefined) {\n"
+            "          target._bodyFastKind = 0;\n"
+            "          target._bodyFastData = null;\n"
+            "          target._bodyStream = stream;\n"
+            "        }\n"
+            "      }\n"
+            "      if (writable && target !== undefined) {\n"
+            "        target._bodyConsumed = true;\n"
+            "      }\n"
+            "    }\n"
+            "  };\n"
+            "  const makeSource = (payload, freezeObj) => {\n"
+            "    const obj = { _bodyFastKind: 1, _bodyFastData: payload, _bodyStream: null,\n"
+            "                  _bodyConsumed: false };\n"
+            "    slots.set(obj, {\n"
+            "      bodyFastKind: 1, bodyFastData: payload, bodyStream: null,\n"
+            "      bodyConsumed: false, pendingCommit: null, pendingConsumedStream: null,\n"
+            "      pendingWritable: false\n"
+            "    });\n"
+            "    if (freezeObj) Object.freeze(obj);\n"
+            "    return obj;\n"
+            "  };\n"
+            "  const readState = (obj) => {\n"
+            "    const s = slots.get(obj);\n"
+            "    syncSlotIfCommitted(s, obj);\n"
+            "    return { used: s.bodyConsumed, data: s.bodyFastData,\n"
+            "             locked: s.bodyStream !== null && s.bodyStream.locked === true,\n"
+            "             pubUsed: obj._bodyConsumed };\n"
+            "  };\n"
+            "  let failOnIndex = -1;\n"
+            "  let armPrepareLinkIndex = -1;\n"
+            "  let armApplyIndex = -1;\n"
+            "  let badTxMode = 0;\n"
+            "  let lastTx = null;\n"
+            "  let applyCalls = 0;\n"
+            "  let applyFlushedCount = 0;\n"
+            "  const spinForInterrupt = () => {\n"
+            "    __testArmInterrupt();\n"
+            "    let acc = 0;\n"
+            "    for (let k = 0; k < 50000; ++k) { acc += k; }\n"
+            "    return acc;\n"
+            "  };\n"
+            "  const preparePlan = (targets) => {\n"
+            "    const tx = Object.create(null);\n"
+            "    if (badTxMode === 1) {\n"
+            "      tx.committed = true;\n"
+            "    } else if (badTxMode === 2) {\n"
+            "      Object.defineProperty(tx, 'committed', { value: false, writable: false });\n"
+            "    } else if (badTxMode === 3) {\n"
+            "      Object.defineProperty(tx, 'committed', { get() { return false; } });\n"
+            "    } else {\n"
+            "      tx.committed = false;\n"
+            "    }\n"
+            "    lastTx = tx;\n"
+            "    const count = targets.length;\n"
+            "    const planSlots = Object.create(null);\n"
+            "    const streams = Object.create(null);\n"
+            "    const writable = Object.create(null);\n"
+            "    for (let i = 0; i < count; ++i) {\n"
+            "      if (i === failOnIndex) {\n"
+            "        throw new RangeError('simulated OOM during terminal stream allocation');\n"
+            "      }\n"
+            "      const s = slots.get(targets[i]);\n"
+            "      if (!s) throw new TypeError('missing slot');\n"
+            "      syncSlotIfCommitted(s, targets[i]);\n"
+            "      const desc = Object.getOwnPropertyDescriptor(targets[i], '_bodyConsumed');\n"
+            "      planSlots[i] = s;\n"
+            "      streams[i] = { closed: true, disturbed: true, locked: true };\n"
+            "      writable[i] = Boolean(desc && desc.writable);\n"
+            "    }\n"
+            "    for (let i = 0; i < count; ++i) {\n"
+            "      const s = planSlots[i];\n"
+            "      s.pendingCommit = tx;\n"
+            "      s.pendingConsumedStream = streams[i];\n"
+            "      s.pendingWritable = writable[i];\n"
+            "      if (i === armPrepareLinkIndex) {\n"
+            "        spinForInterrupt();\n"
+            "      }\n"
+            "    }\n"
+            "    const plan = Object.create(null);\n"
+            "    plan.tx = badTxMode === 4 ? null : tx;\n"
+            "    plan.count = count;\n"
+            "    plan.targets = targets;\n"
+            "    plan.slots = planSlots;\n"
+            "    return plan;\n"
+            "  };\n"
+            "  const applyPlan = (plan) => {\n"
+            "    applyCalls++;\n"
+            "    applyFlushedCount = 0;\n"
+            "    for (let i = 0; i < plan.count; ++i) {\n"
+            "      syncSlotIfCommitted(plan.slots[i], plan.targets[i]);\n"
+            "      applyFlushedCount++;\n"
+            "      if (i === armApplyIndex) {\n"
+            "        spinForInterrupt();\n"
+            "      }\n"
+            "    }\n"
+            "  };\n"
+            "  const configure = (failIdx, prepArm, applyArm, txMode) => {\n"
+            "    failOnIndex = failIdx;\n"
+            "    armPrepareLinkIndex = prepArm;\n"
+            "    armApplyIndex = applyArm;\n"
+            "    badTxMode = txMode;\n"
+            "  };\n"
+            "  const freezeLastTx = () => { if (lastTx) Object.freeze(lastTx); };\n"
+            "  const stats = () => ({ applyCalls, applyFlushedCount });\n"
+            "  return { makeSource, readState, preparePlan, applyPlan, configure,\n"
+            "           freezeLastTx, stats };\n"
             "})()");
         require(!JS_IsException(harness) && JS_IsObject(harness), "atomicity harness init");
         JSValue make_source = JS_GetPropertyStr(ctx, harness, "makeSource");
         JSValue read_state = JS_GetPropertyStr(ctx, harness, "readState");
         JSValue prepare_fn = JS_GetPropertyStr(ctx, harness, "preparePlan");
         JSValue apply_fn = JS_GetPropertyStr(ctx, harness, "applyPlan");
-        JSValue throwing_apply_fn = JS_GetPropertyStr(ctx, harness, "throwingApply");
-        JSValue set_fail_idx = JS_GetPropertyStr(ctx, harness, "setFailIndex");
+        JSValue configure_fn = JS_GetPropertyStr(ctx, harness, "configure");
+        JSValue freeze_last_tx_fn = JS_GetPropertyStr(ctx, harness, "freezeLastTx");
+        JSValue stats_fn = JS_GetPropertyStr(ctx, harness, "stats");
 
         auto make_src = [&](const char* text, bool freeze_obj) -> JSValue {
             JSValue args[2] = {JS_NewString(ctx, text), freeze_obj ? JS_TRUE : JS_FALSE};
@@ -1358,30 +1459,39 @@ void test_http_consume_batch_two_phase_atomicity() {
             JS_FreeValue(ctx, st);
             require(ok, (std::string(dir_label) + ": " + msg).c_str());
         };
-        auto set_fail = [&](int idx) {
-            JSValue a = JS_NewInt32(ctx, idx);
-            JSValue r = JS_Call(ctx, set_fail_idx, JS_UNDEFINED, 1, &a);
-            JS_FreeValue(ctx, a);
+        auto configure = [&](int fail_idx, int prep_arm, int apply_arm, int tx_mode) {
+            JSValue args[4] = {JS_NewInt32(ctx, fail_idx), JS_NewInt32(ctx, prep_arm),
+                               JS_NewInt32(ctx, apply_arm), JS_NewInt32(ctx, tx_mode)};
+            JSValue r = JS_Call(ctx, configure_fn, JS_UNDEFINED, 4, args);
+            for (int i = 0; i < 4; ++i)
+                JS_FreeValue(ctx, args[i]);
             JS_FreeValue(ctx, r);
         };
+        auto get_stat = [&](const char* key) -> int32_t {
+            JSValue st = JS_Call(ctx, stats_fn, JS_UNDEFINED, 0, NULL);
+            JSValue v = JS_GetPropertyStr(ctx, st, key);
+            int32_t out = 0;
+            JS_ToInt32(ctx, &out, v);
+            JS_FreeValue(ctx, v);
+            JS_FreeValue(ctx, st);
+            return out;
+        };
 
-        // 1. Controllable preparation failure on object #2 of 2 (item 0 prepared
-        // successfully before item 1 threw): ZERO partial consumption, caller
-        // receives false + error (no false success).
+        // 1. Controllable preparation failure on object #2 of 2: ZERO partial
+        // consumption, caller receives false + error (no false success).
         {
             JSValue s1 = make_src("body-one", false);
             JSValue s2 = make_src("body-two", true);
             capsid::BindingHttpConsumeBatch batch;
             require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
             require(batch.contains(s1) && batch.contains(s2), "contains mismatch");
-            set_fail(1);
+            configure(1, -1, -1, 0);
             std::string err;
             require(
                 !batch.prepare(prepare_fn, &err),
                 (std::string(dir_label) + ": prepare failure on item 2 must fail closed").c_str());
             require(!err.empty(),
                     (std::string(dir_label) + ": prepare error message missing").c_str());
-            // Calling commit() after failed prepare must also fail closed.
             std::string commit_err;
             require(!batch.commit(apply_fn, &commit_err) && !commit_err.empty(),
                     (std::string(dir_label) + ": commit after failed prepare must reject").c_str());
@@ -1392,14 +1502,13 @@ void test_http_consume_batch_two_phase_atomicity() {
         }
 
         // 2. Prepare succeeds for 2 objects, then simulated downstream failure
-        // (e.g. materialization/enqueue abort) resets batch BEFORE commit:
-        // proves Phase 1 never mutates any source object.
+        // resets batch BEFORE commit: proves Phase 1 leaves tx.committed=false.
         {
             JSValue s1 = make_src("mat-one", false);
             JSValue s2 = make_src("mat-two", true);
             capsid::BindingHttpConsumeBatch batch;
             require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
-            set_fail(-1);
+            configure(-1, -1, -1, 0);
             std::string err;
             require(batch.prepare(prepare_fn, &err),
                     (std::string(dir_label) + ": prepare unexpectedly failed: " + err).c_str());
@@ -1413,32 +1522,121 @@ void test_http_consume_batch_two_phase_atomicity() {
             JS_FreeValue(ctx, s2);
         }
 
-        // 3. Prepare succeeds, but commit JS_Call throws: commit() propagates
-        // failure (returns false + error) instead of swallowing the exception.
-        {
-            JSValue s1 = make_src("throw-one", false);
-            JSValue s2 = make_src("throw-two", false);
+        // 3. Invalid commit tokens (already true, non-writable, getter, missing)
+        // reject at prepare(); freezing the token after prepare() fails closed
+        // at single-store publish with 0/2 consumed and zero apply calls.
+        for (int bad_mode = 1; bad_mode <= 4; ++bad_mode) {
+            JSValue s1 = make_src("badtx-one", false);
+            JSValue s2 = make_src("badtx-two", false);
             capsid::BindingHttpConsumeBatch batch;
             require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
-            set_fail(-1);
+            configure(-1, -1, -1, bad_mode);
             std::string err;
-            require(batch.prepare(prepare_fn, &err), "prepare before throwing apply failed");
-            require(!batch.commit(throwing_apply_fn, &err) && !err.empty(),
-                    (std::string(dir_label) + ": commit exception must propagate failure").c_str());
-            check_unread(s1, "throw-one", "throwing apply left item 1 unread");
-            check_unread(s2, "throw-two", "throwing apply left item 2 unread");
+            require(!batch.prepare(prepare_fn, &err) && !err.empty(),
+                    (std::string(dir_label) + ": bad tx mode must reject at prepare").c_str());
+            if (bad_mode != 1) {
+                check_unread(s1, "badtx-one", "rejected bad tx left item 1 unread");
+                check_unread(s2, "badtx-two", "rejected bad tx left item 2 unread");
+            }
+            JS_FreeValue(ctx, s1);
+            JS_FreeValue(ctx, s2);
+        }
+        {
+            JSValue s1 = make_src("pubfail-one", false);
+            JSValue s2 = make_src("pubfail-two", false);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
+            configure(-1, -1, -1, 0);
+            std::string err;
+            require(batch.prepare(prepare_fn, &err), "prepare before frozen tx failed");
+            JSValue fr = JS_Call(ctx, freeze_last_tx_fn, JS_UNDEFINED, 0, NULL);
+            JS_FreeValue(ctx, fr);
+            const int32_t before_apply = get_stat("applyCalls");
+            require(
+                !batch.commit(apply_fn, &err) && !err.empty(),
+                (std::string(dir_label) + ": frozen tx publish failure must return false").c_str());
+            require(get_stat("applyCalls") == before_apply,
+                    (std::string(dir_label) + ": publish failure must not run apply_fn").c_str());
+            check_unread(s1, "pubfail-one", "publish failure must leave item 1 unread");
+            check_unread(s2, "pubfail-two", "publish failure must leave item 2 unread");
             JS_FreeValue(ctx, s1);
             JS_FreeValue(ctx, s2);
         }
 
-        // 4. Happy path: 2 objects (one normal, one frozen) prepare + commit
+        // 4. Real QuickJS interrupt firing DURING prepare() after linking
+        // item 0 and BEFORE linking item 1: returns false, 0/2 consumed.
+        {
+            JSValue s1 = make_src("prepirq-one", false);
+            JSValue s2 = make_src("prepirq-two", false);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
+            probe.armed = false;
+            probe.triggers = 0;
+            JS_SetInterruptHandler(js_rt, test_interrupt_handler, &probe);
+            configure(-1, 0, -1, 0);
+            std::string err;
+            const bool prepared = batch.prepare(prepare_fn, &err);
+            probe.armed = false;
+            JS_SetInterruptHandler(js_rt, NULL, NULL);
+            require(!prepared && !err.empty(),
+                    (std::string(dir_label) + ": interrupted prepare must return false").c_str());
+            require(probe.triggers > 0,
+                    (std::string(dir_label) + ": real QuickJS interrupt did not fire in prepare")
+                        .c_str());
+            check_unread(s1, "prepirq-one", "interrupted prepare must leave item 1 unread");
+            check_unread(s2, "prepirq-two", "interrupted prepare must leave item 2 unread");
+            std::string commit_err;
+            require(!batch.commit(apply_fn, &commit_err),
+                    (std::string(dir_label) + ": commit after interrupted prepare must reject")
+                        .c_str());
+            JS_FreeValue(ctx, s1);
+            JS_FreeValue(ctx, s2);
+        }
+
+        // 5. Real QuickJS interrupt firing MID-LOOP DURING apply_fn AFTER
+        // item 0 flushed and BEFORE item 1 flushed: because C++ already
+        // published tx.committed = true in one uninterruptible store, commit()
+        // succeeds and BOTH items observe full committed state (ZERO torn state).
+        {
+            JSValue s1 = make_src("applyirq-one", false);
+            JSValue s2 = make_src("applyirq-two", false);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
+            configure(-1, -1, 0, 0);
+            std::string err;
+            require(batch.prepare(prepare_fn, &err), "prepare before apply interrupt failed");
+            probe.armed = false;
+            probe.triggers = 0;
+            JS_SetInterruptHandler(js_rt, test_interrupt_handler, &probe);
+            const bool committed = batch.commit(apply_fn, &err);
+            probe.armed = false;
+            JS_SetInterruptHandler(js_rt, NULL, NULL);
+            require(committed, (std::string(dir_label) +
+                                ": commit must succeed after single-store publish even if eager "
+                                "apply flush is interrupted: " +
+                                err)
+                                   .c_str());
+            require(probe.triggers > 0,
+                    (std::string(dir_label) + ": real QuickJS interrupt did not fire in apply")
+                        .c_str());
+            require(
+                get_stat("applyFlushedCount") == 1,
+                (std::string(dir_label) + ": apply loop should have stopped after item 0").c_str());
+            check_consumed(s1, true, "item 1 must be consumed after mid-apply interrupt");
+            check_consumed(s2, true,
+                           "item 2 must ALSO observe committed state after mid-apply interrupt");
+            JS_FreeValue(ctx, s1);
+            JS_FreeValue(ctx, s2);
+        }
+
+        // 6. Happy path: 2 objects (one normal, one frozen) prepare + commit
         // atomically together.
         {
             JSValue s1 = make_src("ok-one", false);
             JSValue s2 = make_src("ok-two", true);
             capsid::BindingHttpConsumeBatch batch;
             require(batch.add_target(ctx, s1) && batch.add_target(ctx, s2), "add_target failed");
-            set_fail(-1);
+            configure(-1, -1, -1, 0);
             std::string err;
             require(batch.prepare(prepare_fn, &err), ("happy-path prepare failed: " + err).c_str());
             require(batch.commit(apply_fn, &err), ("happy-path commit failed: " + err).c_str());
@@ -1453,9 +1651,11 @@ void test_http_consume_batch_two_phase_atomicity() {
         JS_FreeValue(ctx, read_state);
         JS_FreeValue(ctx, prepare_fn);
         JS_FreeValue(ctx, apply_fn);
-        JS_FreeValue(ctx, throwing_apply_fn);
-        JS_FreeValue(ctx, set_fail_idx);
+        JS_FreeValue(ctx, configure_fn);
+        JS_FreeValue(ctx, freeze_last_tx_fn);
+        JS_FreeValue(ctx, stats_fn);
         JS_FreeValue(ctx, harness);
+        g_interrupt_probe = NULL;
     };
 
     run_direction_checks(user_rt, "input(User->Binding)");
