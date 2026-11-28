@@ -181,7 +181,11 @@ function attachReadableSource(stream, onChunk, onEnd, onError) {
     cancel(reason) {
       try {
         const p = readerCancel.call(reader, reason);
-        promiseThen.call(p, () => {}, () => {});
+        promiseThen.call(
+          p,
+          () => {},
+          () => {},
+        );
       } catch {
         // Ignore cancel errors on already-terminated sources.
       }
@@ -249,7 +253,11 @@ function attachWritableSource(stream) {
         onError(err);
         return;
       }
-      promiseThen.call(p, () => onDone(), (err) => onError(err));
+      promiseThen.call(
+        p,
+        () => onDone(),
+        (err) => onError(err),
+      );
     },
     close(onDone, onError) {
       let p;
@@ -259,12 +267,20 @@ function attachWritableSource(stream) {
         onError(err);
         return;
       }
-      promiseThen.call(p, () => onDone(), (err) => onError(err));
+      promiseThen.call(
+        p,
+        () => onDone(),
+        (err) => onError(err),
+      );
     },
     abort(reason) {
       try {
         const p = writerAbort.call(writer, reason);
-        promiseThen.call(p, () => {}, () => {});
+        promiseThen.call(
+          p,
+          () => {},
+          () => {},
+        );
       } catch {
         // Ignore abort errors on already-terminated sinks.
       }
@@ -569,7 +585,11 @@ function disposeRpcTarget(target) {
     try {
       const ret = fn.call(target);
       if (ret !== null && typeof ret === 'object' && typeof ret.then === 'function') {
-        promiseThen.call(promiseResolve(ret), () => {}, () => {});
+        promiseThen.call(
+          promiseResolve(ret),
+          () => {},
+          () => {},
+        );
       }
     } catch {
       // Fault-isolated disposal: Binding cleanup failures never poison User or Worker.
@@ -605,7 +625,11 @@ function disposeLateValue(value) {
     try {
       if (!readableLockedGetter.call(value)) {
         const reader = readableGetReader.call(value);
-        promiseThen.call(readerCancel.call(reader, abortErr), () => {}, () => {});
+        promiseThen.call(
+          readerCancel.call(reader, abortErr),
+          () => {},
+          () => {},
+        );
       }
     } catch {
       // Best-effort bounded disposal.
@@ -616,7 +640,11 @@ function disposeLateValue(value) {
     try {
       if (!writableLockedGetter.call(value)) {
         const writer = writableGetWriter.call(value);
-        promiseThen.call(writerAbort.call(writer, abortErr), () => {}, () => {});
+        promiseThen.call(
+          writerAbort.call(writer, abortErr),
+          () => {},
+          () => {},
+        );
       }
     } catch {
       // Best-effort bounded disposal.
@@ -642,7 +670,11 @@ function disposeLateValue(value) {
         if (typeof fn === 'function') {
           const ret = fn.call(value);
           if (ret !== null && typeof ret === 'object' && typeof ret.then === 'function') {
-            promiseThen.call(promiseResolve(ret), () => {}, () => {});
+            promiseThen.call(
+              promiseResolve(ret),
+              () => {},
+              () => {},
+            );
           }
         }
       } catch {

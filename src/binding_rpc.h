@@ -86,10 +86,10 @@ struct NeutralValue {
     std::vector<NeutralValue> array; // kArray
     // kObject: insertion-ordered, duplicate keys rejected at clone time.
     std::vector<std::pair<std::string, NeutralValue>> object;
-    std::uint64_t stream_id = 0;     // kReadableStreamProxy / kWritableStreamProxy
-    NeutralHttpRequest request;      // kRequestProxy
-    NeutralHttpResponse response;    // kResponseProxy
-    std::uint64_t handle_id = 0;     // kRpcHandleProxy
+    std::uint64_t stream_id = 0;             // kReadableStreamProxy / kWritableStreamProxy
+    NeutralHttpRequest request;              // kRequestProxy
+    NeutralHttpResponse response;            // kResponseProxy
+    std::uint64_t handle_id = 0;             // kRpcHandleProxy
     std::vector<std::string> handle_methods; // kRpcHandleProxy
 };
 
@@ -219,8 +219,7 @@ bool binding_signal_is_aborted(JSContext* ctx, JSValueConst signal,
                                const BindingRpcIntrinsics* intrinsics, bool* out_aborted);
 bool binding_signal_read_reason(JSContext* ctx, JSValueConst signal,
                                 const BindingRpcIntrinsics* intrinsics, JSValue* out_reason);
-bool binding_signal_add_abort_listener(JSContext* ctx, JSValueConst signal,
-                                       JSValueConst listener,
+bool binding_signal_add_abort_listener(JSContext* ctx, JSValueConst signal, JSValueConst listener,
                                        const BindingRpcIntrinsics* intrinsics);
 void binding_signal_remove_abort_listener(JSContext* ctx, JSValueConst signal,
                                           JSValueConst listener,

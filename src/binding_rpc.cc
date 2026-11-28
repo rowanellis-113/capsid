@@ -937,8 +937,8 @@ JSValue materialize_remote_error(JSContext* ctx, const RemoteErrorInfo& info,
             ok = ok && JS_SetPropertyStr(ctx, opts, "quota", JS_NewFloat64(ctx, info.quota)) >= 0;
         }
         if (info.has_requested) {
-            ok = ok && JS_SetPropertyStr(ctx, opts, "requested",
-                                         JS_NewFloat64(ctx, info.requested)) >= 0;
+            ok = ok &&
+                 JS_SetPropertyStr(ctx, opts, "requested", JS_NewFloat64(ctx, info.requested)) >= 0;
         }
         JSValue err = JS_EXCEPTION;
         if (ok) {
@@ -962,9 +962,9 @@ JSValue materialize_remote_error(JSContext* ctx, const RemoteErrorInfo& info,
          info.kind == RemoteErrorKind::kQuotaExceededError) &&
         intrinsics != NULL && JS_IsConstructor(ctx, intrinsics->dom_exception_ctor)) {
         const std::string dom_name =
-            info.name.empty() ? std::string("Error")
-                              : clamp_utf8_text(info.name.data(), info.name.size(),
-                                                kMaxRemoteErrorNameBytes);
+            info.name.empty()
+                ? std::string("Error")
+                : clamp_utf8_text(info.name.data(), info.name.size(), kMaxRemoteErrorNameBytes);
         JSValue name_val = JS_NewStringLen(ctx, dom_name.data(), dom_name.size());
         if (JS_IsException(name_val)) {
             JS_FreeValue(ctx, msg_val);
@@ -1484,8 +1484,8 @@ std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
     case NeutralValue::Kind::kObject: {
         std::size_t total = 8;
         for (std::size_t i = 0; i < value.object.size(); ++i) {
-            total += value.object[i].first.size() +
-                     estimate_neutral_value_bytes(value.object[i].second);
+            total +=
+                value.object[i].first.size() + estimate_neutral_value_bytes(value.object[i].second);
         }
         return total;
     }

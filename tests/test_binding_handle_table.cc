@@ -25,8 +25,7 @@ void test_basic_lifecycle_and_leases() {
 
     std::uint64_t id1 = 0;
     capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
-    require(table.open_handle(10, "db", 0, 1000, {"next", "count"}, &id1, &qerr),
-            "open handle 1");
+    require(table.open_handle(10, "db", 0, 1000, {"next", "count"}, &id1, &qerr), "open handle 1");
     require(id1 != 0 && table.size() == 1, "handle 1 recorded");
     require(table.has_method(id1, "next") && table.has_method(id1, "count") &&
                 !table.has_method(id1, "secret"),

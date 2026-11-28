@@ -14,7 +14,7 @@ BindingHandleTable::BindingHandleTable(BindingRpcLedger* ledger)
 std::uint64_t BindingHandleTable::allocate_handle_id() {
     for (std::size_t probe = 0; probe <= handles_.size(); ++probe) {
         const std::uint64_t id = next_handle_id_;
-        next_handle_id_ = (id == std::numeric_limits<std::uint64_t>::max()) ? 1 : (id + 1);
+        next_handle_id_ = (id == (std::numeric_limits<std::uint64_t>::max)()) ? 1 : (id + 1);
         if (id != 0 && handles_.count(id) == 0) {
             return id;
         }
@@ -71,8 +71,7 @@ const BindingHandleRecord* BindingHandleTable::find(std::uint64_t handle_id) con
     return it == handles_.end() ? NULL : &it->second;
 }
 
-bool BindingHandleTable::has_method(std::uint64_t handle_id,
-                                    const std::string& method_name) const {
+bool BindingHandleTable::has_method(std::uint64_t handle_id, const std::string& method_name) const {
     const BindingHandleRecord* rec = find(handle_id);
     if (rec == NULL) {
         return false;

@@ -40,7 +40,8 @@ void test_quota_ledger_calls_and_three_tiers() {
             "req1 call1 reserve");
     require(ledger.reserve_call(1, "a", &err) && err == capsid::BindingQuotaError::kOk,
             "req1 call2 reserve");
-    require(!ledger.reserve_call(1, "a", &err) && err == capsid::BindingQuotaError::kRequestCallLimit,
+    require(!ledger.reserve_call(1, "a", &err) &&
+                err == capsid::BindingQuotaError::kRequestCallLimit,
             "req1 call3 must hit request limit");
     require(std::strcmp(capsid::binding_quota_error_message(err),
                         "binding request quota exceeded") == 0,
@@ -48,15 +49,17 @@ void test_quota_ledger_calls_and_three_tiers() {
 
     // Request 2 -> binding A: 1 more allowed (binding A now at 3), next hits binding limit.
     require(ledger.reserve_call(2, "a", &err), "req2 call1 on binding a");
-    require(!ledger.reserve_call(2, "a", &err) && err == capsid::BindingQuotaError::kBindingCallLimit,
+    require(!ledger.reserve_call(2, "a", &err) &&
+                err == capsid::BindingQuotaError::kBindingCallLimit,
             "req2 call2 on binding a must hit binding limit");
 
     // Request 2 -> binding B: 1 more allowed (worker now at 4), next hits worker limit.
     require(ledger.reserve_call(2, "b", &err), "req2 call1 on binding b");
-    require(!ledger.reserve_call(3, "b", &err) && err == capsid::BindingQuotaError::kWorkerCallLimit,
+    require(!ledger.reserve_call(3, "b", &err) &&
+                err == capsid::BindingQuotaError::kWorkerCallLimit,
             "req3 call1 must hit worker limit");
-    require(std::strcmp(capsid::binding_quota_error_message(err),
-                        "binding call quota exceeded") == 0,
+    require(std::strcmp(capsid::binding_quota_error_message(err), "binding call quota exceeded") ==
+                0,
             "v1 worker quota message preserved");
 
     // Release and verify refill + map entry GC.
@@ -121,7 +124,7 @@ void test_quota_ledger_streams_handles_frames_bytes_and_overflow() {
     require(ledger.request_counts(10).frames == 1 && ledger.worker_counts().frames == 1,
             "failed byte reserve must not leak frame count");
     // Overflow safety: SIZE_MAX bytes must fail cleanly without wrapping.
-    require(!ledger.reserve_frame(10, "cache", std::numeric_limits<std::size_t>::max(), &err) &&
+    require(!ledger.reserve_frame(10, "cache", (std::numeric_limits<std::size_t>::max)(), &err) &&
                 err == capsid::BindingQuotaError::kWorkerByteLimit,
             "SIZE_MAX bytes must fail closed");
     require(ledger.reserve_frame(10, "cache", 40, &err), "frame 2 (40B) fits exactly 100B");

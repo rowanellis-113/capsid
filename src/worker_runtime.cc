@@ -826,12 +826,12 @@ class WorkerRuntime {
         uint64_t request_id;
         uint64_t deadline_ns;
         bool has_custom_timeout;
-        JSValue user_resolve;         // user ctx
-        JSValue user_reject;          // user ctx
-        JSValue user_signal;          // user ctx (optional caller AbortSignal)
-        JSValue user_abort_listener;  // user ctx (detachable once-listener)
-        JSValue abort_controller;     // binding ctx
-        JSValue binding_result;       // binding ctx (fulfillment value)
+        JSValue user_resolve;        // user ctx
+        JSValue user_reject;         // user ctx
+        JSValue user_signal;         // user ctx (optional caller AbortSignal)
+        JSValue user_abort_listener; // user ctx (detachable once-listener)
+        JSValue abort_controller;    // binding ctx
+        JSValue binding_result;      // binding ctx (fulfillment value)
         capsid::RemoteErrorInfo binding_error;
         bool has_binding_error;
         capsid::BindingAbortReason cancel_reason;
@@ -859,7 +859,7 @@ class WorkerRuntime {
 
     struct ActiveBindingStream {
         // Producer-side JS handles (live in producer_ctx)
-        JSValue readable_source = JS_UNDEFINED; // { pull, cancel }
+        JSValue readable_source = JS_UNDEFINED;     // { pull, cancel }
         JSValue writable_proxy_ctrl = JS_UNDEFINED; // { stream, error }
         JSValue on_chunk_cb = JS_UNDEFINED;
         JSValue on_end_cb = JS_UNDEFINED;
@@ -2548,10 +2548,9 @@ class WorkerRuntime {
     bool is_timer_idle() const {
         return responses_.empty() && retained_refs_ == 0 && !reclaim_pending_ && !poisoned_ &&
                pending_memory_metrics_ == 0 && pending_binding_calls_.empty() &&
-               binding_streams_.empty() && stream_work_queue_.empty() &&
-               binding_handles_.empty() && pending_handle_disposals_.empty() &&
-               !binding_scheduler_.has_pending_work() && connections_.empty() &&
-               pending_connections_.empty() && channel_controls_.empty() &&
+               binding_streams_.empty() && stream_work_queue_.empty() && binding_handles_.empty() &&
+               pending_handle_disposals_.empty() && !binding_scheduler_.has_pending_work() &&
+               connections_.empty() && pending_connections_.empty() && channel_controls_.empty() &&
                (!channels_ || channels_->idle());
     }
 
@@ -7859,19 +7858,18 @@ class WorkerRuntime {
         if (call_options.has_timeout_ms) {
             if (call_options.timeout_ms == 0) {
                 binding_ledger_.release_call(token->request_id, table.id);
-                JSValue error = capsid::materialize_remote_error(
-                    ctx,
-                    capsid::RemoteErrorInfo::make_dom_exception("TimeoutError",
-                                                                "binding call timed out"),
-                    &user_binding_intrinsics_);
+                JSValue error =
+                    capsid::materialize_remote_error(ctx,
+                                                     capsid::RemoteErrorInfo::make_dom_exception(
+                                                         "TimeoutError", "binding call timed out"),
+                                                     &user_binding_intrinsics_);
                 return rejected_promise(ctx, error);
             }
             const uint64_t now_ns = uv_hrtime();
             const uint64_t delta_ns = call_options.timeout_ms * UINT64_C(1000000);
-            const uint64_t tightened =
-                (std::numeric_limits<uint64_t>::max() - now_ns >= delta_ns)
-                    ? (now_ns + delta_ns)
-                    : std::numeric_limits<uint64_t>::max();
+            const uint64_t tightened = (std::numeric_limits<uint64_t>::max() - now_ns >= delta_ns)
+                                           ? (now_ns + delta_ns)
+                                           : std::numeric_limits<uint64_t>::max();
             if (call_deadline_ns == 0 || tightened < call_deadline_ns) {
                 call_deadline_ns = tightened;
                 has_custom_timeout = true;
@@ -8040,8 +8038,8 @@ class WorkerRuntime {
             current_binding_disposal_deadline_ns_ = uv_hrtime() + UINT64_C(100000000);
             binding_disposal_interrupted_ = false;
             JSValue arg = JS_DupValue(table.ctx, handle.target_obj);
-            JSValue ret = JS_Call(table.ctx, table.js_bridge.dispose_rpc_target, JS_UNDEFINED, 1,
-                                  &arg);
+            JSValue ret =
+                JS_Call(table.ctx, table.js_bridge.dispose_rpc_target, JS_UNDEFINED, 1, &arg);
             const bool interrupted = binding_disposal_interrupted_;
             current_binding_disposal_deadline_ns_ = 0;
             binding_disposal_interrupted_ = false;
@@ -8104,8 +8102,7 @@ class WorkerRuntime {
     }
 
     static bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target,
-                                           JSValueConst rpc_target_proto,
-                                           JSValueConst object_proto,
+                                           JSValueConst rpc_target_proto, JSValueConst object_proto,
                                            std::vector<std::string>* out_methods,
                                            std::string* error) {
         out_methods->clear();
@@ -8114,7 +8111,8 @@ class WorkerRuntime {
         for (int depth = 0; depth < 16 && JS_IsObject(cur); ++depth) {
             if (JS_IsProxy(cur)) {
                 JS_FreeValue(ctx, cur);
-                if (error != NULL) *error = "RpcTarget prototype chain contains a Proxy";
+                if (error != NULL)
+                    *error = "RpcTarget prototype chain contains a Proxy";
                 return false;
             }
             if ((JS_IsObject(rpc_target_proto) &&
@@ -8125,12 +8123,13 @@ class WorkerRuntime {
             }
             JSPropertyEnum* tab = NULL;
             uint32_t count = 0;
-            if (JS_GetOwnPropertyNames(ctx, &tab, &count, cur, JS_GPN_STRING_MASK | JS_GPN_SET_ENUM) <
-                0) {
+            if (JS_GetOwnPropertyNames(ctx, &tab, &count, cur,
+                                       JS_GPN_STRING_MASK | JS_GPN_SET_ENUM) < 0) {
                 JSValue exc = JS_GetException(ctx);
                 JS_FreeValue(ctx, exc);
                 JS_FreeValue(ctx, cur);
-                if (error != NULL) *error = "RpcTarget method enumeration failed";
+                if (error != NULL)
+                    *error = "RpcTarget method enumeration failed";
                 return false;
             }
             for (uint32_t i = 0; i < count; ++i) {
@@ -8138,7 +8137,8 @@ class WorkerRuntime {
                 if (raw_name == NULL) {
                     JS_FreePropertyEnum(ctx, tab, count);
                     JS_FreeValue(ctx, cur);
-                    if (error != NULL) *error = "RpcTarget property name is unreadable";
+                    if (error != NULL)
+                        *error = "RpcTarget property name is unreadable";
                     return false;
                 }
                 const std::string prop_name(raw_name);
@@ -8149,7 +8149,8 @@ class WorkerRuntime {
                 if (present <= 0) {
                     JS_FreePropertyEnum(ctx, tab, count);
                     JS_FreeValue(ctx, cur);
-                    if (error != NULL) *error = "RpcTarget property descriptor is unreadable";
+                    if (error != NULL)
+                        *error = "RpcTarget property descriptor is unreadable";
                     return false;
                 }
                 const bool is_accessor =
@@ -8189,7 +8190,8 @@ class WorkerRuntime {
                     if (out_methods->size() >= capsid::kBindingHandleMaxMethods) {
                         JS_FreePropertyEnum(ctx, tab, count);
                         JS_FreeValue(ctx, cur);
-                        if (error != NULL) *error = "RpcTarget exceeds 128 method limit";
+                        if (error != NULL)
+                            *error = "RpcTarget exceeds 128 method limit";
                         return false;
                     }
                     out_methods->push_back(prop_name);
@@ -8201,14 +8203,16 @@ class WorkerRuntime {
             if (JS_IsException(next)) {
                 JSValue exc = JS_GetException(ctx);
                 JS_FreeValue(ctx, exc);
-                if (error != NULL) *error = "RpcTarget prototype walk failed";
+                if (error != NULL)
+                    *error = "RpcTarget prototype walk failed";
                 return false;
             }
             cur = next;
         }
         JS_FreeValue(ctx, cur);
         if (out_methods->empty()) {
-            if (error != NULL) *error = "RpcTarget must expose at least 1 method";
+            if (error != NULL)
+                *error = "RpcTarget must expose at least 1 method";
             return false;
         }
         return true;
@@ -8253,8 +8257,7 @@ class WorkerRuntime {
             JSValue err = capsid::materialize_remote_error(
                 ctx,
                 capsid::RemoteErrorInfo::make_dom_exception(
-                    "InvalidStateError",
-                    "Cannot use binding handle outside its owning request"),
+                    "InvalidStateError", "Cannot use binding handle outside its owning request"),
                 &self->user_binding_intrinsics_);
             return rejected_promise(ctx, err);
         }
@@ -8461,19 +8464,22 @@ class WorkerRuntime {
             return true;
         }
         if (!JS_IsArray(arr)) {
-            if (error != NULL) *error = "invalid proxy headers array";
+            if (error != NULL)
+                *error = "invalid proxy headers array";
             return false;
         }
         JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
         uint32_t count = 0;
         if (JS_IsException(len_val) || JS_ToUint32(ctx, &count, len_val) != 0) {
             JS_FreeValue(ctx, len_val);
-            if (error != NULL) *error = "unreadable proxy headers length";
+            if (error != NULL)
+                *error = "unreadable proxy headers length";
             return false;
         }
         JS_FreeValue(ctx, len_val);
         if (count > capsid::kMaxBindingProxyHeaders) {
-            if (error != NULL) *error = "proxy header count limit exceeded";
+            if (error != NULL)
+                *error = "proxy header count limit exceeded";
             return false;
         }
         size_t total_bytes = 0;
@@ -8482,7 +8488,8 @@ class WorkerRuntime {
             JSValue entry = JS_GetPropertyUint32(ctx, arr, i);
             if (!JS_IsArray(entry)) {
                 JS_FreeValue(ctx, entry);
-                if (error != NULL) *error = "invalid proxy header pair";
+                if (error != NULL)
+                    *error = "invalid proxy header pair";
                 return false;
             }
             JSValue k = JS_GetPropertyUint32(ctx, entry, 0);
@@ -8494,16 +8501,20 @@ class WorkerRuntime {
             JS_FreeValue(ctx, k);
             JS_FreeValue(ctx, v);
             if (ks == NULL || vs == NULL) {
-                if (ks) JS_FreeCString(ctx, ks);
-                if (vs) JS_FreeCString(ctx, vs);
-                if (error != NULL) *error = "unreadable proxy header entry";
+                if (ks)
+                    JS_FreeCString(ctx, ks);
+                if (vs)
+                    JS_FreeCString(ctx, vs);
+                if (error != NULL)
+                    *error = "unreadable proxy header entry";
                 return false;
             }
             if (klen + vlen > capsid::kMaxBindingProxyHeaderBytes ||
                 total_bytes > capsid::kMaxBindingProxyHeaderBytes - (klen + vlen)) {
                 JS_FreeCString(ctx, ks);
                 JS_FreeCString(ctx, vs);
-                if (error != NULL) *error = "proxy header byte limit exceeded";
+                if (error != NULL)
+                    *error = "proxy header byte limit exceeded";
                 return false;
             }
             total_bytes += klen + vlen;
@@ -8514,8 +8525,9 @@ class WorkerRuntime {
         return true;
     }
 
-    static JSValue make_js_flat_headers(
-        JSContext* ctx, const std::vector<std::pair<std::string, std::string>>& headers) {
+    static JSValue
+    make_js_flat_headers(JSContext* ctx,
+                         const std::vector<std::pair<std::string, std::string>>& headers) {
         JSValue arr = JS_NewArray(ctx);
         if (JS_IsException(arr)) {
             return arr;
@@ -8537,7 +8549,8 @@ class WorkerRuntime {
     uint64_t allocate_signal_bridge_id() {
         for (size_t probe = 0; probe <= active_signal_bridges_.size(); ++probe) {
             const uint64_t id = next_signal_bridge_id_++;
-            if (next_signal_bridge_id_ == 0) next_signal_bridge_id_ = 1;
+            if (next_signal_bridge_id_ == 0)
+                next_signal_bridge_id_ = 1;
             if (id != 0 && active_signal_bridges_.count(id) == 0) {
                 return id;
             }
@@ -8638,8 +8651,7 @@ class WorkerRuntime {
                            : NULL);
             if (dst_ctx != NULL && JS_IsObject(sb.target_controller)) {
                 auto fire = [&]() {
-                    JSValue reason =
-                        capsid::materialize_abort_reason(dst_ctx, sb.reason, dst_intr);
+                    JSValue reason = capsid::materialize_abort_reason(dst_ctx, sb.reason, dst_intr);
                     if (JS_IsException(reason)) {
                         JSValue exc = JS_GetException(dst_ctx);
                         JS_FreeValue(dst_ctx, exc);
@@ -8676,12 +8688,14 @@ class WorkerRuntime {
         if (side == capsid::BindingStreamSide::kUser) {
             return &user_binding_bridge_;
         }
-        return rec.table_index < binding_tables_.size() ? &binding_tables_[rec.table_index].js_bridge
-                                                        : NULL;
+        return rec.table_index < binding_tables_.size()
+                   ? &binding_tables_[rec.table_index].js_bridge
+                   : NULL;
     }
 
-    const capsid::BindingRpcIntrinsics* stream_side_intrinsics(
-        const capsid::BindingStreamRecord& rec, capsid::BindingStreamSide side) const {
+    const capsid::BindingRpcIntrinsics*
+    stream_side_intrinsics(const capsid::BindingStreamRecord& rec,
+                           capsid::BindingStreamSide side) const {
         if (side == capsid::BindingStreamSide::kUser) {
             return &user_binding_intrinsics_;
         }
@@ -8738,8 +8752,7 @@ class WorkerRuntime {
     }
 
     static void settle_and_clear_promise(JSContext* ctx, JSValue* resolve_slot,
-                                         JSValue* reject_slot, bool is_reject,
-                                         JSValueConst arg) {
+                                         JSValue* reject_slot, bool is_reject, JSValueConst arg) {
         if (ctx == NULL) {
             return;
         }
@@ -8774,16 +8787,15 @@ class WorkerRuntime {
         JSValue err = capsid::materialize_remote_error(
             ctx,
             capsid::RemoteErrorInfo::make_dom_exception(
-                "InvalidStateError",
-                "Cannot use Binding stream proxy outside its owning request"),
+                "InvalidStateError", "Cannot use Binding stream proxy outside its owning request"),
             &user_binding_intrinsics_);
         *out_rejection = rejected_promise(ctx, err);
         return false;
     }
 
-    static capsid::BindingCloneHookResult try_capture_binding_object(
-        JSContext* ctx, JSValueConst value, capsid::NeutralValue* out, std::string* error,
-        void* opaque) {
+    static capsid::BindingCloneHookResult
+    try_capture_binding_object(JSContext* ctx, JSValueConst value, capsid::NeutralValue* out,
+                               std::string* error, void* opaque) {
         BindingCloneContext* cctx = static_cast<BindingCloneContext*>(opaque);
         if (cctx == NULL || cctx->self == NULL) {
             return capsid::BindingCloneHookResult::kUnhandled;
@@ -8802,8 +8814,7 @@ class WorkerRuntime {
         // 1. ReadableStream transfer check (brand + unlocked + undisturbed).
         if (JS_IsFunction(ctx, bridge->check_readable_transferable)) {
             JSValue arg = JS_DupValue(ctx, value);
-            JSValue rc =
-                JS_Call(ctx, bridge->check_readable_transferable, JS_UNDEFINED, 1, &arg);
+            JSValue rc = JS_Call(ctx, bridge->check_readable_transferable, JS_UNDEFINED, 1, &arg);
             JS_FreeValue(ctx, arg);
             if (JS_IsException(rc)) {
                 JSValue exc = JS_GetException(ctx);
@@ -8813,11 +8824,13 @@ class WorkerRuntime {
                 JS_ToInt32(ctx, &status, rc);
                 JS_FreeValue(ctx, rc);
                 if (status == 1) {
-                    if (error != NULL) *error = "ReadableStream is locked";
+                    if (error != NULL)
+                        *error = "ReadableStream is locked";
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 if (status == 2) {
-                    if (error != NULL) *error = "ReadableStream is disturbed or closed";
+                    if (error != NULL)
+                        *error = "ReadableStream is disturbed or closed";
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 if (status == 0) {
@@ -8826,16 +8839,17 @@ class WorkerRuntime {
                     if (!self->binding_streams_.open_stream(
                             capsid::BindingStreamKind::kReadable, cctx->side, cctx->request_id,
                             cctx->binding_id, cctx->table_index, &stream_id, &qerr)) {
-                        if (error != NULL) *error = capsid::binding_quota_error_message(qerr);
+                        if (error != NULL)
+                            *error = capsid::binding_quota_error_message(qerr);
                         return capsid::BindingCloneHookResult::kFailed;
                     }
                     JSValue id_js = capsid::binding_call_id_to_js(ctx, stream_id);
-                    JSValue on_chunk = JS_NewCFunctionData2(
-                        ctx, on_binding_readable_chunk, "onStreamChunk", 1, 0, 1, &id_js);
-                    JSValue on_end = JS_NewCFunctionData2(
-                        ctx, on_binding_readable_end, "onStreamEnd", 0, 0, 1, &id_js);
-                    JSValue on_err = JS_NewCFunctionData2(
-                        ctx, on_binding_readable_error, "onStreamError", 1, 0, 1, &id_js);
+                    JSValue on_chunk = JS_NewCFunctionData2(ctx, on_binding_readable_chunk,
+                                                            "onStreamChunk", 1, 0, 1, &id_js);
+                    JSValue on_end = JS_NewCFunctionData2(ctx, on_binding_readable_end,
+                                                          "onStreamEnd", 0, 0, 1, &id_js);
+                    JSValue on_err = JS_NewCFunctionData2(ctx, on_binding_readable_error,
+                                                          "onStreamError", 1, 0, 1, &id_js);
                     JS_FreeValue(ctx, id_js);
                     if (JS_IsException(on_chunk) || JS_IsException(on_end) ||
                         JS_IsException(on_err)) {
@@ -8843,7 +8857,8 @@ class WorkerRuntime {
                         JS_FreeValue(ctx, on_end);
                         JS_FreeValue(ctx, on_err);
                         self->binding_streams_.close_and_erase(stream_id);
-                        if (error != NULL) *error = "failed to allocate stream callbacks";
+                        if (error != NULL)
+                            *error = "failed to allocate stream callbacks";
                         return capsid::BindingCloneHookResult::kFailed;
                     }
                     JSValue args[4] = {JS_DupValue(ctx, value), on_chunk, on_end, on_err};
@@ -8861,7 +8876,8 @@ class WorkerRuntime {
                         JS_FreeValue(ctx, on_end);
                         JS_FreeValue(ctx, on_err);
                         self->binding_streams_.close_and_erase(stream_id);
-                        if (error != NULL) *error = "failed to lock ReadableStream source";
+                        if (error != NULL)
+                            *error = "failed to lock ReadableStream source";
                         return capsid::BindingCloneHookResult::kFailed;
                     }
                     ActiveBindingStream ep;
@@ -8881,8 +8897,7 @@ class WorkerRuntime {
         // 2. WritableStream transfer check (brand + unlocked + writable).
         if (JS_IsFunction(ctx, bridge->check_writable_transferable)) {
             JSValue arg = JS_DupValue(ctx, value);
-            JSValue rc =
-                JS_Call(ctx, bridge->check_writable_transferable, JS_UNDEFINED, 1, &arg);
+            JSValue rc = JS_Call(ctx, bridge->check_writable_transferable, JS_UNDEFINED, 1, &arg);
             JS_FreeValue(ctx, arg);
             if (JS_IsException(rc)) {
                 JSValue exc = JS_GetException(ctx);
@@ -8892,11 +8907,13 @@ class WorkerRuntime {
                 JS_ToInt32(ctx, &status, rc);
                 JS_FreeValue(ctx, rc);
                 if (status == 1) {
-                    if (error != NULL) *error = "WritableStream is locked";
+                    if (error != NULL)
+                        *error = "WritableStream is locked";
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 if (status == 2) {
-                    if (error != NULL) *error = "WritableStream is closed or errored";
+                    if (error != NULL)
+                        *error = "WritableStream is closed or errored";
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 if (status == 0) {
@@ -8912,18 +8929,19 @@ class WorkerRuntime {
                     if (!self->binding_streams_.open_stream(
                             capsid::BindingStreamKind::kWritable, producer_side, cctx->request_id,
                             cctx->binding_id, cctx->table_index, &stream_id, &qerr)) {
-                        if (error != NULL) *error = capsid::binding_quota_error_message(qerr);
+                        if (error != NULL)
+                            *error = capsid::binding_quota_error_message(qerr);
                         return capsid::BindingCloneHookResult::kFailed;
                     }
                     JSValue id_js = capsid::binding_call_id_to_js(ctx, stream_id);
-                    JSValue on_wdone = JS_NewCFunctionData2(
-                        ctx, on_binding_writable_write_done, "onSinkWriteDone", 0, 0, 1, &id_js);
-                    JSValue on_werr = JS_NewCFunctionData2(
-                        ctx, on_binding_writable_write_err, "onSinkWriteErr", 1, 0, 1, &id_js);
-                    JSValue on_cdone = JS_NewCFunctionData2(
-                        ctx, on_binding_writable_close_done, "onSinkCloseDone", 0, 0, 1, &id_js);
-                    JSValue on_cerr = JS_NewCFunctionData2(
-                        ctx, on_binding_writable_close_err, "onSinkCloseErr", 1, 0, 1, &id_js);
+                    JSValue on_wdone = JS_NewCFunctionData2(ctx, on_binding_writable_write_done,
+                                                            "onSinkWriteDone", 0, 0, 1, &id_js);
+                    JSValue on_werr = JS_NewCFunctionData2(ctx, on_binding_writable_write_err,
+                                                           "onSinkWriteErr", 1, 0, 1, &id_js);
+                    JSValue on_cdone = JS_NewCFunctionData2(ctx, on_binding_writable_close_done,
+                                                            "onSinkCloseDone", 0, 0, 1, &id_js);
+                    JSValue on_cerr = JS_NewCFunctionData2(ctx, on_binding_writable_close_err,
+                                                           "onSinkCloseErr", 1, 0, 1, &id_js);
                     JS_FreeValue(ctx, id_js);
                     if (JS_IsException(on_wdone) || JS_IsException(on_werr) ||
                         JS_IsException(on_cdone) || JS_IsException(on_cerr)) {
@@ -8932,7 +8950,8 @@ class WorkerRuntime {
                         JS_FreeValue(ctx, on_cdone);
                         JS_FreeValue(ctx, on_cerr);
                         self->binding_streams_.close_and_erase(stream_id);
-                        if (error != NULL) *error = "failed to allocate writable sink callbacks";
+                        if (error != NULL)
+                            *error = "failed to allocate writable sink callbacks";
                         return capsid::BindingCloneHookResult::kFailed;
                     }
                     JSValue sink_arg = JS_DupValue(ctx, value);
@@ -8951,7 +8970,8 @@ class WorkerRuntime {
                         JS_FreeValue(ctx, on_cdone);
                         JS_FreeValue(ctx, on_cerr);
                         self->binding_streams_.close_and_erase(stream_id);
-                        if (error != NULL) *error = "failed to lock WritableStream sink";
+                        if (error != NULL)
+                            *error = "failed to lock WritableStream sink";
                         return capsid::BindingCloneHookResult::kFailed;
                     }
                     ActiveBindingStream ep;
@@ -8977,14 +8997,16 @@ class WorkerRuntime {
             if (JS_IsException(info)) {
                 JSValue exc = JS_GetException(ctx);
                 JS_FreeValue(ctx, exc);
-                if (error != NULL) *error = "Request inspection failed";
+                if (error != NULL)
+                    *error = "Request inspection failed";
                 return capsid::BindingCloneHookResult::kFailed;
             }
             if (JS_IsObject(info)) {
                 std::string inspect_err;
                 if (read_js_string_prop(ctx, info, "error", &inspect_err)) {
                     JS_FreeValue(ctx, info);
-                    if (error != NULL) *error = inspect_err;
+                    if (error != NULL)
+                        *error = inspect_err;
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 capsid::NeutralHttpRequest req;
@@ -8996,8 +9018,7 @@ class WorkerRuntime {
                     req.has_mode = true;
                 }
                 JSValue headers_val = JS_GetPropertyStr(ctx, info, "headers");
-                const bool headers_ok =
-                    read_js_header_pairs(ctx, headers_val, &req.headers, error);
+                const bool headers_ok = read_js_header_pairs(ctx, headers_val, &req.headers, error);
                 JS_FreeValue(ctx, headers_val);
                 if (!headers_ok) {
                     JS_FreeValue(ctx, info);
@@ -9062,9 +9083,9 @@ class WorkerRuntime {
                                 req.signal_pre_aborted = true;
                             } else {
                                 JSValue bid_js = capsid::binding_call_id_to_js(ctx, bid);
-                                JSValue listener = JS_NewCFunctionData2(
-                                    ctx, on_binding_request_signal_abort, "onReqSignalAbort", 0, 0,
-                                    1, &bid_js);
+                                JSValue listener =
+                                    JS_NewCFunctionData2(ctx, on_binding_request_signal_abort,
+                                                         "onReqSignalAbort", 0, 0, 1, &bid_js);
                                 JS_FreeValue(ctx, bid_js);
                                 if (!JS_IsException(listener) &&
                                     capsid::binding_signal_add_abort_listener(ctx, sig_val,
@@ -9103,14 +9124,16 @@ class WorkerRuntime {
             if (JS_IsException(info)) {
                 JSValue exc = JS_GetException(ctx);
                 JS_FreeValue(ctx, exc);
-                if (error != NULL) *error = "Response inspection failed";
+                if (error != NULL)
+                    *error = "Response inspection failed";
                 return capsid::BindingCloneHookResult::kFailed;
             }
             if (JS_IsObject(info)) {
                 std::string inspect_err;
                 if (read_js_string_prop(ctx, info, "error", &inspect_err)) {
                     JS_FreeValue(ctx, info);
-                    if (error != NULL) *error = inspect_err;
+                    if (error != NULL)
+                        *error = inspect_err;
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 capsid::NeutralHttpResponse res;
@@ -9126,8 +9149,7 @@ class WorkerRuntime {
                 res.redirected = JS_ToBool(ctx, redir_val) != 0;
                 JS_FreeValue(ctx, redir_val);
                 JSValue headers_val = JS_GetPropertyStr(ctx, info, "headers");
-                const bool headers_ok =
-                    read_js_header_pairs(ctx, headers_val, &res.headers, error);
+                const bool headers_ok = read_js_header_pairs(ctx, headers_val, &res.headers, error);
                 JS_FreeValue(ctx, headers_val);
                 if (!headers_ok) {
                     JS_FreeValue(ctx, info);
@@ -9202,7 +9224,8 @@ class WorkerRuntime {
             if (JS_IsException(is_target)) {
                 JSValue exc = JS_GetException(ctx);
                 JS_FreeValue(ctx, exc);
-                if (error != NULL) *error = "RpcTarget brand check failed";
+                if (error != NULL)
+                    *error = "RpcTarget brand check failed";
                 return capsid::BindingCloneHookResult::kFailed;
             }
             const bool matched = JS_ToBool(ctx, is_target) != 0;
@@ -9231,10 +9254,9 @@ class WorkerRuntime {
                             const uint64_t now_ns = uv_hrtime();
                             const uint64_t max_ms =
                                 std::numeric_limits<uint64_t>::max() / UINT64_C(1000000);
-                            const uint64_t clamped_ms =
-                                (lms >= static_cast<double>(max_ms))
-                                    ? max_ms
-                                    : static_cast<uint64_t>(lms);
+                            const uint64_t clamped_ms = (lms >= static_cast<double>(max_ms))
+                                                            ? max_ms
+                                                            : static_cast<uint64_t>(lms);
                             const uint64_t delta_ns = clamped_ms * UINT64_C(1000000);
                             const uint64_t requested_deadline =
                                 (std::numeric_limits<uint64_t>::max() - now_ns >= delta_ns)
@@ -9304,10 +9326,10 @@ class WorkerRuntime {
                 return JS_ThrowInternalError(ctx, "binding readable stream proxy expired");
             }
             JSValue id_js = capsid::binding_call_id_to_js(ctx, value.stream_id);
-            JSValue on_pull = JS_NewCFunctionData2(
-                ctx, js_binding_readable_pull, "onProxyPull", 0, 0, 1, &id_js);
-            JSValue on_cancel = JS_NewCFunctionData2(
-                ctx, js_binding_readable_cancel, "onProxyCancel", 1, 0, 1, &id_js);
+            JSValue on_pull =
+                JS_NewCFunctionData2(ctx, js_binding_readable_pull, "onProxyPull", 0, 0, 1, &id_js);
+            JSValue on_cancel = JS_NewCFunctionData2(ctx, js_binding_readable_cancel,
+                                                     "onProxyCancel", 1, 0, 1, &id_js);
             JS_FreeValue(ctx, id_js);
             if (JS_IsException(on_pull) || JS_IsException(on_cancel)) {
                 JS_FreeValue(ctx, on_pull);
@@ -9315,8 +9337,7 @@ class WorkerRuntime {
                 return JS_EXCEPTION;
             }
             JSValue args[2] = {on_pull, on_cancel};
-            JSValue created =
-                JS_Call(ctx, bridge->create_readable_proxy, JS_UNDEFINED, 2, args);
+            JSValue created = JS_Call(ctx, bridge->create_readable_proxy, JS_UNDEFINED, 2, args);
             JS_FreeValue(ctx, on_pull);
             JS_FreeValue(ctx, on_cancel);
             if (JS_IsException(created) || !JS_IsObject(created)) {
@@ -9340,12 +9361,12 @@ class WorkerRuntime {
                 return JS_ThrowInternalError(ctx, "binding writable stream proxy expired");
             }
             JSValue id_js = capsid::binding_call_id_to_js(ctx, value.stream_id);
-            JSValue on_write = JS_NewCFunctionData2(
-                ctx, js_binding_writable_write, "onProxyWrite", 1, 0, 1, &id_js);
-            JSValue on_close = JS_NewCFunctionData2(
-                ctx, js_binding_writable_close, "onProxyClose", 0, 0, 1, &id_js);
-            JSValue on_abort = JS_NewCFunctionData2(
-                ctx, js_binding_writable_abort, "onProxyAbort", 1, 0, 1, &id_js);
+            JSValue on_write = JS_NewCFunctionData2(ctx, js_binding_writable_write, "onProxyWrite",
+                                                    1, 0, 1, &id_js);
+            JSValue on_close = JS_NewCFunctionData2(ctx, js_binding_writable_close, "onProxyClose",
+                                                    0, 0, 1, &id_js);
+            JSValue on_abort = JS_NewCFunctionData2(ctx, js_binding_writable_abort, "onProxyAbort",
+                                                    1, 0, 1, &id_js);
             JS_FreeValue(ctx, id_js);
             if (JS_IsException(on_write) || JS_IsException(on_close) || JS_IsException(on_abort)) {
                 JS_FreeValue(ctx, on_write);
@@ -9354,8 +9375,7 @@ class WorkerRuntime {
                 return JS_EXCEPTION;
             }
             JSValue args[3] = {on_write, on_close, on_abort};
-            JSValue created =
-                JS_Call(ctx, bridge->create_writable_proxy, JS_UNDEFINED, 3, args);
+            JSValue created = JS_Call(ctx, bridge->create_writable_proxy, JS_UNDEFINED, 3, args);
             JS_FreeValue(ctx, on_write);
             JS_FreeValue(ctx, on_close);
             JS_FreeValue(ctx, on_abort);
@@ -9395,9 +9415,9 @@ class WorkerRuntime {
                     0 &&
                 JS_SetPropertyStr(ctx, meta, "headers", flat_headers) >= 0;
             if (req.has_mode) {
-                ok = ok && JS_SetPropertyStr(
-                               ctx, meta, "mode",
-                               JS_NewStringLen(ctx, req.mode.data(), req.mode.size())) >= 0;
+                ok = ok &&
+                     JS_SetPropertyStr(ctx, meta, "mode",
+                                       JS_NewStringLen(ctx, req.mode.data(), req.mode.size())) >= 0;
             } else {
                 ok = ok && JS_SetPropertyStr(ctx, meta, "mode", JS_NULL) >= 0;
             }
@@ -9408,8 +9428,7 @@ class WorkerRuntime {
 
             JSValue body = JS_NULL;
             if (req.body_kind == 1) {
-                body =
-                    JS_NewUint8ArrayCopy(ctx, req.inline_bytes.data(), req.inline_bytes.size());
+                body = JS_NewUint8ArrayCopy(ctx, req.inline_bytes.data(), req.inline_bytes.size());
                 if (JS_IsException(body)) {
                     JS_FreeValue(ctx, meta);
                     return body;
@@ -9430,8 +9449,8 @@ class WorkerRuntime {
                 auto sb_it = self->active_signal_bridges_.find(req.signal_bridge_id);
                 if (sb_it != self->active_signal_bridges_.end() &&
                     JS_IsFunction(ctx, bridge->create_proxy_abort_controller)) {
-                    JSValue ctrl = JS_Call(ctx, bridge->create_proxy_abort_controller, JS_UNDEFINED,
-                                           0, NULL);
+                    JSValue ctrl =
+                        JS_Call(ctx, bridge->create_proxy_abort_controller, JS_UNDEFINED, 0, NULL);
                     if (!JS_IsException(ctrl) && JS_IsObject(ctrl)) {
                         signal = JS_GetPropertyStr(ctx, ctrl, "signal");
                         if (sb_it->second.aborted) {
@@ -9468,8 +9487,7 @@ class WorkerRuntime {
             }
 
             JSValue args[3] = {meta, body, signal};
-            JSValue req_obj =
-                JS_Call(ctx, bridge->create_proxy_request, JS_UNDEFINED, 3, args);
+            JSValue req_obj = JS_Call(ctx, bridge->create_proxy_request, JS_UNDEFINED, 3, args);
             JS_FreeValue(ctx, meta);
             JS_FreeValue(ctx, body);
             JS_FreeValue(ctx, signal);
@@ -9504,8 +9522,7 @@ class WorkerRuntime {
 
             JSValue body = JS_NULL;
             if (res.body_kind == 1) {
-                body =
-                    JS_NewUint8ArrayCopy(ctx, res.inline_bytes.data(), res.inline_bytes.size());
+                body = JS_NewUint8ArrayCopy(ctx, res.inline_bytes.data(), res.inline_bytes.size());
                 if (JS_IsException(body)) {
                     JS_FreeValue(ctx, meta);
                     return body;
@@ -9522,8 +9539,7 @@ class WorkerRuntime {
             }
 
             JSValue args[2] = {meta, body};
-            JSValue res_obj =
-                JS_Call(ctx, bridge->create_proxy_response, JS_UNDEFINED, 2, args);
+            JSValue res_obj = JS_Call(ctx, bridge->create_proxy_response, JS_UNDEFINED, 2, args);
             JS_FreeValue(ctx, meta);
             JS_FreeValue(ctx, body);
             return res_obj;
@@ -9591,8 +9607,8 @@ class WorkerRuntime {
                     JS_FreeValue(ctx, async_disp);
                     ok = false;
                 } else {
-                    if (JS_DefinePropertyValueStr(ctx, stub, "dispose",
-                                                  JS_DupValue(ctx, sync_disp), 0) < 0) {
+                    if (JS_DefinePropertyValueStr(ctx, stub, "dispose", JS_DupValue(ctx, sync_disp),
+                                                  0) < 0) {
                         ok = false;
                     }
                     if (ok && JS_IsSymbol(self->user_binding_intrinsics_.symbol_dispose)) {
@@ -9750,8 +9766,8 @@ class WorkerRuntime {
         capsid::NeutralValue nv;
         if (!capsid::neutral_from_js(ctx, chunk, &nv, &err_msg)) {
             self->binding_streams_.fail_from_producer(
-                stream_id, capsid::RemoteErrorInfo::make_type_error("stream chunk is not cloneable: " +
-                                                                    err_msg));
+                stream_id, capsid::RemoteErrorInfo::make_type_error(
+                               "stream chunk is not cloneable: " + err_msg));
         } else {
             const size_t weight = capsid::estimate_neutral_value_bytes(nv);
             if (!self->binding_streams_.enqueue_value(stream_id, std::move(nv), weight, &err_msg)) {
@@ -9871,12 +9887,12 @@ class WorkerRuntime {
         uint64_t stream_id = 0;
         if (self == NULL || func_data == NULL ||
             !capsid::binding_call_id_from_js(ctx, func_data[0], &stream_id)) {
-            return rejected_promise(
-                ctx, capsid::materialize_remote_error(
-                         ctx,
-                         capsid::RemoteErrorInfo::make_dom_exception("InvalidStateError",
-                                                                     "binding writable stream closed"),
-                         NULL));
+            return rejected_promise(ctx,
+                                    capsid::materialize_remote_error(
+                                        ctx,
+                                        capsid::RemoteErrorInfo::make_dom_exception(
+                                            "InvalidStateError", "binding writable stream closed"),
+                                        NULL));
         }
         capsid::BindingStreamRecord* rec = self->binding_streams_.find(stream_id);
         auto ep_it = self->active_binding_streams_.find(stream_id);
@@ -9884,8 +9900,8 @@ class WorkerRuntime {
             return rejected_promise(
                 ctx, capsid::materialize_remote_error(
                          ctx,
-                         capsid::RemoteErrorInfo::make_dom_exception("InvalidStateError",
-                                                                     "binding writable stream closed"),
+                         capsid::RemoteErrorInfo::make_dom_exception(
+                             "InvalidStateError", "binding writable stream closed"),
                          ctx == self->ctx_ ? &self->user_binding_intrinsics_ : NULL));
         }
         JSValue rejection = JS_UNDEFINED;
@@ -10170,8 +10186,8 @@ class WorkerRuntime {
                         (rec->consumer_side == capsid::BindingStreamSide::kBinding);
                     auto deliver = [&]() {
                         if (frame.type == capsid::BindingStreamFrame::Type::kBytes) {
-                            JSValue chunk = JS_NewUint8ArrayCopy(
-                                consumer_ctx, frame.bytes.data(), frame.bytes.size());
+                            JSValue chunk = JS_NewUint8ArrayCopy(consumer_ctx, frame.bytes.data(),
+                                                                 frame.bytes.size());
                             call_js_method_ignore(consumer_ctx, ep.readable_proxy_ctrl, "enqueue",
                                                   1, &chunk);
                             JS_FreeValue(consumer_ctx, chunk);
@@ -10385,10 +10401,9 @@ class WorkerRuntime {
         JSContext* producer_ctx = stream_side_ctx(rec_copy, rec_copy.producer_side);
         JSContext* consumer_ctx = stream_side_ctx(rec_copy, rec_copy.consumer_side);
         const capsid::RemoteErrorInfo reason =
-            rec_copy.has_terminal_error
-                ? rec_copy.terminal_error
-                : capsid::RemoteErrorInfo::make_dom_exception("AbortError",
-                                                              "binding stream was canceled");
+            rec_copy.has_terminal_error ? rec_copy.terminal_error
+                                        : capsid::RemoteErrorInfo::make_dom_exception(
+                                              "AbortError", "binding stream was canceled");
 
         if (notify_endpoints && !shutting_down_) {
             if (producer_ctx != NULL) {
@@ -10540,11 +10555,11 @@ class WorkerRuntime {
                                                &self->user_binding_intrinsics_, &user_reason);
         }
         if (JS_IsUndefined(user_reason)) {
-            user_reason = capsid::materialize_remote_error(
-                ctx,
-                capsid::RemoteErrorInfo::make_dom_exception("AbortError",
-                                                            "The operation was aborted"),
-                &self->user_binding_intrinsics_);
+            user_reason =
+                capsid::materialize_remote_error(ctx,
+                                                 capsid::RemoteErrorInfo::make_dom_exception(
+                                                     "AbortError", "The operation was aborted"),
+                                                 &self->user_binding_intrinsics_);
         }
         capsid::capture_abort_reason(ctx, user_reason, &self->user_binding_intrinsics_,
                                      &call.cancel_reason);
@@ -10715,9 +10730,8 @@ class WorkerRuntime {
                 binding_scheduler_.cancel_call(call.table_index, it->first);
             }
             call.cancel_reason.kind = capsid::BindingAbortReason::Kind::kRemoteError;
-            call.cancel_reason.error =
-                capsid::RemoteErrorInfo::make_dom_exception("TimeoutError",
-                                                            "binding call timed out");
+            call.cancel_reason.error = capsid::RemoteErrorInfo::make_dom_exception(
+                "TimeoutError", "binding call timed out");
             if (call.state == BindingCallState::kDispatched) {
                 abort_binding_controller(call, true);
             }
@@ -11023,9 +11037,8 @@ class WorkerRuntime {
         }
         if (ctx_ != NULL) {
             if (!JS_IsUndefined(call.user_signal) && !JS_IsUndefined(call.user_abort_listener)) {
-                capsid::binding_signal_remove_abort_listener(ctx_, call.user_signal,
-                                                             call.user_abort_listener,
-                                                             &user_binding_intrinsics_);
+                capsid::binding_signal_remove_abort_listener(
+                    ctx_, call.user_signal, call.user_abort_listener, &user_binding_intrinsics_);
             }
             JS_FreeValue(ctx_, call.user_abort_listener);
             call.user_abort_listener = JS_UNDEFINED;

@@ -4,7 +4,7 @@
   "sourceBaseline": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
   "meaning": "Reviewed means current maintained claims or explicit historical disposition reviewed; not every page rewritten, every command executed, or historical result requalified.",
   "counts": {
-    "current-reference": 45,
+    "current-reference": 46,
     "historical-translation": 38,
     "immutable-evidence": 1,
     "historical-plan-or-journal": 18,
@@ -72,8 +72,16 @@
       "kind": "current-reference",
       "reviewed": true,
       "hashMode": "canonical-lf-text",
-      "sha256": "763a813b1205b48a232fd401ba7f6227a5b95286e7342c4f5d251be20016734c",
+      "sha256": "b5e27c183cbd9c52a12e901936aca39eb100b8f1cb9532c353c7c58acfb0df1f",
       "review": "Task-oriented index and physical filing rules for guides, reference, design, history, evidence and data."
+    },
+    {
+      "path": "docs/design/binding-rpc-v2.md",
+      "kind": "current-reference",
+      "reviewed": true,
+      "hashMode": "canonical-lf-text",
+      "sha256": "bd56acb039d00addf9979a9770c8e6c8b3a90cf95d9c51f488f3a77e8baad8d7",
+      "review": "Binding RPC v2 (v0.4.0) design: fair shared-loop scheduler, 3-tier quota ledger, structured errors, AbortSignal/timeoutMs, bidirectional credit stream proxies, Request/Response proxies, and RpcTarget handles with leases and GC disposal."
     },
     {
       "path": "docs/design/bindings-v1.md",

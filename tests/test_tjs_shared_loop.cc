@@ -275,10 +275,8 @@ void test_fair_microtask_job_budget() {
     uv_run(loop, UV_RUN_NOWAIT);
     const double user_after_one = global_number(user_ctx, "steps");
     const double binding_after_one = global_number(binding_ctx, "ran");
-    require(binding_after_one == 1,
-            "sibling runtime was starved on the first bounded turn");
-    require(user_after_one > 0 && user_after_one < 200,
-            "microtask storm was not bounded per turn");
+    require(binding_after_one == 1, "sibling runtime was starved on the first bounded turn");
+    require(user_after_one > 0 && user_after_one < 200, "microtask storm was not bounded per turn");
 
     // Subsequent turns complete all 200 steps cleanly.
     for (int turn = 0; turn < 200; ++turn) {

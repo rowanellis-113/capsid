@@ -14,7 +14,7 @@ std::uint64_t BindingStreamTable::allocate_stream_id() {
     for (std::size_t probe = 0; probe <= streams_.size(); ++probe) {
         const std::uint64_t candidate = next_stream_id_;
         next_stream_id_ =
-            candidate == std::numeric_limits<std::uint64_t>::max() ? 1 : candidate + 1;
+            candidate == (std::numeric_limits<std::uint64_t>::max)() ? 1 : candidate + 1;
         if (candidate != 0 && streams_.count(candidate) == 0) {
             return candidate;
         }

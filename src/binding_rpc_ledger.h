@@ -113,9 +113,7 @@ class BindingRpcLedger {
 
     std::size_t tracked_requests() const { return by_request_.size(); }
     std::size_t tracked_bindings() const { return by_binding_.size(); }
-    bool empty() const {
-        return worker_.is_zero() && by_request_.empty() && by_binding_.empty();
-    }
+    bool empty() const { return worker_.is_zero() && by_request_.empty() && by_binding_.empty(); }
 
     void clear();
 

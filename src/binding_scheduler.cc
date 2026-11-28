@@ -13,9 +13,7 @@ BindingScheduler::BindingScheduler(const BindingSchedulerConfig& config) : confi
     std::memset(&check_, 0, sizeof(check_));
 }
 
-BindingScheduler::~BindingScheduler() {
-    detach();
-}
+BindingScheduler::~BindingScheduler() { detach(); }
 
 void BindingScheduler::configure_bindings(std::size_t binding_count) {
     call_queues_.clear();

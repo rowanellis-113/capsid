@@ -91,8 +91,8 @@ class WorkerHarness {
 
     HttpResponse get(std::uint64_t request_id, const std::string& path) {
         const std::string url = "https://v2.test" + path;
-        require_result(capsid_worker_begin_bodyless_request(worker_, request_id, "GET",
-                                                            url.c_str(), nullptr, 0),
+        require_result(capsid_worker_begin_bodyless_request(worker_, request_id, "GET", url.c_str(),
+                                                            nullptr, 0),
                        "begin GET");
         HttpResponse response;
         receive_until([&](const capsid_event& event) {
@@ -103,16 +103,16 @@ class WorkerHarness {
                 return false;
             }
             if (event.type == CAPSID_EVENT_RESPONSE_HEAD) {
-                response.status = event.status;
+                response.status = static_cast<std::uint16_t>(event.status);
                 return false;
             }
             if (event.type == CAPSID_EVENT_RESPONSE_BODY) {
                 response.body.append(reinterpret_cast<const char*>(event.payload.data),
                                      event.payload.size);
-                require_result(capsid_worker_grant_response_credit(
-                                   worker_, request_id,
-                                   static_cast<std::uint32_t>(event.payload.size)),
-                               "grant credit");
+                require_result(
+                    capsid_worker_grant_response_credit(
+                        worker_, request_id, static_cast<std::uint32_t>(event.payload.size)),
+                    "grant credit");
                 return false;
             }
             if (event.type == CAPSID_EVENT_RESPONSE_END) {
@@ -140,8 +140,8 @@ class WorkerHarness {
                 if (event.type == CAPSID_EVENT_ERROR) {
                     const std::string msg(reinterpret_cast<const char*>(event.payload.data),
                                           event.payload.size);
-                    require(false, "worker error (req=" + std::to_string(event.request_id) +
-                                       "): " + msg);
+                    require(false,
+                            "worker error (req=" + std::to_string(event.request_id) + "): " + msg);
                 }
                 if (consume(event)) {
                     return;
@@ -163,26 +163,24 @@ class WorkerHarness {
 // M4A-1: Immediate shared-loop wake, round-robin fairness across multiple
 // Bindings, and bounded per-turn microtask preemption.
 void test_m4a_fair_scheduling(const char* worker_path) {
-    const std::string alpha_src =
-        "let seq = 0;"
-        "export default () => ({"
-        "  ping(n) { return { b: 'a', n, seq: ++seq }; },"
-        "  storm(count) {"
-        "    return new Promise((resolve) => {"
-        "      let i = 0;"
-        "      function step() {"
-        "        if (++i >= count) resolve(i);"
-        "        else Promise.resolve().then(step);"
-        "      }"
-        "      Promise.resolve().then(step);"
-        "    });"
-        "  }"
-        "});";
-    const std::string beta_src =
-        "let seq = 0;"
-        "export default () => ({"
-        "  ping(n) { return { b: 'b', n, seq: ++seq }; }"
-        "});";
+    const std::string alpha_src = "let seq = 0;"
+                                  "export default () => ({"
+                                  "  ping(n) { return { b: 'a', n, seq: ++seq }; },"
+                                  "  storm(count) {"
+                                  "    return new Promise((resolve) => {"
+                                  "      let i = 0;"
+                                  "      function step() {"
+                                  "        if (++i >= count) resolve(i);"
+                                  "        else Promise.resolve().then(step);"
+                                  "      }"
+                                  "      Promise.resolve().then(step);"
+                                  "    });"
+                                  "  }"
+                                  "});";
+    const std::string beta_src = "let seq = 0;"
+                                 "export default () => ({"
+                                 "  ping(n) { return { b: 'b', n, seq: ++seq }; }"
+                                 "});";
     const std::string app_src =
         "import alpha from 'capsid:binding/alpha';"
         "import beta from 'capsid:binding/beta';"
@@ -226,8 +224,7 @@ void test_m4a_fair_scheduling(const char* worker_path) {
             "malformed rr body: " + rr.body);
     const int first_b = std::atoi(rr.body.c_str() + first_b_pos + 9);
     const int last_a = std::atoi(rr.body.c_str() + last_a_pos + 8);
-    require(first_b >= 0 && first_b < last_a,
-            "beta was head-of-line starved by alpha: " + rr.body);
+    require(first_b >= 0 && first_b < last_a, "beta was head-of-line starved by alpha: " + rr.body);
 
     const HttpResponse storm = harness.get(2, "/storm");
     require(storm.status == 200, "storm status != 200: " + storm.body);
@@ -394,11 +391,10 @@ export default {
     WorkerHarness harness(worker_path, {{"svc", binding_src}}, app_src);
     const HttpResponse res = harness.get(1, "/");
     require(res.status == 200, "options status != 200: " + res.body);
-    require(res.body ==
-                "{\"preAborted\":true,\"zeroTimeout\":true,\"badRejected\":4,"
-                "\"optGetterRan\":false,\"countBeforeLive\":0,\"inflightAbort\":true,"
-                "\"bindingSawAbort\":true,\"callTimeout\":true,\"bindingSawTimeout\":true,"
-                "\"reusedSignalOk\":80}",
+    require(res.body == "{\"preAborted\":true,\"zeroTimeout\":true,\"badRejected\":4,"
+                        "\"optGetterRan\":false,\"countBeforeLive\":0,\"inflightAbort\":true,"
+                        "\"bindingSawAbort\":true,\"callTimeout\":true,\"bindingSawTimeout\":true,"
+                        "\"reusedSignalOk\":80}",
             "options/signal/timeout assertions failed: " + res.body);
 }
 
@@ -601,10 +597,9 @@ export default {
     WorkerHarness harness(worker_path, {{"svc", binding_src}}, app_src);
     const HttpResponse res = harness.get(1, "/readable");
     require(res.status == 200, "m4b readable status != 200: " + res.body);
-    require(res.body ==
-                "{\"backpressured\":true,\"total320k\":true,\"finalProduced\":20,"
-                "\"uploadOk\":true,\"cancelOk\":true,\"errorOk\":true,"
-                "\"rejectsOk\":true,\"lateDisposed\":true}",
+    require(res.body == "{\"backpressured\":true,\"total320k\":true,\"finalProduced\":20,"
+                        "\"uploadOk\":true,\"cancelOk\":true,\"errorOk\":true,"
+                        "\"rejectsOk\":true,\"lateDisposed\":true}",
             "m4b readable assertions failed: " + res.body);
 }
 
@@ -718,9 +713,8 @@ export default {
     WorkerHarness harness(worker_path, {{"svc", binding_src}}, app_src);
     const HttpResponse res = harness.get(1, "/");
     require(res.status == 200, "m4b writable status != 200: " + res.body);
-    require(res.body ==
-                "{\"slowSinkOk\":true,\"userSinkOk\":true,\"sinkErrOk\":true,"
-                "\"abortOk\":true,\"lockedOk\":true}",
+    require(res.body == "{\"slowSinkOk\":true,\"userSinkOk\":true,\"sinkErrOk\":true,"
+                        "\"abortOk\":true,\"lockedOk\":true}",
             "m4b writable assertions failed: " + res.body);
 }
 
@@ -799,7 +793,8 @@ export default {
             if (r == CAPSID_OK) {
                 require(ev.type != CAPSID_EVENT_ERROR && ev.type != CAPSID_EVENT_EXIT,
                         "unexpected worker error/exit in fence test");
-                if (predicate(ev)) return;
+                if (predicate(ev))
+                    return;
                 continue;
             }
             require(r == CAPSID_WOULD_BLOCK, "next_event");
@@ -812,18 +807,19 @@ export default {
     };
 
     wait_events([](const capsid_event& ev) { return ev.type == CAPSID_EVENT_READY; });
-    require_result(capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/hold",
-                                                        nullptr, 0),
-                   "begin hold");
+    require_result(
+        capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/hold", nullptr, 0),
+        "begin hold");
     // Wait deterministically until req 1 has opened the stream and armed releaseHold.
     wait_events([](const capsid_event& ev) {
-        if (ev.type != CAPSID_EVENT_LOG) return false;
+        if (ev.type != CAPSID_EVENT_LOG)
+            return false;
         const std::string text(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
         return text.find("hold-ready") != std::string::npos;
     });
-    require_result(capsid_worker_begin_bodyless_request(worker, 2, "GET", "https://v2.test/steal",
-                                                        nullptr, 0),
-                   "begin steal");
+    require_result(
+        capsid_worker_begin_bodyless_request(worker, 2, "GET", "https://v2.test/steal", nullptr, 0),
+        "begin steal");
 
     std::string body1, body2;
     bool end1 = false, end2 = false;
@@ -836,8 +832,10 @@ export default {
             capsid_worker_grant_response_credit(worker, ev.request_id,
                                                 static_cast<std::uint32_t>(ev.payload.size));
         } else if (ev.type == CAPSID_EVENT_RESPONSE_END) {
-            if (ev.request_id == 1) end1 = true;
-            if (ev.request_id == 2) end2 = true;
+            if (ev.request_id == 1)
+                end1 = true;
+            if (ev.request_id == 2)
+                end2 = true;
         }
         return end1 && end2;
     });
@@ -1036,10 +1034,9 @@ export default {
 
     const HttpResponse res = harness.get(1, "/m4c");
     require(res.status == 200, "m4c status != 200: " + res.body);
-    require(res.body ==
-                "{\"inlineReq\":true,\"reuseReqRejected\":true,\"streamReq\":true,"
-                "\"preSignal\":true,\"liveSignal\":true,\"inlineRes\":true,"
-                "\"res204\":true,\"resErr\":true,\"negatives\":true}",
+    require(res.body == "{\"inlineReq\":true,\"reuseReqRejected\":true,\"streamReq\":true,"
+                        "\"preSignal\":true,\"liveSignal\":true,\"inlineRes\":true,"
+                        "\"res204\":true,\"resErr\":true,\"negatives\":true}",
             "m4c assertions failed: " + res.body);
 
     // Direct streaming Response passthrough from Binding -> User fetch() -> Host!
@@ -1293,9 +1290,8 @@ export default {
     WorkerHarness harness(worker_path, {{"svc", binding_src}}, app_src);
     const HttpResponse r1 = harness.get(1, "/m4d-main");
     require(r1.status == 200, "m4d-main status != 200: " + r1.body);
-    require(r1.body ==
-                "{\"noUserRpcTarget\":true,\"stubShape\":true,\"basic\":true,"
-                "\"lease\":true,\"gcFallback\":true,\"malicious\":true,\"quota\":true}",
+    require(r1.body == "{\"noUserRpcTarget\":true,\"stubShape\":true,\"basic\":true,"
+                       "\"lease\":true,\"gcFallback\":true,\"malicious\":true,\"quota\":true}",
             "m4d-main assertions failed: " + r1.body);
 
     const HttpResponse r2 = harness.get(2, "/m4d-after");
@@ -1392,7 +1388,8 @@ export default {
             if (r == CAPSID_OK) {
                 require(ev.type != CAPSID_EVENT_ERROR && ev.type != CAPSID_EVENT_EXIT,
                         "unexpected worker error/exit in handle fence test");
-                if (predicate(ev)) return;
+                if (predicate(ev))
+                    return;
                 continue;
             }
             require(r == CAPSID_WOULD_BLOCK, "next_event");
@@ -1405,17 +1402,18 @@ export default {
     };
 
     wait_events([](const capsid_event& ev) { return ev.type == CAPSID_EVENT_READY; });
-    require_result(capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/hold",
-                                                        nullptr, 0),
-                   "begin hold");
+    require_result(
+        capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/hold", nullptr, 0),
+        "begin hold");
     wait_events([](const capsid_event& ev) {
-        if (ev.type != CAPSID_EVENT_LOG) return false;
+        if (ev.type != CAPSID_EVENT_LOG)
+            return false;
         const std::string text(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
         return text.find("handle-ready") != std::string::npos;
     });
-    require_result(capsid_worker_begin_bodyless_request(worker, 2, "GET", "https://v2.test/steal",
-                                                        nullptr, 0),
-                   "begin steal");
+    require_result(
+        capsid_worker_begin_bodyless_request(worker, 2, "GET", "https://v2.test/steal", nullptr, 0),
+        "begin steal");
 
     std::string body1, body2;
     bool end1 = false, end2 = false;
@@ -1428,8 +1426,10 @@ export default {
             capsid_worker_grant_response_credit(worker, ev.request_id,
                                                 static_cast<std::uint32_t>(ev.payload.size));
         } else if (ev.type == CAPSID_EVENT_RESPONSE_END) {
-            if (ev.request_id == 1) end1 = true;
-            if (ev.request_id == 2) end2 = true;
+            if (ev.request_id == 1)
+                end1 = true;
+            if (ev.request_id == 2)
+                end2 = true;
         }
         return end1 && end2;
     });

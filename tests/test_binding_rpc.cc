@@ -352,12 +352,14 @@ void test_remote_error_structured_and_tamper_proof() {
             "capture target intrinsics failed");
 
     // Mutate globals after capture: intrinsics must remain immune.
-    JS_FreeValue(target.ctx(), target.eval("globalThis.__origTypeError = TypeError;"
-                                           "globalThis.__origRangeError = RangeError;"
-                                           "globalThis.__origDOMException = DOMException;"
-                                           "globalThis.__origQuotaExceededError = QuotaExceededError;"
-                                           "globalThis.TypeError = function() { throw new Error('tampered'); };"
-                                           "globalThis.DOMException = function() { throw new Error('tampered'); };"));
+    JS_FreeValue(
+        target.ctx(),
+        target.eval("globalThis.__origTypeError = TypeError;"
+                    "globalThis.__origRangeError = RangeError;"
+                    "globalThis.__origDOMException = DOMException;"
+                    "globalThis.__origQuotaExceededError = QuotaExceededError;"
+                    "globalThis.TypeError = function() { throw new Error('tampered'); };"
+                    "globalThis.DOMException = function() { throw new Error('tampered'); };"));
 
     // Native Error subclasses round-trip cleanly.
     struct Case {
@@ -374,7 +376,8 @@ void test_remote_error_structured_and_tamper_proof() {
         {"new SyntaxError('bad json')", capsid::RemoteErrorKind::kSyntaxError, "bad json",
          "e.name === 'SyntaxError' && e.message === 'bad json'"},
         {"new DOMException('timed out', 'TimeoutError')", capsid::RemoteErrorKind::kDOMException,
-         "timed out", "(e instanceof __origDOMException) && e.name === 'TimeoutError' && e.message === 'timed out'"},
+         "timed out",
+         "(e instanceof __origDOMException) && e.name === 'TimeoutError' && e.message === 'timed out'"},
         {"new QuotaExceededError('too big', { quota: 64, requested: 128 })",
          capsid::RemoteErrorKind::kQuotaExceededError, "too big",
          "(e instanceof __origQuotaExceededError) && e.quota === 64 && e.requested === 128 && e.message === 'too big'"},
@@ -411,9 +414,9 @@ void test_remote_error_structured_and_tamper_proof() {
     require(JS_ToBool(source.ctx(), ran) == 0, "capture_remote_error executed hostile getter");
     JS_FreeValue(source.ctx(), ran);
 
-    JSValue proxy_err = source.eval(
-        "globalThis.__proxyTrapRan = false;"
-        "new Proxy({}, { get() { globalThis.__proxyTrapRan = true; return 'x'; } })");
+    JSValue proxy_err =
+        source.eval("globalThis.__proxyTrapRan = false;"
+                    "new Proxy({}, { get() { globalThis.__proxyTrapRan = true; return 'x'; } })");
     capsid::RemoteErrorInfo proxy_info;
     capsid::capture_remote_error(source.ctx(), proxy_err, &src_intrinsics, "proxy-fallback",
                                  &proxy_info);
