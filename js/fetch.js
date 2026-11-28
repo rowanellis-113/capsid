@@ -270,31 +270,30 @@ export function getBindingHttpTrackingStats() {
 
 function syncSlotIfCommitted(slot, target) {
   const tx = slot.pendingCommit;
-  if (tx !== null && tx.committed === true) {
-    const consumedStream = slot.pendingConsumedStream;
-    const mask = slot.pendingWritableMask;
-    slot.pendingCommit = null;
-    slot.pendingConsumedStream = null;
-    slot.pendingWritableMask = 0;
-    slot.bodyConsumed = true;
-    if (consumedStream !== null) {
-      slot.noBody = false;
-      slot.bodyFastKind = 0;
-      slot.bodyFastData = null;
-      slot.bodyStream = consumedStream;
-      if (target !== undefined) {
-        if (mask & 1) target._bodyExposed = true;
-        if (mask & 2) target._noBody = false;
-        if (mask & 4) target._bodySize = 0;
-        if (mask & 8) target._bodyFastKind = 0;
-        if (mask & 16) target._bodyFastData = null;
-        if (mask & 32) target._bodyStream = consumedStream;
-      }
-    }
-    if (target !== undefined && mask & 64) {
-      target._bodyConsumed = true;
-    }
+  if (tx === null || tx.committed !== true) {
+    return;
   }
+  const consumedStream = slot.pendingConsumedStream;
+  if (consumedStream !== null) {
+    slot.noBody = false;
+    slot.bodyFastKind = 0;
+    slot.bodyFastData = null;
+    slot.bodyStream = consumedStream;
+  }
+  slot.bodyConsumed = true;
+  if (target !== undefined) {
+    if (consumedStream !== null) {
+      safeSetOwnDataProp(target, '_bodyExposed', true);
+      safeSetOwnDataProp(target, '_noBody', false);
+      safeSetOwnDataProp(target, '_bodySize', 0);
+      safeSetOwnDataProp(target, '_bodyFastKind', 0);
+      safeSetOwnDataProp(target, '_bodyFastData', null);
+      safeSetOwnDataProp(target, '_bodyStream', consumedStream);
+    }
+    safeSetOwnDataProp(target, '_bodyConsumed', true);
+  }
+  slot.pendingCommit = null;
+  slot.pendingConsumedStream = null;
 }
 
 function syncPrivateBodySlot(target, noBody, bodyStream, bodyFastKind, bodyFastData) {
@@ -306,7 +305,6 @@ function syncPrivateBodySlot(target, noBody, bodyStream, bodyFastKind, bodyFastD
   if (slot !== undefined) {
     slot.pendingCommit = null;
     slot.pendingConsumedStream = null;
-    slot.pendingWritableMask = 0;
     slot.noBody = noBody;
     slot.bodyStream = bodyStream;
     slot.bodyFastKind = bodyFastKind;
@@ -325,7 +323,6 @@ function syncPrivateBodyConsumed(target, consumed) {
     if (!consumed) {
       slot.pendingCommit = null;
       slot.pendingConsumedStream = null;
-      slot.pendingWritableMask = 0;
     }
     slot.bodyConsumed = consumed;
   }
@@ -333,7 +330,13 @@ function syncPrivateBodyConsumed(target, consumed) {
 
 function canWriteOwnDataProp(obj, key) {
   const desc = bodyProperty(obj, key);
-  return desc !== undefined && desc.get === undefined && desc.set === undefined && desc.writable;
+  return (
+    desc !== undefined &&
+    !objectHasOwn(desc, 'get') &&
+    !objectHasOwn(desc, 'set') &&
+    objectHasOwn(desc, 'writable') &&
+    desc.writable === true
+  );
 }
 
 function safeSetOwnDataProp(obj, key, value) {
@@ -1262,50 +1265,31 @@ function createConsumedFastBodyStream() {
   return stream;
 }
 
-const CONSUMED_PUBLIC_KEYS = [
-  '_bodyExposed',
-  '_noBody',
-  '_bodySize',
-  '_bodyFastKind',
-  '_bodyFastData',
-  '_bodyStream',
-  '_bodyConsumed',
-];
-
 // U2 (single-store atomic commit epoch):
-// Phase 1 — allocate the shared commit token (`tx.committed = false`), every
-// terminal consumed stream, and every public own-property writability mask,
-// then link each slot to `tx`. Because `tx.committed` stays `false` until C++
-// flips it in a single uninterruptible property store, ANY failure or QuickJS
-// deadline interrupt during Phase 1 leaves ZERO observable state changes.
+// Phase 1 — allocate the shared commit token (`tx.committed = false`) and every
+// terminal consumed stream, then link each slot to `tx`. Because `tx.committed`
+// stays `false` until C++ flips it in a single uninterruptible property store,
+// ANY failure or QuickJS deadline interrupt during Phase 1 leaves ZERO
+// observable state changes.
 export function prepareHttpBodyConsumePlanForBinding(targets) {
   const count = targets.length;
   const tx = objectCreate(null);
   tx.committed = false;
   const slots = objectCreate(null);
   const streams = objectCreate(null);
-  const writableMasks = objectCreate(null);
   for (let i = 0; i < count; i++) {
     const target = targets[i];
     const slot = getPrivateBodySlot(target);
     if (slot === undefined) {
       throw new bodyTypeError('HTTP body slot missing for commit');
     }
-    let mask = 0;
-    for (let k = 0; k < CONSUMED_PUBLIC_KEYS.length; k++) {
-      if (canWriteOwnDataProp(target, CONSUMED_PUBLIC_KEYS[k])) {
-        mask |= 1 << k;
-      }
-    }
     slots[i] = slot;
     streams[i] = slot.bodyFastKind !== 0 ? createConsumedFastBodyStream() : null;
-    writableMasks[i] = mask;
   }
   for (let i = 0; i < count; i++) {
     const slot = slots[i];
-    slot.pendingCommit = tx;
     slot.pendingConsumedStream = streams[i];
-    slot.pendingWritableMask = writableMasks[i];
+    slot.pendingCommit = tx;
   }
   const plan = objectCreate(null);
   plan.tx = tx;
@@ -1317,8 +1301,10 @@ export function prepareHttpBodyConsumePlanForBinding(targets) {
 
 // Phase 2 — best-effort eager mirror/slot flush AFTER C++ has already
 // atomically published `plan.tx.committed = true`. Even if QuickJS interrupts
-// this loop partway through, every remaining slot already observes
-// `tx.committed === true` via `syncSlotIfCommitted`.
+// this loop partway through (including inside a single object's sync),
+// `pendingCommit` and `pendingConsumedStream` remain intact until all
+// authoritative private fields and live-checked mirror updates finish, so any
+// subsequent access retries idempotently via `syncSlotIfCommitted`.
 export function applyHttpBodyConsumePlanForBinding(plan) {
   const targets = plan.targets;
   const slots = plan.slots;
@@ -1403,7 +1389,6 @@ function materializeFastBodyFromSlot(target, slot) {
   const stream = createFastBodyStream(kind, data);
   slot.pendingCommit = null;
   slot.pendingConsumedStream = null;
-  slot.pendingWritableMask = 0;
   slot.noBody = false;
   slot.bodyStream = stream;
   slot.bodyFastKind = 0;
@@ -1996,7 +1981,6 @@ export function consumeFastResponseBody(response) {
       if (slot !== undefined) {
         slot.pendingCommit = null;
         slot.pendingConsumedStream = null;
-        slot.pendingWritableMask = 0;
         slot.bodyConsumed = true;
         safeSetOwnDataProp(response, '_bodyConsumed', true);
       } else if (!safeSetOwnDataProp(response, '_bodyConsumed', true)) {
@@ -2190,7 +2174,6 @@ function consumeBodyGuard(target) {
     }
     slot.pendingCommit = null;
     slot.pendingConsumedStream = null;
-    slot.pendingWritableMask = 0;
     slot.bodyConsumed = true;
     safeSetOwnDataProp(target, '_bodyConsumed', true);
     return null;
@@ -2589,7 +2572,6 @@ function assignRequestSlots(
       bodyStream,
       pendingCommit: null,
       pendingConsumedStream: null,
-      pendingWritableMask: 0,
     });
   }
 }
@@ -2897,7 +2879,6 @@ class Request {
         safeSetOwnDataProp(this, '_bodyStream', body1);
         slot.pendingCommit = null;
         slot.pendingConsumedStream = null;
-        slot.pendingWritableMask = 0;
         slot.noBody = false;
         slot.bodyStream = body1;
         slot.bodyFastKind = 0;
@@ -3213,7 +3194,6 @@ function assignResponseSlots(
       bodyStream,
       pendingCommit: null,
       pendingConsumedStream: null,
-      pendingWritableMask: 0,
     });
   }
 }
@@ -3512,7 +3492,6 @@ class Response {
           safeSetOwnDataProp(this, '_bodyStream', body1);
           slot.pendingCommit = null;
           slot.pendingConsumedStream = null;
-          slot.pendingWritableMask = 0;
           slot.noBody = false;
           slot.bodyStream = body1;
           slot.bodyFastKind = 0;

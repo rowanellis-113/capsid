@@ -7593,6 +7593,7 @@ if(BUILD_TESTING)
             tests/test_binding_rpc.cc
             src/binding_rpc.cc
             src/binding_rpc_ledger.cc
+            "${CAPSID_BOOTSTRAP_C}"
         )
         target_include_directories(test-binding-rpc PRIVATE
             include src

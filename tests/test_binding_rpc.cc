@@ -8,6 +8,8 @@
 #include "binding_rpc_ledger.h"
 extern "C" {
 #include "tjs.h"
+extern const uint8_t capsid__bootstrap[];
+extern const uint32_t capsid__bootstrap_size;
 }
 
 #include <cstdlib>
@@ -1232,6 +1234,7 @@ void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
 
 struct InterruptProbe {
     bool armed = false;
+    int polls = 0;
     int triggers = 0;
 };
 
@@ -1239,9 +1242,12 @@ InterruptProbe* g_interrupt_probe = NULL;
 
 int test_interrupt_handler(JSRuntime*, void* opaque) {
     InterruptProbe* probe = static_cast<InterruptProbe*>(opaque);
-    if (probe != NULL && probe->armed) {
-        probe->triggers++;
-        return 1;
+    if (probe != NULL) {
+        probe->polls++;
+        if (probe->armed) {
+            probe->triggers++;
+            return 1;
+        }
     }
     return 0;
 }
@@ -1253,7 +1259,11 @@ JSValue js_arm_interrupt(JSContext*, JSValueConst, int, JSValueConst*) {
     return JS_UNDEFINED;
 }
 
-// U2 (Round-6/Round-7 P2): Single-store atomic HTTP inline-body consumption
+JSValue js_poll_count(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewInt32(ctx, g_interrupt_probe != NULL ? g_interrupt_probe->polls : 0);
+}
+
+// U2 (Round-6/7/8 P2): Single-store atomic HTTP inline-body consumption
 // transaction (`BindingHttpConsumeBatch`). Verifies in BOTH input
 // (User->Binding) and result (Binding->User) directions:
 //   1. Preparation failure on item 2 of 2 leaves 0/2 consumed (returns false).
@@ -1284,37 +1294,41 @@ void test_http_consume_batch_two_phase_atomicity() {
         JSValue harness = rt.eval(
             "(() => {\n"
             "  const slots = new WeakMap();\n"
+            "  const canWrite = (obj, key) => {\n"
+            "    const desc = Object.getOwnPropertyDescriptor(obj, key);\n"
+            "    return desc !== undefined && !Object.hasOwn(desc, 'get') &&\n"
+            "           !Object.hasOwn(desc, 'set') && desc.writable === true;\n"
+            "  };\n"
+            "  const safeSet = (obj, key, val) => {\n"
+            "    if (canWrite(obj, key)) obj[key] = val;\n"
+            "  };\n"
             "  const syncSlotIfCommitted = (s, target) => {\n"
             "    const tx = s.pendingCommit;\n"
-            "    if (tx !== null && tx.committed === true) {\n"
-            "      const stream = s.pendingConsumedStream;\n"
-            "      const writable = s.pendingWritable;\n"
-            "      s.pendingCommit = null;\n"
-            "      s.pendingConsumedStream = null;\n"
-            "      s.pendingWritable = false;\n"
-            "      s.bodyConsumed = true;\n"
-            "      if (stream !== null) {\n"
-            "        s.bodyFastKind = 0;\n"
-            "        s.bodyFastData = null;\n"
-            "        s.bodyStream = stream;\n"
-            "        if (writable && target !== undefined) {\n"
-            "          target._bodyFastKind = 0;\n"
-            "          target._bodyFastData = null;\n"
-            "          target._bodyStream = stream;\n"
-            "        }\n"
-            "      }\n"
-            "      if (writable && target !== undefined) {\n"
-            "        target._bodyConsumed = true;\n"
-            "      }\n"
+            "    if (tx === null || tx.committed !== true) return;\n"
+            "    const stream = s.pendingConsumedStream;\n"
+            "    if (stream !== null) {\n"
+            "      s.bodyFastKind = 0;\n"
+            "      s.bodyFastData = null;\n"
+            "      s.bodyStream = stream;\n"
             "    }\n"
+            "    s.bodyConsumed = true;\n"
+            "    if (target !== undefined) {\n"
+            "      if (stream !== null) {\n"
+            "        safeSet(target, '_bodyFastKind', 0);\n"
+            "        safeSet(target, '_bodyFastData', null);\n"
+            "        safeSet(target, '_bodyStream', stream);\n"
+            "      }\n"
+            "      safeSet(target, '_bodyConsumed', true);\n"
+            "    }\n"
+            "    s.pendingCommit = null;\n"
+            "    s.pendingConsumedStream = null;\n"
             "  };\n"
             "  const makeSource = (payload, freezeObj) => {\n"
             "    const obj = { _bodyFastKind: 1, _bodyFastData: payload, _bodyStream: null,\n"
             "                  _bodyConsumed: false };\n"
             "    slots.set(obj, {\n"
             "      bodyFastKind: 1, bodyFastData: payload, bodyStream: null,\n"
-            "      bodyConsumed: false, pendingCommit: null, pendingConsumedStream: null,\n"
-            "      pendingWritable: false\n"
+            "      bodyConsumed: false, pendingCommit: null, pendingConsumedStream: null\n"
             "    });\n"
             "    if (freezeObj) Object.freeze(obj);\n"
             "    return obj;\n"
@@ -1354,7 +1368,6 @@ void test_http_consume_batch_two_phase_atomicity() {
             "    const count = targets.length;\n"
             "    const planSlots = Object.create(null);\n"
             "    const streams = Object.create(null);\n"
-            "    const writable = Object.create(null);\n"
             "    for (let i = 0; i < count; ++i) {\n"
             "      if (i === failOnIndex) {\n"
             "        throw new RangeError('simulated OOM during terminal stream allocation');\n"
@@ -1362,16 +1375,13 @@ void test_http_consume_batch_two_phase_atomicity() {
             "      const s = slots.get(targets[i]);\n"
             "      if (!s) throw new TypeError('missing slot');\n"
             "      syncSlotIfCommitted(s, targets[i]);\n"
-            "      const desc = Object.getOwnPropertyDescriptor(targets[i], '_bodyConsumed');\n"
             "      planSlots[i] = s;\n"
             "      streams[i] = { closed: true, disturbed: true, locked: true };\n"
-            "      writable[i] = Boolean(desc && desc.writable);\n"
             "    }\n"
             "    for (let i = 0; i < count; ++i) {\n"
             "      const s = planSlots[i];\n"
-            "      s.pendingCommit = tx;\n"
             "      s.pendingConsumedStream = streams[i];\n"
-            "      s.pendingWritable = writable[i];\n"
+            "      s.pendingCommit = tx;\n"
             "      if (i === armPrepareLinkIndex) {\n"
             "        spinForInterrupt();\n"
             "      }\n"
@@ -1662,6 +1672,451 @@ void test_http_consume_batch_two_phase_atomicity() {
     run_direction_checks(binding_rt, "result(Binding->User)");
 }
 
+// Round-8 P2 #1 & #2: Direct production JS (`capsid__bootstrap` = unmodified
+// `js/fetch.js` + `js/streams.js` + `js/binding-rpc-bridge.js`) + production
+// C++ `capsid::BindingHttpConsumeBatch` verification in BOTH input
+// (User->Binding) and result (Binding->User) directions.
+class ProductionFetchFixture {
+  public:
+    ProductionFetchFixture() {
+        TJSRunOptions options;
+        TJS_DefaultOptions(&options);
+        options.skip_run_main = true;
+        options.bootstrap = production_bootstrap;
+        options.bootstrap_opaque = this;
+        runtime_ = TJS_NewRuntimeOptions(&options);
+        require(runtime_ != NULL, "production fetch runtime creation failed");
+        ctx_ = TJS_GetJSContext(runtime_);
+        require(JS_IsObject(bridge_), "production binding bridge was not installed");
+    }
+
+    ~ProductionFetchFixture() {
+        if (ctx_ != NULL) {
+            JS_FreeValue(ctx_, bridge_);
+        }
+        if (runtime_ != NULL) {
+            TJS_FreeRuntime(runtime_);
+        }
+    }
+
+    JSContext* ctx() const { return ctx_; }
+    JSValueConst bridge() const { return bridge_; }
+
+    void drain_jobs() const {
+        JSRuntime* rt = JS_GetRuntime(ctx_);
+        JSContext* job_ctx = NULL;
+        for (int guard = 0; guard < 1024; ++guard) {
+            const int rc = JS_ExecutePendingJob(rt, &job_ctx);
+            if (rc == 0) {
+                break;
+            }
+            if (rc < 0) {
+                JSValue exc = JS_GetException(job_ctx != NULL ? job_ctx : ctx_);
+                const char* text = JS_ToCString(ctx_, exc);
+                std::string msg = text ? text : "?";
+                if (text != NULL)
+                    JS_FreeCString(ctx_, text);
+                JS_FreeValue(ctx_, exc);
+                fail("production fetch microtask threw: " + msg);
+            }
+        }
+    }
+
+    JSValue eval(const std::string& source) const {
+        JSValue result =
+            JS_Eval(ctx_, source.c_str(), source.size(), "<prod-test>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(result)) {
+            JSValue exc = JS_GetException(ctx_);
+            const char* text = JS_ToCString(ctx_, exc);
+            std::string msg = text ? text : "?";
+            if (text != NULL)
+                JS_FreeCString(ctx_, text);
+            JS_FreeValue(ctx_, exc);
+            fail("production fetch JS exception: " + msg);
+        }
+        return result;
+    }
+
+  private:
+    static JSValue js_noop(JSContext*, JSValueConst, int, JSValueConst*) { return JS_UNDEFINED; }
+    static JSValue js_req_limit(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+        return JS_NewInt64(ctx, 1024 * 1024);
+    }
+    static JSValue js_res_limit(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+        return JS_NewInt64(ctx, 4 * 1024 * 1024);
+    }
+    static JSValue js_channel_limits(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "message", JS_NewInt64(ctx, 1024 * 1024));
+        JS_SetPropertyStr(ctx, obj, "queue", JS_NewInt64(ctx, 4 * 1024 * 1024));
+        JS_SetPropertyStr(ctx, obj, "send", JS_NewInt64(ctx, 1024 * 1024));
+        return obj;
+    }
+    static JSValue js_observe_promise(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+        return argc > 0 ? JS_DupValue(ctx, argv[0]) : JS_UNDEFINED;
+    }
+    static JSValue js_buffer_alias(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+        return JS_NewArrayBufferAlias(ctx, argc > 0 ? argv[0] : JS_UNDEFINED);
+    }
+    static JSValue js_install_binding_bridge(JSContext* ctx, JSValueConst, int argc,
+                                             JSValueConst* argv) {
+        if (g_installing_fixture_ != NULL && argc >= 1 && JS_IsObject(argv[0])) {
+            JS_FreeValue(ctx, g_installing_fixture_->bridge_);
+            g_installing_fixture_->bridge_ = JS_DupValue(ctx, argv[0]);
+        }
+        return JS_UNDEFINED;
+    }
+    static bool set_fn(JSContext* ctx, JSValueConst obj, const char* name, JSCFunction* fn,
+                       int length) {
+        return JS_SetPropertyStr(ctx, obj, name, JS_NewCFunction(ctx, fn, name, length)) >= 0;
+    }
+
+    static int production_bootstrap(TJSRuntime* runtime, JSContext* ctx, void* opaque) {
+        ProductionFetchFixture* self = static_cast<ProductionFetchFixture*>(opaque);
+        g_installing_fixture_ = self;
+        JSValue core = TJS_GetInternalCore(runtime);
+        if (!set_fn(ctx, core, "capsidLog", js_noop, 2) ||
+            !set_fn(ctx, core, "capsidFetchRequestBodyLimit", js_req_limit, 0) ||
+            !set_fn(ctx, core, "capsidFetchResponseBodyLimit", js_res_limit, 0) ||
+            !set_fn(ctx, core, "capsidFixedResponseBodyLimit", js_res_limit, 0) ||
+            !set_fn(ctx, core, "capsidChannelLimits", js_channel_limits, 0) ||
+            !set_fn(ctx, core, "capsidStreamObservePromise", js_observe_promise, 1) ||
+            !set_fn(ctx, core, "capsidStreamBufferAlias", js_buffer_alias, 1) ||
+            !set_fn(ctx, core, "capsidInstallMicrotaskReporter", js_noop, 1) ||
+            !set_fn(ctx, core, "capsidInstallBridge", js_noop, 4) ||
+            !set_fn(ctx, core, "capsidInstallBindingBridge", js_install_binding_bridge, 1) ||
+            JS_DefinePropertyValueStr(ctx, core, "capsidEnableStreamFencing", JS_TRUE,
+                                      JS_PROP_CONFIGURABLE) < 0) {
+            g_installing_fixture_ = NULL;
+            return -1;
+        }
+        const int rc = TJS_EvalBytecode(ctx, capsid__bootstrap, capsid__bootstrap_size, true);
+        JSAtom hook_atom = JS_NewAtom(ctx, "capsidInstallBindingBridge");
+        JS_DeleteProperty(ctx, core, hook_atom, 0);
+        JS_FreeAtom(ctx, hook_atom);
+        JSAtom fence_atom = JS_NewAtom(ctx, "capsidEnableStreamFencing");
+        JS_DeleteProperty(ctx, core, fence_atom, 0);
+        JS_FreeAtom(ctx, fence_atom);
+        g_installing_fixture_ = NULL;
+        return rc;
+    }
+
+    static ProductionFetchFixture* g_installing_fixture_;
+    TJSRuntime* runtime_ = NULL;
+    JSContext* ctx_ = NULL;
+    JSValue bridge_ = JS_UNDEFINED;
+};
+
+ProductionFetchFixture* ProductionFetchFixture::g_installing_fixture_ = NULL;
+
+void test_production_fetch_atomic_commit_sync_and_freeze() {
+    ProductionFetchFixture user_rt;
+    ProductionFetchFixture binding_rt;
+
+    auto run_prod_direction = [](ProductionFetchFixture& rt, const char* dir_label) {
+        JSContext* ctx = rt.ctx();
+        JSRuntime* js_rt = JS_GetRuntime(ctx);
+        InterruptProbe probe;
+        g_interrupt_probe = &probe;
+
+        JSValue global = JS_GetGlobalObject(ctx);
+        JS_SetPropertyStr(ctx, global, "__testPollCount",
+                          JS_NewCFunction(ctx, js_poll_count, "__testPollCount", 0));
+        JS_SetPropertyStr(ctx, global, "__testBridge", JS_DupValue(ctx, rt.bridge()));
+        JS_FreeValue(ctx, global);
+
+        JSValue prepare_fn = JS_GetPropertyStr(ctx, rt.bridge(), "prepareHttpBodyConsumePlan");
+        JSValue apply_fn = JS_GetPropertyStr(ctx, rt.bridge(), "applyHttpBodyConsumePlan");
+        require(JS_IsFunction(ctx, prepare_fn) && JS_IsFunction(ctx, apply_fn),
+                "production bridge missing prepare/apply functions");
+
+        const std::string helper_src =
+            std::string(
+                "(() => {\n"
+                "  const bridge = __testBridge;\n"
+                "  let lastPlan = null;\n"
+                "  const capturePrepare = (targets) => {\n"
+                "    lastPlan = bridge.prepareHttpBodyConsumePlan(targets);\n"
+                "    return lastPlan;\n"
+                "  };\n"
+                "  const noopApply = () => {};\n"
+                "  const retryLastPlan = () => { bridge.applyHttpBodyConsumePlan(lastPlan); };\n"
+                "  const makeReq = (body) =>\n"
+                "    new Request('https://u2-prod.test/req', { method: 'POST', body });\n"
+                "  const makeRes = (body) => new Response(body);\n"
+                "  const readTextSync = (obj) => {\n"
+                "    const out = { done: false, value: null, errName: null, errMsg: null };\n"
+                "    obj.text().then(\n"
+                "      (v) => { out.done = true; out.value = v; },\n"
+                "      (e) => { out.done = true; out.errName = e && e.name;\n"
+                "               out.errMsg = e && e.message; }\n"
+                "    );\n"
+                "    return out;\n"
+                "  };\n"
+                "  const checkConsumedSync = (obj, kind, expectPubUsed) => {\n"
+                "    const firstUsed = obj.bodyUsed;\n"
+                "    const secondUsed = obj.bodyUsed;\n"
+                "    const stream = obj.body;\n"
+                "    const locked = stream !== null && stream.locked === true;\n"
+                "    let readerThrew = false;\n"
+                "    try { stream.getReader(); } catch (e) { readerThrew = e instanceof TypeError; }\n"
+                "    let cloneThrew = false;\n"
+                "    try { obj.clone(); } catch (e) { cloneThrew = e instanceof TypeError; }\n"
+                "    const snap = kind === 'req'\n"
+                "      ? bridge.inspectRequest(obj)\n"
+                "      : bridge.inspectResponse(obj);\n"
+                "    const snapRejected = Boolean(snap && typeof snap.error === 'string' &&\n"
+                "      snap.error.indexOf('already used') >= 0);\n"
+                "    const textState = readTextSync(obj);\n"
+                "    const pubOk = expectPubUsed === null || obj._bodyConsumed === expectPubUsed;\n"
+                "    return {\n"
+                "      syncOk: firstUsed === true && secondUsed === true && locked &&\n"
+                "              readerThrew && cloneThrew && snapRejected && pubOk,\n"
+                "      textState\n"
+                "    };\n"
+                "  };\n") +
+            "  const alignCounter = (burn) => {\n"
+            "    while (__testPollCount() === 0) {}\n"
+            "    let acc = 0;\n"
+            "    for (let k = 0; k < burn; ++k) { acc += k; }\n"
+            "    return acc;\n"
+            "  };\n"
+            "  const freezeObj = (o) => Object.freeze(o);\n"
+            "  return { capturePrepare, noopApply, retryLastPlan, makeReq, makeRes,\n"
+            "           readTextSync, checkConsumedSync, alignCounter, freezeObj };\n"
+            "})()";
+
+        JSValue helpers = rt.eval(helper_src);
+        JSValue capture_prepare = JS_GetPropertyStr(ctx, helpers, "capturePrepare");
+        JSValue noop_apply = JS_GetPropertyStr(ctx, helpers, "noopApply");
+        JSValue retry_last_plan = JS_GetPropertyStr(ctx, helpers, "retryLastPlan");
+        JSValue make_req = JS_GetPropertyStr(ctx, helpers, "makeReq");
+        JSValue make_res = JS_GetPropertyStr(ctx, helpers, "makeRes");
+        JSValue read_text_sync = JS_GetPropertyStr(ctx, helpers, "readTextSync");
+        JSValue check_consumed_sync = JS_GetPropertyStr(ctx, helpers, "checkConsumedSync");
+        JSValue align_counter = JS_GetPropertyStr(ctx, helpers, "alignCounter");
+        JSValue freeze_obj = JS_GetPropertyStr(ctx, helpers, "freezeObj");
+
+        auto new_req = [&](const char* body) -> JSValue {
+            JSValue a = JS_NewString(ctx, body);
+            JSValue r = JS_Call(ctx, make_req, JS_UNDEFINED, 1, &a);
+            JS_FreeValue(ctx, a);
+            require(!JS_IsException(r) && JS_IsObject(r), "makeReq failed");
+            return r;
+        };
+        auto new_res = [&](const char* body) -> JSValue {
+            JSValue a = JS_NewString(ctx, body);
+            JSValue r = JS_Call(ctx, make_res, JS_UNDEFINED, 1, &a);
+            JS_FreeValue(ctx, a);
+            require(!JS_IsException(r) && JS_IsObject(r), "makeRes failed");
+            return r;
+        };
+        auto do_freeze = [&](JSValueConst obj) {
+            JSValue arg = JS_DupValue(ctx, obj);
+            JSValue r = JS_Call(ctx, freeze_obj, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            require(!JS_IsException(r), "Object.freeze failed");
+            JS_FreeValue(ctx, r);
+        };
+        auto verify_unread_text = [&](JSValueConst obj, const char* expected, const char* msg) {
+            JSValue used_v = JS_GetPropertyStr(ctx, obj, "bodyUsed");
+            require(!JS_IsException(used_v) && !JS_ToBool(ctx, used_v),
+                    (std::string(dir_label) + ": expected bodyUsed===false (" + msg + ")").c_str());
+            JS_FreeValue(ctx, used_v);
+            JSValue arg = JS_DupValue(ctx, obj);
+            JSValue out = JS_Call(ctx, read_text_sync, JS_UNDEFINED, 1, &arg);
+            JS_FreeValue(ctx, arg);
+            require(!JS_IsException(out), "readTextSync threw");
+            rt.drain_jobs();
+            JSValue done_v = JS_GetPropertyStr(ctx, out, "done");
+            JSValue val_v = JS_GetPropertyStr(ctx, out, "value");
+            const char* s = JS_ToCString(ctx, val_v);
+            const bool ok = JS_ToBool(ctx, done_v) && s != NULL && std::strcmp(s, expected) == 0;
+            if (s != NULL)
+                JS_FreeCString(ctx, s);
+            JS_FreeValue(ctx, done_v);
+            JS_FreeValue(ctx, val_v);
+            JS_FreeValue(ctx, out);
+            require(ok, (std::string(dir_label) + ": " + msg).c_str());
+        };
+        auto verify_consumed = [&](JSValueConst obj, const char* kind, int expect_pub,
+                                   const char* msg) {
+            JSValue args[3] = {
+                JS_DupValue(ctx, obj),
+                JS_NewString(ctx, kind),
+                expect_pub < 0 ? JS_NULL : (expect_pub > 0 ? JS_TRUE : JS_FALSE),
+            };
+            JSValue res = JS_Call(ctx, check_consumed_sync, JS_UNDEFINED, 3, args);
+            for (int i = 0; i < 3; ++i)
+                JS_FreeValue(ctx, args[i]);
+            require(!JS_IsException(res) && JS_IsObject(res),
+                    (std::string(dir_label) + ": checkConsumedSync threw on " + msg).c_str());
+            rt.drain_jobs();
+            JSValue sync_ok_v = JS_GetPropertyStr(ctx, res, "syncOk");
+            JSValue text_st = JS_GetPropertyStr(ctx, res, "textState");
+            JSValue done_v = JS_GetPropertyStr(ctx, text_st, "done");
+            JSValue ename_v = JS_GetPropertyStr(ctx, text_st, "errName");
+            const char* ename = JS_ToCString(ctx, ename_v);
+            const bool ok = JS_ToBool(ctx, sync_ok_v) && JS_ToBool(ctx, done_v) && ename != NULL &&
+                            std::strcmp(ename, "TypeError") == 0;
+            if (ename != NULL)
+                JS_FreeCString(ctx, ename);
+            JS_FreeValue(ctx, sync_ok_v);
+            JS_FreeValue(ctx, done_v);
+            JS_FreeValue(ctx, ename_v);
+            JS_FreeValue(ctx, text_st);
+            JS_FreeValue(ctx, res);
+            require(ok, (std::string(dir_label) + ": " + msg).c_str());
+        };
+
+        // 1. Production prepare failure on item 2 leaves real Response #1 unread.
+        {
+            JSValue r1 = new_res("one");
+            JSValue bad = JS_NewObject(ctx);
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, r1) && batch.add_target(ctx, bad), "add_target failed");
+            std::string err;
+            require(!batch.prepare(prepare_fn, &err) && !err.empty(),
+                    "production prepare must reject missing-slot item 2");
+            verify_unread_text(r1, "one", "real Response #1 stays unread on prepare failure");
+            JS_FreeValue(ctx, r1);
+            JS_FreeValue(ctx, bad);
+        }
+
+        // 2. Production prepare + reset() rollback leaves real Request & Response unread.
+        {
+            JSValue req = new_req("left");
+            JSValue res = new_res("right");
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, req) && batch.add_target(ctx, res), "add_target failed");
+            std::string err;
+            require(batch.prepare(prepare_fn, &err), ("prod prepare failed: " + err).c_str());
+            batch.reset();
+            verify_unread_text(req, "left", "real Request stays unread after reset");
+            verify_unread_text(res, "right", "real Response stays unread after reset");
+            JS_FreeValue(ctx, req);
+            JS_FreeValue(ctx, res);
+        }
+
+        // 3. Round-8 P2 #2: ALL 3 freeze timings on REAL Request & Response
+        // with lazy post-publish sync (eager apply omitted via noopApply):
+        //   mode 0 = frozen BEFORE prepare()
+        //   mode 1 = frozen AFTER publish (tx.committed=true) & BEFORE first read
+        //   mode 2 = always writable
+        for (int mode = 0; mode < 3; ++mode) {
+            JSValue req = new_req("req-freeze-case");
+            JSValue res = new_res("res-freeze-case");
+            if (mode == 0) {
+                do_freeze(req);
+                do_freeze(res);
+            }
+            capsid::BindingHttpConsumeBatch batch;
+            require(batch.add_target(ctx, req) && batch.add_target(ctx, res), "add_target failed");
+            std::string err;
+            require(batch.prepare(capture_prepare, &err),
+                    ("freeze-mode prod prepare failed: " + err).c_str());
+            require(batch.commit(noop_apply, &err),
+                    ("freeze-mode prod publish failed: " + err).c_str());
+            if (mode == 1) {
+                do_freeze(req);
+                do_freeze(res);
+            }
+            const int expect_pub = (mode == 2) ? 1 : 0;
+            const std::string tag = "freeze mode " + std::to_string(mode);
+            verify_consumed(req, "req", expect_pub, ("real Request " + tag).c_str());
+            verify_consumed(res, "res", expect_pub, ("real Response " + tag).c_str());
+            // Retry production applyHttpBodyConsumePlanForBinding on already-synced
+            // / post-frozen objects must remain idempotent and throw-free.
+            JSValue retry_ret = JS_Call(ctx, retry_last_plan, JS_UNDEFINED, 0, NULL);
+            require(!JS_IsException(retry_ret),
+                    (std::string(dir_label) + ": retryLastPlan threw in " + tag).c_str());
+            JS_FreeValue(ctx, retry_ret);
+            verify_consumed(req, "req", expect_pub, ("real Request post-retry " + tag).c_str());
+            verify_consumed(res, "res", expect_pub, ("real Response post-retry " + tag).c_str());
+            JS_FreeValue(ctx, req);
+            JS_FreeValue(ctx, res);
+        }
+
+        // 4. Round-8 P2 #1: Calibrated REAL QuickJS JS_SetInterruptHandler sweep
+        // firing directly inside PRODUCTION applyHttpBodyConsumePlanForBinding /
+        // syncSlotIfCommitted on real [Request, Response] batches. Verifies
+        // real interrupt fires, commit succeeds atomically, and retrying reads
+        // (including after freezing post-interrupt) produces 100% consistent
+        // consumed/locked state with ZERO torn state.
+        {
+            static const int kBurnSweep[] = {9996, 9992, 9988, 9982, 9974, 9960};
+            int total_triggers = 0;
+            for (size_t si = 0; si < sizeof(kBurnSweep) / sizeof(kBurnSweep[0]); ++si) {
+                std::vector<JSValue> objs;
+                capsid::BindingHttpConsumeBatch batch;
+                for (int pair = 0; pair < 6; ++pair) {
+                    JSValue q = new_req("secret-req");
+                    JSValue s = new_res("secret-res");
+                    require(batch.add_target(ctx, q) && batch.add_target(ctx, s),
+                            "add_target sweep failed");
+                    objs.push_back(q);
+                    objs.push_back(s);
+                }
+                std::string err;
+                require(batch.prepare(prepare_fn, &err),
+                        ("sweep prod prepare failed: " + err).c_str());
+
+                probe.armed = false;
+                probe.polls = 0;
+                probe.triggers = 0;
+                JS_SetInterruptHandler(js_rt, test_interrupt_handler, &probe);
+                JSValue burn_arg = JS_NewInt32(ctx, kBurnSweep[si]);
+                JSValue aligned = JS_Call(ctx, align_counter, JS_UNDEFINED, 1, &burn_arg);
+                JS_FreeValue(ctx, burn_arg);
+                require(!JS_IsException(aligned), "alignCounter failed");
+                JS_FreeValue(ctx, aligned);
+
+                probe.armed = true;
+                const bool committed = batch.commit(apply_fn, &err);
+                probe.armed = false;
+                JS_SetInterruptHandler(js_rt, NULL, NULL);
+
+                require(committed, (std::string(dir_label) +
+                                    ": production commit failed under interrupt sweep: " + err)
+                                       .c_str());
+                total_triggers += probe.triggers;
+
+                // Freeze half the objects after the interrupted eager flush to
+                // exercise BOTH retryable sync and post-publish freeze together.
+                for (size_t oi = 0; oi < objs.size(); ++oi) {
+                    if ((oi % 2) == (si % 2)) {
+                        do_freeze(objs[oi]);
+                    }
+                    verify_consumed(objs[oi], (oi % 2 == 0) ? "req" : "res", -1,
+                                    "real object after mid-production-sync interrupt");
+                    JS_FreeValue(ctx, objs[oi]);
+                }
+            }
+            require(total_triggers > 0,
+                    (std::string(dir_label) +
+                     ": real QuickJS interrupt never fired inside production apply")
+                        .c_str());
+        }
+
+        JS_FreeValue(ctx, capture_prepare);
+        JS_FreeValue(ctx, noop_apply);
+        JS_FreeValue(ctx, retry_last_plan);
+        JS_FreeValue(ctx, make_req);
+        JS_FreeValue(ctx, make_res);
+        JS_FreeValue(ctx, read_text_sync);
+        JS_FreeValue(ctx, check_consumed_sync);
+        JS_FreeValue(ctx, align_counter);
+        JS_FreeValue(ctx, freeze_obj);
+        JS_FreeValue(ctx, helpers);
+        JS_FreeValue(ctx, prepare_fn);
+        JS_FreeValue(ctx, apply_fn);
+        g_interrupt_probe = NULL;
+    };
+
+    run_prod_direction(user_rt, "prod-input(User->Binding)");
+    run_prod_direction(binding_rt, "prod-result(Binding->User)");
+}
+
 } // namespace
 
 int main() {
@@ -1680,5 +2135,6 @@ int main() {
     test_string_and_object_key_fidelity();
     test_precopy_quota_boundaries_and_zero_copy_on_reject();
     test_http_consume_batch_two_phase_atomicity();
+    test_production_fetch_atomic_commit_sync_and_freeze();
     return 0;
 }
