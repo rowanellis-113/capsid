@@ -8103,8 +8103,9 @@ class WorkerRuntime {
         }
 
         // U2: Two-phase atomic HTTP inline-body commit:
-        // Phase 1 prepares all terminal consumed streams & property writability
-        // masks BEFORE mutating any source Request/Response or enqueueing.
+        // Phase 1 prepares the shared commit token and all terminal consumed
+        // streams BEFORE changing any observable source Request/Response state
+        // or enqueueing.
         std::string commit_err;
         if (!prepare_opened_proxies(clone_ctx, &commit_err)) {
             rollback_opened_proxies(clone_ctx);
@@ -8120,8 +8121,9 @@ class WorkerRuntime {
         }
         auto inserted = pending_binding_calls_.emplace(call_id, std::move(call));
         binding_scheduler_.enqueue_call(table_index, call_id);
-        // Phase 2 commits the prepared batch atomically; any JS call failure
-        // cancels the queued call and propagates rejection to the caller.
+        // Phase 2 publishes the prepared batch in a single native property store,
+        // then runs best-effort retryable eager sync; only missing commit state
+        // or native publication failure cancels the queued call and rejects.
         if (!commit_opened_proxies(clone_ctx, &commit_err)) {
             binding_scheduler_.cancel_call(table_index, call_id);
             rollback_opened_proxies(clone_ctx);

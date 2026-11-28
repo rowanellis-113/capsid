@@ -283,16 +283,19 @@ bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueCons
 // Two-phase atomic HTTP inline-body consumption transaction shared by
 // User->Binding input commit and Binding->User result commit (U2):
 //   1. `prepare()` runs `prepare_fn(targets_array)` in `ctx` so every fallible
-//      allocation (shared commit token `plan.tx = { committed: false }`,
-//      terminal consumed streams, and own-property writability masks) finishes
-//      and links each private slot to `plan.tx` BEFORE any observable state
-//      changes. Any failure or QuickJS deadline interrupt during Phase 1 leaves
+//      allocation (shared commit token `plan.tx = { committed: false }` and
+//      terminal consumed streams) finishes and links each private slot to
+//      `plan.tx` BEFORE any observable state changes. Wrapper property
+//      writability is checked live at sync time, never cached in Phase 1. Any
+//      failure or QuickJS deadline interrupt during Phase 1 leaves
 //      `tx.committed === false` (0-of-N consumed).
 //   2. `commit()` publishes `plan.tx.committed = true` in a single uninterruptible
 //      C++ property store (`JS_SetProperty` on the validated own writable data
 //      slot — zero JS bytecode, zero interrupt checks, zero allocations), so
 //      every object in the batch transitions atomically from 0-of-N to N-of-N,
-//      then runs `apply_fn(plan)` as a best-effort eager mirror/slot flush.
+//      then runs `apply_fn(plan)` as a best-effort, retryable eager mirror/slot
+//      flush (only missing commit state or native publication failure returns
+//      false; any post-publish eager-sync interrupt is safely retried on demand).
 //   3. `reset()` frees all held JSValues/atoms without publishing `prepared_tx`.
 struct BindingHttpConsumeBatch {
     JSContext* ctx = nullptr;
