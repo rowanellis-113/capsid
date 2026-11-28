@@ -1,6 +1,6 @@
 # workerd WebSocket Semantics and Compatibility Scope
 
-Reviewed 2026-11-27 against the `dev/v0.3.2` source and locked reference (published prerelease `v0.3.1-beta.1`).
+Reviewed 2026-11-28 against `v0.3.2-beta.1` / `dev/v0.3.2` source and locked reference.
 This is a bounded compatibility reference, not a browser/workerd certification
 or a pending-release diary. [Current status](release-status.md) identifies the
 actual released source, raw standards conflicts and independent performance scope.

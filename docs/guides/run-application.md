@@ -1,9 +1,9 @@
 # Getting started
 
-Run one trusted Fetch handler on loopback. The published beta and the development branch use different local Host commands. Choose the instructions for the binaries on your PATH.
+Run one trusted Fetch handler on loopback using the unified local Host (`capsid-host --app-dir .`) shipped in published **`v0.3.2-beta.1`** and on `dev/v0.3.2`:
 
-- **Published `v0.3.1-beta.1`** — [install on Linux or macOS](install-packages.md#install-on-linux-or-macos) or [install on Windows](install-packages.md#install-on-windows), then follow [the beta steps](#run-the-published-beta).
-- **Source branch `dev/v0.3.2`** — [build the Host and worker](build-from-source.md), then follow [the development steps](#run-the-development-branch).
+- **Prebuilt `v0.3.2-beta.1`** — [install on Linux or macOS](install-packages.md#install-on-linux-or-macos) or [install on Windows](install-packages.md#install-on-windows).
+- **Source build (`dev/v0.3.2`)** — [build the Host and worker](build-from-source.md).
 
 Use a Host and worker from the same build. For untrusted applications, see the [Linux strict sandbox](../reference/linux-sandbox.md) and [security policy](../../SECURITY.md).
 
@@ -29,15 +29,15 @@ This is already a self-contained ESM: it needs no package installation or
 bundling step. Applications with dependencies must be bundled ahead of time;
 see the [framework guides](../reference/frameworks/README.md).
 
-## Run the development branch
+## Run the local Host (`v0.3.2-beta.1` / `dev/v0.3.2`)
 
-For a `dev/v0.3.2` source build, put `bundle.mjs` and this UTF-8 `capsid.json` in the same directory:
+Put `bundle.mjs` and this UTF-8 `capsid.json` in the same directory:
 
 ```json
 { "apiVersion": "capsid/app-v2" }
 ```
 
-Put the build directory containing both executables on your PATH. From the directory containing the two application files, start the local Host on Linux, macOS or Windows:
+Ensure `capsid-host` and `capsid-worker` from the same install/build are on your PATH (for example `$HOME/.local/bin` after running `install.sh`). From the directory containing the two application files, start the local Host on Linux, macOS or Windows:
 
 ```sh
 capsid-host --app-dir . --listen 127.0.0.1:8080 --ready-fd 1
@@ -51,11 +51,10 @@ curl http://127.0.0.1:8080/
 
 Use `curl.exe` in Windows PowerShell. Expect `{"message":"hello from Capsid","path":"/"}`. Stop the Host with Ctrl+C. For pool sizes, tenant quotas or deployment to the Linux managed Host, see the [Config v2 examples](../design/config-v2.md).
 
-## Run the published beta
+## Earlier releases (`v0.3.1-beta.1` / `v0.2.2`)
 
-Use the guide shipped with the installed binaries. It includes the matching manifest,
-Host invocation, readiness record and request URL for each platform.
-[Linux and macOS quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#linux-and-macos) · [Windows PowerShell quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#windows-powershell)
+Earlier prebuilt releases used the retired `capsid/app-v1` manifest and `--mode single-worker` CLI. If you are running `v0.3.1-beta.1`, follow the guide shipped with that tag:
+[Linux and macOS quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#linux-and-macos) · [Windows PowerShell quick start](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/getting-started.md#windows-powershell).
 
 ## Troubleshooting
 

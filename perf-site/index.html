@@ -1029,7 +1029,7 @@
   <!-- ================= 01. Product Hero ================= -->
   <header class="hero">
     <div>
-      <div class="hero-eyebrow"><span class="pulse"></span>DEV/v0.3.2 &middot; ELASTIC OS PROCESS POOLS &middot; C/C++ ABI v8</div>
+      <div class="hero-eyebrow"><span class="pulse"></span>v0.3.2-beta.1 &middot; ELASTIC OS PROCESS POOLS &middot; C/C++ ABI v8</div>
       <h1>Run untrusted AI code <span class="grad">in elastic OS process pools.</span></h1>
       <p class="hero-desc" id="hero-desc">
         Dedicated Linux OS sandboxes (<b>Namespaces, Landlock, Seccomp, cgroup v2</b>) powered by
@@ -1046,14 +1046,14 @@
       <div class="install-box" aria-label="Quick install command">
         <div class="install-head">
           <div class="install-tabs" role="tablist" aria-label="Hero install method">
-            <button type="button" class="install-tab active" role="tab" aria-selected="true" id="hero-inst-unix">dev/v0.3.2 (Linux/macOS)</button>
-            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-win">dev/v0.3.2 (Windows)</button>
-            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-manual">v0.3.1-beta.1 (Prebuilt)</button>
+            <button type="button" class="install-tab active" role="tab" aria-selected="true" id="hero-inst-unix">Linux &amp; macOS</button>
+            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-win">Windows (PS)</button>
+            <button type="button" class="install-tab" role="tab" aria-selected="false" id="hero-inst-manual">Build from source</button>
           </div>
-          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">dev/v0.3.2 build guide &rarr;</a>
+          <a class="install-rel-link" href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1" target="_blank" rel="noopener">v0.3.2-beta.1 release &rarr;</a>
         </div>
         <div class="install-bar">
-          <code><span class="prompt" id="install-prompt">$</span><span id="install-cmd">git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git &amp;&amp; cd capsid &amp;&amp; npm ci --ignore-scripts --prefix vendor/txiki.js &amp;&amp; cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF &amp;&amp; cmake --build build-release --parallel</span></code>
+          <code><span class="prompt" id="install-prompt">$</span><span id="install-cmd">curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.2-beta.1</span></code>
           <button type="button" class="copy-btn" id="copy-install-btn">Copy</button>
         </div>
       </div>
@@ -1465,11 +1465,11 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
     </details>
   </section>
 
-  <!-- ================= 06. Quick Start (60s dev/v0.3.2 Onboarding) ================= -->
+  <!-- ================= 06. Quick Start (60s v0.3.2-beta.1 Onboarding) ================= -->
   <section id="quickstart">
-    <div class="eyebrow">Quick Start &middot; dev/v0.3.2</div>
+    <div class="eyebrow">Quick Start &middot; v0.3.2-beta.1</div>
     <h2>Ship your first worker in 60 seconds</h2>
-    <p class="lede">Unified Config v2 (<span class="mono">capsid/app-v2</span>) &amp; <span class="mono">--app-dir</span> CLI on Linux, macOS, and Windows. Prebuilt archive: <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">v0.3.1-beta.1</a>.</p>
+    <p class="lede">Unified Config v2 (<span class="mono">capsid/app-v2</span>) &amp; <span class="mono">--app-dir</span> CLI on Linux, macOS, and Windows. Five-platform prebuilt release: <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1" target="_blank" rel="noopener">v0.3.2-beta.1</a> (stable: <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2" target="_blank" rel="noopener">v0.2.2</a>).</p>
 
     <div class="qs-os-bar">
       <div class="pills" role="tablist" aria-label="Quick Start operating system">
@@ -1484,36 +1484,27 @@ cfg.request_timeout_ms = <span class="tok-n">5000</span>;   <span class="tok-c">
       <div class="qs-row">
         <div class="qs-info">
           <div class="qs-badge"><span class="qs-idx">01</span>Install</div>
-          <h3>Build the dev/v0.3.2 toolchain</h3>
-          <p>Installs <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>, bytecode compiler, and ABI v8 SDK.
-             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">Build guide</a> &middot;
-             <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1" target="_blank" rel="noopener">Prebuilt beta</a>.</p>
-          <div class="qs-meta"><span>dev/v0.3.2 &middot; ABI v8</span><span>Linux &middot; macOS &middot; Win</span></div>
+          <h3>Install prebuilt v0.3.2-beta.1</h3>
+          <p>Downloads &amp; SHA-256 verifies <span class="mono">capsid-host</span>, <span class="mono">capsid-worker</span>, bytecode compiler, and ABI v8 SDK.
+             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/install-packages.md" target="_blank" rel="noopener">All 5 packages</a> &middot;
+             <a href="https://github.com/rowanellis-113/capsid/blob/dev/v0.3.2/docs/guides/build-from-source.md" target="_blank" rel="noopener">Build from source</a>.</p>
+          <div class="qs-meta"><span>v0.3.2-beta.1 &middot; ABI v8</span><span>SHA-256 verified</span></div>
         </div>
         <div class="qs-term">
           <div class="qs-term-bar">
             <span class="qs-term-title"><span class="dot-s"></span><span id="qs-t1-label">bash &middot; Linux &amp; macOS</span></span>
             <button type="button" class="step-copy" id="copy-step-1">Copy</button>
           </div>
-          <pre class="qs-code" id="step-code-1-unix">git clone --branch dev/v0.3.2 --recurse-submodules \
-  https://github.com/rowanellis-113/capsid.git
-cd capsid &amp;&amp; npm ci --ignore-scripts --prefix vendor/txiki.js
-cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF
-cmake --build build-release --parallel
-cmake --install build-release --prefix "$HOME/opt/capsid-sdk"
-export PATH="$HOME/opt/capsid-sdk/bin:$PATH"</pre>
-          <pre class="qs-code is-hidden" id="step-code-1-win">git clone --branch dev/v0.3.2 --recurse-submodules `
-  https://github.com/rowanellis-113/capsid.git
-Set-Location capsid
-npm.cmd ci --ignore-scripts --prefix vendor/txiki.js
-cmake -S . -B build-release -G Ninja `
-  -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-  -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF `
-  "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DVCPKG_TARGET_TRIPLET=x64-windows-static
-cmake --build build-release --parallel
-$env:PATH = "$PWD\build-release;$env:PATH"</pre>
+          <pre class="qs-code" id="step-code-1-unix">curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.2-beta.1
+export PATH="$HOME/.local/bin:$PATH"</pre>
+          <pre class="qs-code is-hidden" id="step-code-1-win">$base = 'https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1'
+Invoke-WebRequest "$base/capsid-0.3.2-windows-x86_64.zip" -OutFile capsid.zip
+Invoke-WebRequest "$base/capsid-0.3.2-windows-x86_64.zip.sha256" -OutFile capsid.zip.sha256
+$exp = ((Get-Content capsid.zip.sha256 -Raw).Trim() -split '\s+')[0]
+if ((Get-FileHash capsid.zip -Algorithm SHA256).Hash -ine $exp) { throw 'SHA-256 mismatch' }
+Expand-Archive capsid.zip "$HOME\capsid-0.3.2" -Force
+$env:PATH = "$HOME\capsid-0.3.2\capsid-0.3.2-windows-x86_64\bin;$env:PATH"</pre>
         </div>
       </div>
 
@@ -1953,15 +1944,15 @@ function initInteractiveChrome() {
   var HERO_INST_CMDS = {
     unix: {
       prompt: "$",
-      cmd: "git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git && cd capsid && npm ci --ignore-scripts --prefix vendor/txiki.js && cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF && cmake --build build-release --parallel"
+      cmd: "curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.2-beta.1"
     },
     win: {
       prompt: "PS>",
-      cmd: "git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git; cd capsid; npm.cmd ci --ignore-scripts --prefix vendor/txiki.js; cmake -S . -B build-release -G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF \"-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake\" -DVCPKG_TARGET_TRIPLET=x64-windows-static; cmake --build build-release --parallel"
+      cmd: "$b='https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1'; iwr \"$b/capsid-0.3.2-windows-x86_64.zip\" -OutFile capsid.zip; iwr \"$b/capsid-0.3.2-windows-x86_64.zip.sha256\" -OutFile capsid.zip.sha256; if ((Get-FileHash capsid.zip -Algorithm SHA256).Hash -ine ((gc capsid.zip.sha256 -Raw).Trim() -split '\\s+')[0]) { throw 'SHA-256 mismatch' }; Expand-Archive capsid.zip \"$HOME\\capsid-0.3.2\" -Force"
     },
     manual: {
       prompt: "$",
-      cmd: "curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1"
+      cmd: "git clone --branch dev/v0.3.2 --recurse-submodules https://github.com/rowanellis-113/capsid.git && cd capsid && npm ci --ignore-scripts --prefix vendor/txiki.js && cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCAPSID_BUILD_HOST=ON -DBUILD_TESTING=OFF && cmake --build build-release --parallel"
     }
   };
   function syncHeroInstall() {
@@ -1995,7 +1986,7 @@ function initInteractiveChrome() {
       if (eu) eu.className = "qs-code" + (isWin ? " is-hidden" : "");
       if (ew) ew.className = "qs-code" + (isWin ? "" : " is-hidden");
     });
-    if ($("qs-t1-label")) $("qs-t1-label").textContent = isWin ? "PowerShell · Windows MSVC + Ninja" : "bash · Linux & macOS";
+    if ($("qs-t1-label")) $("qs-t1-label").textContent = isWin ? "PowerShell · Windows x86_64 ZIP" : "bash · Linux & macOS";
     if ($("qs-t2-label")) $("qs-t2-label").textContent = isWin ? "$HOME\\capsid-hello · UTF-8 bundle.mjs + capsid.json" : "~/capsid-hello · bundle.mjs + capsid.json";
     if ($("qs-t3-label")) $("qs-t3-label").textContent = isWin ? "Terminal 1 · PowerShell (Start Host)" : "Terminal 1 · Start Host";
     if ($("qs-t4-label")) $("qs-t4-label").textContent = isWin ? "Terminal 2 · PowerShell (curl.exe)" : "Terminal 2 · Send Request";

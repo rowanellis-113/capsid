@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "observedAtUTC": "2026-11-22T13:10:53Z",
+  "observedAtUTC": "2026-11-28T00:09:21Z",
   "readOnly": true,
   "repository": "rowanellis-113/capsid",
-  "developmentBranch": "dev/v0.3.1",
+  "developmentBranch": "dev/v0.3.2",
   "stable": {
     "tag": "v0.2.2",
     "releaseId": 380229548,
@@ -12,101 +12,101 @@
     "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2"
   },
   "githubLatest": {
-    "tag": "v0.3.1-beta.1",
-    "releaseId": 454455848,
+    "tag": "v0.3.2-beta.1",
+    "releaseId": 461174945,
     "prerelease": false,
-    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1"
+    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1"
   },
   "prerelease": {
-    "channel": "0.3.1-beta",
-    "tag": "v0.3.1-beta.1",
-    "releaseId": 454455848,
+    "channel": "0.3.2-beta",
+    "tag": "v0.3.2-beta.1",
+    "releaseId": 461174945,
     "draft": false,
     "prerelease": false,
     "githubLatest": true,
-    "publishedAt": "2026-11-22T13:10:51Z",
-    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1",
-    "sourceCommit": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
-    "sourceTree": "7894f8a984c7344a904ac0e08c6099e282036b1a",
-    "runtimeVersion": "0.3.1",
-    "publicationEvidence": "docs/evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json",
+    "publishedAt": "2026-11-28T00:09:20Z",
+    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1",
+    "sourceCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
+    "sourceTree": "8e5bafde59408ffeb2344e0bdae15b699c939d3b",
+    "runtimeVersion": "0.3.2",
+    "publicationEvidence": "docs/evidence/v0.3.2/2026-11-28-beta1-publication/beta1-publication-final-r1.json",
     "assets": [
       {
-        "id": 779110366,
-        "name": "capsid-0.3.1-darwin-arm64.tar.gz",
-        "size": 9906230,
-        "digest": "sha256:c58ea86c9343f06716467c84995704c60ef7ae3b39b0715059208a66007d5568",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-arm64.tar.gz"
+        "id": 802538236,
+        "name": "capsid-0.3.2-darwin-arm64.tar.gz",
+        "size": 10091995,
+        "digest": "sha256:a10ccb467afa179a833b5442796f1e21f2c4b9e6f91c9341ac418dad43763a01",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-arm64.tar.gz"
       },
       {
-        "id": 779110925,
-        "name": "capsid-0.3.1-darwin-arm64.tar.gz.sha256",
+        "id": 802538248,
+        "name": "capsid-0.3.2-darwin-arm64.tar.gz.sha256",
         "size": 99,
-        "digest": "sha256:851ffe9e3cfd47469cb98730035fa6e8e35a7340aceb4ca775d675ee0c9e7c86",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-arm64.tar.gz.sha256"
+        "digest": "sha256:176ac4fb295babbb52a0335e79c6e976311d0e767dc2bbda53e1aaddf34e137e",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-arm64.tar.gz.sha256"
       },
       {
-        "id": 779111053,
-        "name": "capsid-0.3.1-darwin-x86_64.tar.gz",
-        "size": 9909506,
-        "digest": "sha256:c22e3b67fedf540f0429edf7fd0dade197c5cc57d93a516c9207fa11b14feb60",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-x86_64.tar.gz"
+        "id": 802538238,
+        "name": "capsid-0.3.2-darwin-x86_64.tar.gz",
+        "size": 10093744,
+        "digest": "sha256:dc1203d5b99856b9e73c3d8c894233cd75baaf044a82444da718617573988338",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-x86_64.tar.gz"
       },
       {
-        "id": 779111497,
-        "name": "capsid-0.3.1-darwin-x86_64.tar.gz.sha256",
+        "id": 802538247,
+        "name": "capsid-0.3.2-darwin-x86_64.tar.gz.sha256",
         "size": 100,
-        "digest": "sha256:87078e5e5876c7f34151ab7e0fb1bf565ccba9084eb858423aaa092eb38aaf3e",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-x86_64.tar.gz.sha256"
+        "digest": "sha256:4cdd32617beb200491530c859425755a0e9a88e632d748ebc0e698cb565142a8",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-x86_64.tar.gz.sha256"
       },
       {
-        "id": 779111577,
-        "name": "capsid-0.3.1-linux-musl-arm64.tar.gz",
-        "size": 22762226,
-        "digest": "sha256:bb37dc04989bf61892524086c4683cf9d86b269184877dd24ab91e3a27d38aa9",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-arm64.tar.gz"
+        "id": 802538263,
+        "name": "capsid-0.3.2-linux-musl-arm64.tar.gz",
+        "size": 22749429,
+        "digest": "sha256:46680b08c2a2c1634d15d4d0d759cea721dfcf31a3af163bd12b6a0449d0453b",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-arm64.tar.gz"
       },
       {
-        "id": 779112543,
-        "name": "capsid-0.3.1-linux-musl-arm64.tar.gz.sha256",
+        "id": 802538298,
+        "name": "capsid-0.3.2-linux-musl-arm64.tar.gz.sha256",
         "size": 103,
-        "digest": "sha256:b315031ce14cc49233b14fa1ac3e1dd0372deee2d08cf4f1d4d01aa344fe2345",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-arm64.tar.gz.sha256"
+        "digest": "sha256:8ffeeadc98a4818b76a1361c251179ff3570e8a3ee65a53d40f8a293a2f147a5",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-arm64.tar.gz.sha256"
       },
       {
-        "id": 779112654,
-        "name": "capsid-0.3.1-linux-musl-x86_64.tar.gz",
-        "size": 22426541,
-        "digest": "sha256:11da6b7e60f06e6978bc7fbd24bad0f6dbc35a782b36e220ce7077281addd3b7",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-x86_64.tar.gz"
+        "id": 802538301,
+        "name": "capsid-0.3.2-linux-musl-x86_64.tar.gz",
+        "size": 22373652,
+        "digest": "sha256:df75a50ab2eeae33e421e866f51ce0933fccd8af04e13d0d51126058bdffc09a",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-x86_64.tar.gz"
       },
       {
-        "id": 779113297,
-        "name": "capsid-0.3.1-linux-musl-x86_64.tar.gz.sha256",
+        "id": 802538349,
+        "name": "capsid-0.3.2-linux-musl-x86_64.tar.gz.sha256",
         "size": 104,
-        "digest": "sha256:e7d2d8c762bbd0a1bb01b843286c6a201a574a65db6efd0826ea76a729e7e158",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-x86_64.tar.gz.sha256"
+        "digest": "sha256:a2e5a89a53e2db9c277aaadad1295e3a31ae17da83058904bfc4378b51238952",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-x86_64.tar.gz.sha256"
       },
       {
-        "id": 779113364,
-        "name": "capsid-0.3.1-windows-x86_64.zip",
-        "size": 9752006,
-        "digest": "sha256:2d92fe21f8f02b85eb33086785683c5f8f7fb5b15f40b52c5d08da3c16ebb38b",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-windows-x86_64.zip"
+        "id": 802538433,
+        "name": "capsid-0.3.2-windows-x86_64.zip",
+        "size": 10052073,
+        "digest": "sha256:0d43eb849e2415bf507d2951628bc2fad31e255c76fbd81103e3c7aa0b4a0845",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-windows-x86_64.zip"
       },
       {
-        "id": 779113593,
-        "name": "capsid-0.3.1-windows-x86_64.zip.sha256",
+        "id": 802538573,
+        "name": "capsid-0.3.2-windows-x86_64.zip.sha256",
         "size": 99,
-        "digest": "sha256:808184c8d71c192bebcfe072446b3ae985a9cdf3426f2531271e1e81fd6f61f0",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-windows-x86_64.zip.sha256"
+        "digest": "sha256:10262df7c11db56ad0ddf479572fa4ec7f63138bd71bcdfdef0ac855f938cba2",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-windows-x86_64.zip.sha256"
       },
       {
-        "id": 779113670,
+        "id": 802538620,
         "name": "install.sh",
-        "size": 8115,
-        "digest": "sha256:ef4044c52f10842735ae28da748382941794a0e211886f2c99e53a59d07050c8",
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh"
+        "size": 7597,
+        "digest": "sha256:2d4e863a65c7c9b8654afdf1fabbd1c54ef828d32fe753e21ab400800ab54848",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/install.sh"
       }
     ]
   },

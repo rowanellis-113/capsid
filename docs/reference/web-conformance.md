@@ -1,7 +1,7 @@
 # Standards and Conformance
 
-> Reviewed against the `dev/v0.3.2` source/profile on 2026-11-27. Published prerelease
-> is `v0.3.1-beta.1`; stable remains `v0.2.2`. Required compatibility acceptance is **not**
+> Reviewed against the `dev/v0.3.2` (`v0.3.2-beta.1`) source/profile on 2026-11-28. Published prerelease
+> is `v0.3.2-beta.1`; stable remains `v0.2.2`. Required compatibility acceptance is **not**
 > full WPT or ECMA-429 conformance. See [current status](release-status.md).
 
 
@@ -219,7 +219,7 @@ The current adapted batch executes 84 upstream files in separate realms. It only
 
 The `0.3.x` development profile adds `WebSocketPair`, `WebSocket` and `CloseEvent`. Inbound
 101 and User-origin outbound ws/wss have working first-party host paths;
-`dev/v0.3.2` uses **ABI v8 and FetchRPC v4-only** (published `v0.3.1-beta.1` retains ABI v7
+`v0.3.2-beta.1` / `dev/v0.3.2` uses **ABI v8 and FetchRPC v4-only** (earlier `v0.3.1-beta.1` retained ABI v7
 and FetchRPC v3/v4). The stable channel remains `v0.2.2`; see
 [current status](release-status.md) and the [v0.3.2 verification record](../history/v0.3.2/README.md)
 (alongside the earlier [v0.3.0 qualification record](../history/v0.3.0/release-qualification.md))

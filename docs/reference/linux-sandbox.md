@@ -23,7 +23,7 @@ Landlock opens only resolver/hosts configuration, system CAs, timezone data, the
 seccomp allows the process memory, event loop, DNS, TLS, and IPv4/IPv6 stream/datagram operations required by txiki.js standard `fetch()`; it denies listeners, Unix/raw sockets, process/thread creation, exec, ptrace, namespace/mount changes after sandbox installation, filesystem writes, executable mappings, and kernel interfaces such as key/BPF/perf. Because thread creation is denied after installation, the libuv work pool that `fetch()` hostname pre-resolution runs on is warmed — and the system resolver primed — before the sandbox installs.
 
 Strict mode requires a supported Linux target with usable Landlock and seccomp.
-The published `v0.3.1-beta.1` Linux packages are static musl archives for both
+The published `v0.3.2-beta.1` Linux packages are static musl archives for both
 `x86_64` and `arm64` (hosted delegated sandbox CI runs on Ubuntu `x86_64`). If a
 mandatory feature is missing, startup fails; READY cannot report a partially
 strict worker. Other platforms fail closed for strict mode.

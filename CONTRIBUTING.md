@@ -1,6 +1,6 @@
 # Contributing
 
-Capsid's stable line is `0.2.2`; `0.3.1-beta` is an experimental prerelease.
+Capsid's stable line is `0.2.2`; `0.3.2-beta` (`v0.3.2-beta.1`) is an experimental prerelease.
 Public ABI, isolation and lifecycle contracts require explicit evidence. Prefer
 a small, reproducible change over a broad refactor or an unexplained green run.
 

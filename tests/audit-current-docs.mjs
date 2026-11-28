@@ -250,7 +250,7 @@ for (const [documentName, content] of [
   ['SECURITY.md', securityPolicy],
 ]) {
   assert.ok(
-    content.includes('`0.2.2`') && content.includes('`0.3.1-beta`'),
+    content.includes('`0.2.2`') && content.includes('`0.3.2-beta`'),
     `${documentName} must distinguish stable from the experimental prerelease`,
   );
 }
@@ -377,13 +377,13 @@ const currentStatus = JSON.parse(
 const profileV2 = JSON.parse(
   await readFile(path.join(root, 'tests/wpt/workerd-default-profile-v2.json'), 'utf8'),
 );
-assert.equal(currentStatus.developmentBranch, 'dev/v0.3.1');
-assert.equal(currentStatus.prerelease.channel, '0.3.1-beta');
-assert.equal(currentStatus.prerelease.tag, 'v0.3.1-beta.1');
+assert.equal(currentStatus.developmentBranch, 'dev/v0.3.2');
+assert.equal(currentStatus.prerelease.channel, '0.3.2-beta');
+assert.equal(currentStatus.prerelease.tag, 'v0.3.2-beta.1');
 assert.equal(currentStatus.prerelease.draft, false);
 assert.equal(currentStatus.prerelease.prerelease, false);
 assert.equal(currentStatus.prerelease.githubLatest, true);
-assert.equal(currentStatus.githubLatest.tag, 'v0.3.1-beta.1');
+assert.equal(currentStatus.githubLatest.tag, 'v0.3.2-beta.1');
 for (const [label, release] of [
   ['Stable', currentStatus.stable],
   ['Prerelease', currentStatus.prerelease],
@@ -416,21 +416,19 @@ assert.ok(
 );
 assert.equal(currentStatus.runtime.sourceCommit, currentStatus.prerelease.sourceCommit);
 assert.equal(currentStatus.runtime.sourceTree, currentStatus.prerelease.sourceTree);
-assert.equal(currentStatus.runtime.publicAbi, 7);
-assert.equal(currentStatus.runtime.defaultWireVersion, 3);
-assert.equal(currentStatus.checkout.kind, 'test-harness-successor');
+assert.equal(currentStatus.runtime.publicAbi, 8);
+assert.equal(currentStatus.runtime.defaultWireVersion, 4);
+assert.equal(currentStatus.checkout.kind, 'docs-successor');
 assert.equal(currentStatus.checkout.baseCommit, currentStatus.prerelease.sourceCommit);
-assert.deepEqual(Object.keys(currentStatus.checkout.buildInputChanges), [
-  'cmake/build_tests.cmake',
-]);
+assert.deepEqual(Object.keys(currentStatus.checkout.buildInputChanges), []);
 assert.equal(Object.keys(currentStatus.checkout.runtimeInputChanges).length, 0);
 assert.equal(Object.keys(currentStatus.checkout.vendorPatchChanges).length, 0);
 assert.equal(
   currentStatus.checkout.releaseQualificationInherited,
   false,
-  'test-harness successors do not inherit binary qualification beyond the tagged release',
+  'docs successors do not inherit binary qualification beyond the tagged release',
 );
-assert.match(currentStatus.runtime.sourceScope, /qualified 0\.3\.1-beta interface baseline/);
+assert.match(currentStatus.runtime.sourceScope, /qualified 0\.3\.2-beta interface baseline/);
 assert.equal(currentStatus.conformance.referenceProfile, profileV2.id);
 assert.deepEqual(
   currentStatus.conformance.rawFailingFiles.map((value) => value.path),
@@ -440,13 +438,13 @@ assert.equal(currentStatus.qualification.ordinarySuitePassed, false);
 assert.equal(currentStatus.qualification.standardsConformanceClaimed, false);
 assert.equal(currentStatus.performance.measurementBuild, 'local-rebuild');
 assert.equal(currentStatus.performance.matchesPublishedBetaSource, false);
-assert.equal(currentStatus.performance.sourceCommit, '6d4cc616619dfd1ada0e484c2c47b79046d680dc');
-assert.equal(currentStatus.performance.sourceTag, 'v0.3.1-beta.1');
+assert.equal(currentStatus.performance.sourceCommit, '24671d9957eee59d93564095c8b3af830301104f');
+assert.equal(currentStatus.performance.sourceTag, '');
 assert.equal(currentStatus.performance.representsPublishedRelease, false);
 assert.equal(
   currentStatus.performance.publishedBetaPerformanceMeasured,
   false,
-  'the dev/v0.3.1 measurement is not relabeled as a published release asset benchmark',
+  'the dev/v0.3.2 measurement is not relabeled as a published release asset benchmark',
 );
 assert.ok(
   documents.get('docs/reference/web-conformance.md').includes('workerd-default-profile-v2.json'),

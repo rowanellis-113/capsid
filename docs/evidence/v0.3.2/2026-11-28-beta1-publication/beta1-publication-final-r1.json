@@ -1,0 +1,353 @@
+{
+  "complete": true,
+  "published": true,
+  "draft": false,
+  "prerelease": false,
+  "githubLatest": true,
+  "channel": "0.3.2-beta",
+  "tag": "v0.3.2-beta.1",
+  "releaseId": 461174945,
+  "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1",
+  "publishedAt": "2026-11-28T00:09:20Z",
+  "verifiedAtUTC": "2026-11-28T00:09:21Z",
+  "previousGithubLatestTag": "v0.3.1-beta.1",
+  "previousPrereleaseTag": "v0.3.1-beta.1",
+  "stableTag": "v0.2.2",
+  "productCheckout": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
+  "productTree": "8e5bafde59408ffeb2344e0bdae15b699c939d3b",
+  "sourceFileCount": 5515,
+  "allRequiredCiGatesAndNativePackagesPassed": true,
+  "sourceQualificationRuns": {
+    "testingValidity": 45978674620,
+    "testingValidityAttempt": 2,
+    "formatting": 46005292962,
+    "formattingAttempt": 1,
+    "fivePlatformRelease": 46006877723,
+    "fivePlatformReleaseAttempt": 6
+  },
+  "releaseJobs": [
+    {
+      "id": 140773118995,
+      "name": "validation / posix-host-library",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140773120361,
+      "name": "validation / sanitizers (asan, CAPSID_ENABLE_ASAN, 1, 2, ^(wpt_conformance_not_configured|worker_package_.*|we...",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140773120660,
+      "name": "validation / release-wpt-and-delegated-sandbox",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140773121323,
+      "name": "validation / sanitizers (tsan, CAPSID_ENABLE_TSAN, clang, 1, 1, ^(wpt_conformance_not_configured|worker_packag...",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140773156193,
+      "name": "validation / fuzz",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140773157026,
+      "name": "validation / windows-host-library",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140773162124,
+      "name": "validation / sanitizers (ubsan, CAPSID_ENABLE_UBSAN, 1, 2, ^(wpt_conformance_not_configured|worker_package_.*)$)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140787474563,
+      "name": "validation / hosted-evidence-index",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140787578423,
+      "name": "package (macos-15-intel, darwin-x86_64, x86_64, x86_64, brew install ninja boost c-ares)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140787578452,
+      "name": "package (ubuntu-24.04, linux-musl-x86_64, x86_64, linux/amd64)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140787578481,
+      "name": "package (ubuntu-24.04-arm, linux-musl-arm64, aarch64, linux/arm64)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140787578483,
+      "name": "package (macos-15, darwin-arm64, arm64, arm64, brew install ninja boost c-ares)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140787578517,
+      "name": "package (windows-latest, windows-x86_64)",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "ordinarySuitePassed": false,
+  "standardsConformanceClaimed": false,
+  "independentPackageReviews": [
+    {
+      "artifactId": 15238209710,
+      "platform": "darwin-arm64",
+      "archive": "capsid-0.3.2-darwin-arm64.tar.gz",
+      "archiveSHA256": "a10ccb467afa179a833b5442796f1e21f2c4b9e6f91c9341ac418dad43763a01",
+      "sidecarSHA256": "176ac4fb295babbb52a0335e79c6e976311d0e767dc2bbda53e1aaddf34e137e",
+      "bytes": 10091995,
+      "sbomSHA256": "a5adc39db1a97c336eccf51be00207e758b07071a3f0153e69db22de33a8022e",
+      "buildId": "sha256:a00e1aba450589852c3398e38c8d4592b44d8474e430eac878962454e99ac331",
+      "compatibilityId": "sha256:27da8f3de3e8f26f76c8e625113d5e2f8b0136ddb0b6c64e6c3651ef3df3c3b1",
+      "binaries": {
+        "capsid-host": "310466f74bb93a8c5a70fa5665aa760d65c5799585e19c959612d8905c912af2",
+        "capsid-worker": "374166e0d4d0a34a8fd8a4c8ba59677ba193a5b9865c9638617219a6f338dd3a",
+        "capsid-bytecode-compile": "5a68c71f7d134633cee1eed9af8165907445c3283ce15ab9919993270349845b"
+      },
+      "architectureChecks": {
+        "capsid-host": {
+          "architecture": "arm64",
+          "machOCpuType": 16777228,
+          "thin": true
+        },
+        "capsid-worker": {
+          "architecture": "arm64",
+          "machOCpuType": 16777228,
+          "thin": true
+        },
+        "capsid-bytecode-compile": {
+          "architecture": "arm64",
+          "machOCpuType": 16777228,
+          "thin": true
+        }
+      }
+    },
+    {
+      "artifactId": 15238393041,
+      "platform": "darwin-x86_64",
+      "archive": "capsid-0.3.2-darwin-x86_64.tar.gz",
+      "archiveSHA256": "dc1203d5b99856b9e73c3d8c894233cd75baaf044a82444da718617573988338",
+      "sidecarSHA256": "4cdd32617beb200491530c859425755a0e9a88e632d748ebc0e698cb565142a8",
+      "bytes": 10093744,
+      "sbomSHA256": "614d87a20024eca59fb9bc6aecceb2bc02b2a4dae65f1318f0fef012fddb2499",
+      "buildId": "sha256:127ce4d4f81f26154a79f37d02fda78462dca81d09d6b2611917118b0ed7b0ed",
+      "compatibilityId": "sha256:f120e0f58f61064ff1fa70ee246e56c1b431afdf4c39db76c9000ad96d5d5bd0",
+      "binaries": {
+        "capsid-host": "6d90a98590c75ab1f642913cbe2bde49d7ec384318bdaef1521d17b3da3b91ad",
+        "capsid-worker": "34c72c3c8da307ca372f8136f1a92cf414a497763ba0a3c0fd7fa1ff1f21f85c",
+        "capsid-bytecode-compile": "76977a2a4201a6e6a0d92949874b62c451a7630bede93e1cb2e5a11d9446789c"
+      },
+      "architectureChecks": {
+        "capsid-host": {
+          "architecture": "x86_64",
+          "machOCpuType": 16777223,
+          "thin": true
+        },
+        "capsid-worker": {
+          "architecture": "x86_64",
+          "machOCpuType": 16777223,
+          "thin": true
+        },
+        "capsid-bytecode-compile": {
+          "architecture": "x86_64",
+          "machOCpuType": 16777223,
+          "thin": true
+        }
+      }
+    },
+    {
+      "artifactId": 15238174199,
+      "platform": "linux-musl-arm64",
+      "archive": "capsid-0.3.2-linux-musl-arm64.tar.gz",
+      "archiveSHA256": "46680b08c2a2c1634d15d4d0d759cea721dfcf31a3af163bd12b6a0449d0453b",
+      "sidecarSHA256": "8ffeeadc98a4818b76a1361c251179ff3570e8a3ee65a53d40f8a293a2f147a5",
+      "bytes": 22749429,
+      "sbomSHA256": "f1181eb9c0a2f6093ebaed79bedf4e9e52b5f3a9432b7c11b12a91e100c96f6a",
+      "buildId": "sha256:687e7931bab3f73ae1060b558857c9e36ae47ca857c15b993395ab018f8de5a5",
+      "compatibilityId": "sha256:a9652b25b7d41ad7807cd01750737be18174cd5e42715b5df9baa720bef620e7",
+      "binaries": {
+        "capsid-host": "23a0d3dd16d51fa0de68f6191ce26675ee90f637e7c1b56534a416cc5c8ff9ca",
+        "capsid-worker": "e1ac352b625172cd6314a624b3973c17b4c2f309bb17737d6472888a624d1c1c",
+        "capsid-bytecode-compile": "83b4c54ec80f00c7f2a715c006586a3e4a002af78da6dd9cbefbd8ee272f450f"
+      },
+      "architectureChecks": {
+        "capsid-host": {
+          "architecture": "arm64",
+          "elfMachine": 183,
+          "fullyStatic": true
+        },
+        "capsid-worker": {
+          "architecture": "arm64",
+          "elfMachine": 183,
+          "fullyStatic": true
+        },
+        "capsid-bytecode-compile": {
+          "architecture": "arm64",
+          "elfMachine": 183,
+          "fullyStatic": true
+        }
+      }
+    },
+    {
+      "artifactId": 15237754550,
+      "platform": "linux-musl-x86_64",
+      "archive": "capsid-0.3.2-linux-musl-x86_64.tar.gz",
+      "archiveSHA256": "df75a50ab2eeae33e421e866f51ce0933fccd8af04e13d0d51126058bdffc09a",
+      "sidecarSHA256": "a2e5a89a53e2db9c277aaadad1295e3a31ae17da83058904bfc4378b51238952",
+      "bytes": 22373652,
+      "sbomSHA256": "89c8379128712602def6c98db1ec1fd1f1e468bc18ad9064b6f713740bc7fbc1",
+      "buildId": "sha256:1c1f502f40353b10189d87730d636aa33676f8ba373850f30ed4d2ca26c42e76",
+      "compatibilityId": "sha256:f120e0f58f61064ff1fa70ee246e56c1b431afdf4c39db76c9000ad96d5d5bd0",
+      "binaries": {
+        "capsid-host": "9edabb9c6456788e2253423fdaafefce4c18365b40995f7a4f4b787f278040d0",
+        "capsid-worker": "2490c9206a2e55f899754b29c7a7e4a7840f0a82287e9c6fce9793b6b903674b",
+        "capsid-bytecode-compile": "1f278a334183859efb2ad230adb8ab113f54a1a293ee34d1e71c1039f915710a"
+      },
+      "architectureChecks": {
+        "capsid-host": {
+          "architecture": "x86_64",
+          "elfMachine": 62,
+          "fullyStatic": true
+        },
+        "capsid-worker": {
+          "architecture": "x86_64",
+          "elfMachine": 62,
+          "fullyStatic": true
+        },
+        "capsid-bytecode-compile": {
+          "architecture": "x86_64",
+          "elfMachine": 62,
+          "fullyStatic": true
+        }
+      }
+    },
+    {
+      "artifactId": 15238767340,
+      "platform": "windows-x86_64",
+      "archive": "capsid-0.3.2-windows-x86_64.zip",
+      "archiveSHA256": "0d43eb849e2415bf507d2951628bc2fad31e255c76fbd81103e3c7aa0b4a0845",
+      "sidecarSHA256": "10262df7c11db56ad0ddf479572fa4ec7f63138bd71bcdfdef0ac855f938cba2",
+      "bytes": 10052073,
+      "sbomSHA256": "40d49ed413b10d0f6f5fff6285721918e6e187548511afff01e7fadd29acea67",
+      "buildId": "sha256:e67e9141c23b29f832c1539758f37ef78c7d30f0e1eac4d6db5f417191e59dc4",
+      "compatibilityId": "sha256:c1702a52b90d238be3060e528c642fe4f236caf223c714f1b630fc5edd85e018",
+      "binaries": {
+        "capsid-host": "c6f3f3e7c9f2066e2406c14ee44813d82e2e42016a5d2c04775e099690979653",
+        "capsid-worker": "3b166115bfbacf4ef04ed99067b2737c044f31a776d8d34a79a37f107afec665",
+        "capsid-bytecode-compile": "c5707ad82c6de5a917c898131a0f09b3fbe9d36f5d92893c60300d77618e505f"
+      },
+      "architectureChecks": {
+        "capsid-host": {
+          "architecture": "x86_64",
+          "format": "PE32+"
+        },
+        "capsid-worker": {
+          "architecture": "x86_64",
+          "format": "PE32+"
+        },
+        "capsid-bytecode-compile": {
+          "architecture": "x86_64",
+          "format": "PE32+"
+        }
+      }
+    }
+  ],
+  "assets": [
+    {
+      "id": 802538236,
+      "name": "capsid-0.3.2-darwin-arm64.tar.gz",
+      "size": 10091995,
+      "digest": "sha256:a10ccb467afa179a833b5442796f1e21f2c4b9e6f91c9341ac418dad43763a01",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-arm64.tar.gz"
+    },
+    {
+      "id": 802538248,
+      "name": "capsid-0.3.2-darwin-arm64.tar.gz.sha256",
+      "size": 99,
+      "digest": "sha256:176ac4fb295babbb52a0335e79c6e976311d0e767dc2bbda53e1aaddf34e137e",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-arm64.tar.gz.sha256"
+    },
+    {
+      "id": 802538238,
+      "name": "capsid-0.3.2-darwin-x86_64.tar.gz",
+      "size": 10093744,
+      "digest": "sha256:dc1203d5b99856b9e73c3d8c894233cd75baaf044a82444da718617573988338",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-x86_64.tar.gz"
+    },
+    {
+      "id": 802538247,
+      "name": "capsid-0.3.2-darwin-x86_64.tar.gz.sha256",
+      "size": 100,
+      "digest": "sha256:4cdd32617beb200491530c859425755a0e9a88e632d748ebc0e698cb565142a8",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-x86_64.tar.gz.sha256"
+    },
+    {
+      "id": 802538263,
+      "name": "capsid-0.3.2-linux-musl-arm64.tar.gz",
+      "size": 22749429,
+      "digest": "sha256:46680b08c2a2c1634d15d4d0d759cea721dfcf31a3af163bd12b6a0449d0453b",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-arm64.tar.gz"
+    },
+    {
+      "id": 802538298,
+      "name": "capsid-0.3.2-linux-musl-arm64.tar.gz.sha256",
+      "size": 103,
+      "digest": "sha256:8ffeeadc98a4818b76a1361c251179ff3570e8a3ee65a53d40f8a293a2f147a5",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-arm64.tar.gz.sha256"
+    },
+    {
+      "id": 802538301,
+      "name": "capsid-0.3.2-linux-musl-x86_64.tar.gz",
+      "size": 22373652,
+      "digest": "sha256:df75a50ab2eeae33e421e866f51ce0933fccd8af04e13d0d51126058bdffc09a",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-x86_64.tar.gz"
+    },
+    {
+      "id": 802538349,
+      "name": "capsid-0.3.2-linux-musl-x86_64.tar.gz.sha256",
+      "size": 104,
+      "digest": "sha256:a2e5a89a53e2db9c277aaadad1295e3a31ae17da83058904bfc4378b51238952",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-x86_64.tar.gz.sha256"
+    },
+    {
+      "id": 802538433,
+      "name": "capsid-0.3.2-windows-x86_64.zip",
+      "size": 10052073,
+      "digest": "sha256:0d43eb849e2415bf507d2951628bc2fad31e255c76fbd81103e3c7aa0b4a0845",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-windows-x86_64.zip"
+    },
+    {
+      "id": 802538573,
+      "name": "capsid-0.3.2-windows-x86_64.zip.sha256",
+      "size": 99,
+      "digest": "sha256:10262df7c11db56ad0ddf479572fa4ec7f63138bd71bcdfdef0ac855f938cba2",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-windows-x86_64.zip.sha256"
+    },
+    {
+      "id": 802538620,
+      "name": "install.sh",
+      "size": 7597,
+      "digest": "sha256:2d4e863a65c7c9b8654afdf1fabbd1c54ef828d32fe753e21ab400800ab54848",
+      "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/install.sh"
+    }
+  ]
+}

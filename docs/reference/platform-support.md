@@ -51,13 +51,13 @@ Use [building from source](../guides/build-from-source.md) for shared setup and 
 
 ### Linux
 
-- The published `0.3.1-beta` Linux packages are fully static musl archives for both `x86_64` and `arm64`: `capsid-<version>-linux-musl-x86_64.tar.gz` and `capsid-<version>-linux-musl-arm64.tar.gz` (older `x86_64` releases used `capsid-<version>-linux-musl.tar.gz`). See [release selection](../guides/install-packages.md#development-package-matrix);
+- The published `0.3.2-beta` Linux packages are fully static musl archives for both `x86_64` and `arm64`: `capsid-<version>-linux-musl-x86_64.tar.gz` and `capsid-<version>-linux-musl-arm64.tar.gz` (older `x86_64` releases used `capsid-<version>-linux-musl.tar.gz`). See [release selection](../guides/install-packages.md#development-package-matrix);
 - `CAPSID_ENABLE_LTO`, `CAPSID_ENABLE_ASAN/UBSAN/TSAN`, fuzz, and `CAPSID_GENERATE_LINK_MAP` are available;
 - strict sandbox requires the kernel to provide seccomp and Landlock; cgroup/namespace capabilities are delegated by the host. See [Linux strict sandbox](linux-sandbox.md) for the detailed contract.
 
 ### macOS
 
-- Built natively with system Clang. Published `0.3.1-beta` ships separate thin native archives for Apple Silicon (`capsid-<version>-darwin-arm64.tar.gz`) and Intel (`capsid-<version>-darwin-x86_64.tar.gz`), built on native runners rather than as universal binaries;
+- Built natively with system Clang. Published `0.3.2-beta` ships separate thin native archives for Apple Silicon (`capsid-<version>-darwin-arm64.tar.gz`) and Intel (`capsid-<version>-darwin-x86_64.tar.gz`), built on native runners rather than as universal binaries;
 - The unified local dev Host (`--app-dir`, single or multi-worker) is part of the three-platform unified contract and uses one pool-owned shared acceptor;
 - `capsid:fs` is degraded but usable: readText/stat/list behave consistently with Linux, implemented as a component-by-component `openat(O_NOFOLLOW)` dirfd walk; symlinks are always rejected;
 - There is no API equivalent to `sched_setaffinity`; CPU affinity tests are skipped with CTest 77;

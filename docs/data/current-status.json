@@ -1,18 +1,13 @@
 {
-  "asOfUTC": "2026-11-22T13:10:53Z",
+  "asOfUTC": "2026-11-28T00:09:21Z",
   "checkout": {
-    "baseCommit": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
-    "buildInputChanges": {
-      "cmake/build_tests.cmake": {
-        "currentGitObject": "191702853a0a8e18674601d6de4adc2357845fea",
-        "qualifiedGitObject": "f6d8d06480256d91ca9dae14af500f883fc7ce68"
-      }
-    },
-    "changeScope": "post-v0.3.1-beta.1 release publication metadata, docs/perf-site updates, and benchmark_loadgen_correctness CTest serialization/timeout guard; runtime and vendor inputs match v0.3.1-beta.1",
-    "headerSHA256": "54946a795edfd8f9dec7fdca6a66887e9140c28f473d96e4027d9ab17b5caa97",
+    "baseCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
+    "buildInputChanges": {},
+    "changeScope": "post-v0.3.2-beta.1 release publication metadata, streamlined README/perf-site installer cutover, and documentation alignment; runtime/build/vendor inputs match qualified v0.3.2-beta.1 identically",
+    "headerSHA256": "73954203a46c5357dd80cbc3d249d887c06a1442fffa408de4ebda94688a5a38",
     "inputManifest": "docs/data/runtime-source-manifest.json",
-    "kind": "test-harness-successor",
-    "protocolSHA256": "2c7a5fb6eb02fafcf30df741a1be6d742c17d9a3d2a1a58c563bc35f1c438bcf",
+    "kind": "docs-successor",
+    "protocolSHA256": "d4615f3fbeecf16a0fe4b07363649da0d7882da112d33f7421d3ab6695924507",
     "releaseQualificationInherited": false,
     "runtimeInputChanges": {},
     "vendorPatchChanges": {}
@@ -51,12 +46,12 @@
     "standardsConformanceClaimed": false,
     "wptCommit": "1985b47aa8972a970f005957f2bfa036da1787c6"
   },
-  "developmentBranch": "dev/v0.3.1",
+  "developmentBranch": "dev/v0.3.2",
   "githubLatest": {
     "prerelease": false,
-    "releaseId": 454455848,
-    "tag": "v0.3.1-beta.1",
-    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1"
+    "releaseId": 461174945,
+    "tag": "v0.3.2-beta.1",
+    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1"
   },
   "historicalPerformancePoints": [
     {
@@ -82,55 +77,61 @@
       "release": "v0.3.0-beta.5",
       "status": "verified",
       "version": "0.3.0-beta.5"
+    },
+    {
+      "date": "2026-11-22",
+      "release": "v0.3.1-beta.1",
+      "status": "verified",
+      "version": "0.3.1-beta.1"
     }
   ],
   "performance": {
-    "archiveReleaseLabel": "v0.3.1-beta.1",
+    "archiveReleaseLabel": "v0.3.2-dev",
     "contract": "capsid-perf-lane-v3",
     "cpuSet": "0-3",
-    "date": "2026-11-22",
+    "date": "2026-11-27",
     "density": {
       "cold@100k": {
-        "count": 497,
+        "count": 502,
         "limit": "budget",
-        "pssMb": 2045.6,
+        "pssMb": 2046.3,
         "unit": "workers"
       },
       "cold@10k": {
-        "count": 721,
+        "count": 709,
         "limit": "budget",
-        "pssMb": 2045.7,
+        "pssMb": 2046.1,
         "unit": "workers"
       },
       "cold@1m": {
-        "count": 127,
+        "count": 135,
         "limit": "budget",
-        "pssMb": 2032.8,
+        "pssMb": 2038.3,
         "unit": "workers"
       },
       "warm@100k": {
-        "count": 496,
+        "count": 501,
         "limit": "budget",
-        "pssMb": 2044.2,
+        "pssMb": 2047.3,
         "unit": "workers"
       },
       "warm@10k": {
-        "count": 715,
+        "count": 705,
         "limit": "budget",
-        "pssMb": 2046.0,
+        "pssMb": 2047.7,
         "unit": "workers"
       },
       "warm@1m": {
-        "count": 127,
+        "count": 135,
         "limit": "budget",
-        "pssMb": 2034.2,
+        "pssMb": 2039.4,
         "unit": "workers"
       }
     },
-    "displayLabel": "v0.3.1-beta.1 local rebuild · 6d4cc61",
-    "evidenceFiles": 4481,
-    "independentReview": "docs/data/performance-review-v031-beta1.json",
-    "lowLoadPssMiB": 15.7,
+    "displayLabel": "v0.3.2-dev local rebuild · 24671d9",
+    "evidenceFiles": 4533,
+    "independentReview": "docs/data/performance-review-v032.json",
+    "lowLoadPssMiB": 16.1,
     "machine": {
       "architecture": "x86_64",
       "bun": "1.4.5",
@@ -145,148 +146,146 @@
       "workerd_version": "workerd 2026-11-21"
     },
     "matchesPublishedBetaSource": false,
-    "measuredSourceManifest": "docs/data/performance-source-manifest-v031-beta1.json",
+    "measuredSourceManifest": "docs/data/performance-source-manifest-v032.json",
     "measurementBuild": "local-rebuild",
     "physicalHostExclusivityClaimed": false,
     "publishedBetaPerformanceMeasured": false,
     "qps": {
-      "dynamic-api": 14421.9,
-      "matrix-json-16k": 14441.4,
-      "matrix-json-1k": 24186.0,
-      "stream": 11153.2
+      "dynamic-api": 19511.5,
+      "matrix-json-16k": 23202.4,
+      "matrix-json-1k": 41124.8,
+      "stream": 14675.0
     },
     "representsPublishedRelease": false,
-    "servingPssMiB": 19.6,
-    "session": "local-wsl-v031-beta1-v3-20261122T064911Z-6d4cc61",
-    "sourceCommit": "6d4cc616619dfd1ada0e484c2c47b79046d680dc",
-    "sourceTag": "v0.3.1-beta.1",
-    "sourceTree": "126888a657e26547c689bca942aeabfdb6f5a4f6"
+    "servingPssMiB": 19.3,
+    "session": "local-wsl-v032-dev-v3-20261127T055316Z-24671d9",
+    "sourceCommit": "24671d9957eee59d93564095c8b3af830301104f",
+    "sourceTag": "",
+    "sourceTree": "f34e665ad95b1ca4fd4cdfc40d023492e72aa4e2"
   },
   "prerelease": {
     "assets": [
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-arm64.tar.gz",
-        "digest": "sha256:c58ea86c9343f06716467c84995704c60ef7ae3b39b0715059208a66007d5568",
-        "id": 779110366,
-        "name": "capsid-0.3.1-darwin-arm64.tar.gz",
-        "size": 9906230
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-arm64.tar.gz",
+        "digest": "sha256:a10ccb467afa179a833b5442796f1e21f2c4b9e6f91c9341ac418dad43763a01",
+        "id": 802538236,
+        "name": "capsid-0.3.2-darwin-arm64.tar.gz",
+        "size": 10091995
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-arm64.tar.gz.sha256",
-        "digest": "sha256:851ffe9e3cfd47469cb98730035fa6e8e35a7340aceb4ca775d675ee0c9e7c86",
-        "id": 779110925,
-        "name": "capsid-0.3.1-darwin-arm64.tar.gz.sha256",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-arm64.tar.gz.sha256",
+        "digest": "sha256:176ac4fb295babbb52a0335e79c6e976311d0e767dc2bbda53e1aaddf34e137e",
+        "id": 802538248,
+        "name": "capsid-0.3.2-darwin-arm64.tar.gz.sha256",
         "size": 99
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-x86_64.tar.gz",
-        "digest": "sha256:c22e3b67fedf540f0429edf7fd0dade197c5cc57d93a516c9207fa11b14feb60",
-        "id": 779111053,
-        "name": "capsid-0.3.1-darwin-x86_64.tar.gz",
-        "size": 9909506
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-x86_64.tar.gz",
+        "digest": "sha256:dc1203d5b99856b9e73c3d8c894233cd75baaf044a82444da718617573988338",
+        "id": 802538238,
+        "name": "capsid-0.3.2-darwin-x86_64.tar.gz",
+        "size": 10093744
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-darwin-x86_64.tar.gz.sha256",
-        "digest": "sha256:87078e5e5876c7f34151ab7e0fb1bf565ccba9084eb858423aaa092eb38aaf3e",
-        "id": 779111497,
-        "name": "capsid-0.3.1-darwin-x86_64.tar.gz.sha256",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-darwin-x86_64.tar.gz.sha256",
+        "digest": "sha256:4cdd32617beb200491530c859425755a0e9a88e632d748ebc0e698cb565142a8",
+        "id": 802538247,
+        "name": "capsid-0.3.2-darwin-x86_64.tar.gz.sha256",
         "size": 100
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-arm64.tar.gz",
-        "digest": "sha256:bb37dc04989bf61892524086c4683cf9d86b269184877dd24ab91e3a27d38aa9",
-        "id": 779111577,
-        "name": "capsid-0.3.1-linux-musl-arm64.tar.gz",
-        "size": 22762226
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-arm64.tar.gz",
+        "digest": "sha256:46680b08c2a2c1634d15d4d0d759cea721dfcf31a3af163bd12b6a0449d0453b",
+        "id": 802538263,
+        "name": "capsid-0.3.2-linux-musl-arm64.tar.gz",
+        "size": 22749429
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-arm64.tar.gz.sha256",
-        "digest": "sha256:b315031ce14cc49233b14fa1ac3e1dd0372deee2d08cf4f1d4d01aa344fe2345",
-        "id": 779112543,
-        "name": "capsid-0.3.1-linux-musl-arm64.tar.gz.sha256",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-arm64.tar.gz.sha256",
+        "digest": "sha256:8ffeeadc98a4818b76a1361c251179ff3570e8a3ee65a53d40f8a293a2f147a5",
+        "id": 802538298,
+        "name": "capsid-0.3.2-linux-musl-arm64.tar.gz.sha256",
         "size": 103
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-x86_64.tar.gz",
-        "digest": "sha256:11da6b7e60f06e6978bc7fbd24bad0f6dbc35a782b36e220ce7077281addd3b7",
-        "id": 779112654,
-        "name": "capsid-0.3.1-linux-musl-x86_64.tar.gz",
-        "size": 22426541
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-x86_64.tar.gz",
+        "digest": "sha256:df75a50ab2eeae33e421e866f51ce0933fccd8af04e13d0d51126058bdffc09a",
+        "id": 802538301,
+        "name": "capsid-0.3.2-linux-musl-x86_64.tar.gz",
+        "size": 22373652
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-linux-musl-x86_64.tar.gz.sha256",
-        "digest": "sha256:e7d2d8c762bbd0a1bb01b843286c6a201a574a65db6efd0826ea76a729e7e158",
-        "id": 779113297,
-        "name": "capsid-0.3.1-linux-musl-x86_64.tar.gz.sha256",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-linux-musl-x86_64.tar.gz.sha256",
+        "digest": "sha256:a2e5a89a53e2db9c277aaadad1295e3a31ae17da83058904bfc4378b51238952",
+        "id": 802538349,
+        "name": "capsid-0.3.2-linux-musl-x86_64.tar.gz.sha256",
         "size": 104
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-windows-x86_64.zip",
-        "digest": "sha256:2d92fe21f8f02b85eb33086785683c5f8f7fb5b15f40b52c5d08da3c16ebb38b",
-        "id": 779113364,
-        "name": "capsid-0.3.1-windows-x86_64.zip",
-        "size": 9752006
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-windows-x86_64.zip",
+        "digest": "sha256:0d43eb849e2415bf507d2951628bc2fad31e255c76fbd81103e3c7aa0b4a0845",
+        "id": 802538433,
+        "name": "capsid-0.3.2-windows-x86_64.zip",
+        "size": 10052073
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/capsid-0.3.1-windows-x86_64.zip.sha256",
-        "digest": "sha256:808184c8d71c192bebcfe072446b3ae985a9cdf3426f2531271e1e81fd6f61f0",
-        "id": 779113593,
-        "name": "capsid-0.3.1-windows-x86_64.zip.sha256",
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/capsid-0.3.2-windows-x86_64.zip.sha256",
+        "digest": "sha256:10262df7c11db56ad0ddf479572fa4ec7f63138bd71bcdfdef0ac855f938cba2",
+        "id": 802538573,
+        "name": "capsid-0.3.2-windows-x86_64.zip.sha256",
         "size": 99
       },
       {
-        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh",
-        "digest": "sha256:ef4044c52f10842735ae28da748382941794a0e211886f2c99e53a59d07050c8",
-        "id": 779113670,
+        "browser_download_url": "https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/install.sh",
+        "digest": "sha256:2d4e863a65c7c9b8654afdf1fabbd1c54ef828d32fe753e21ab400800ab54848",
+        "id": 802538620,
         "name": "install.sh",
-        "size": 8115
+        "size": 7597
       }
     ],
-    "channel": "0.3.1-beta",
+    "channel": "0.3.2-beta",
     "draft": false,
     "githubLatest": true,
     "prerelease": false,
-    "publicationEvidence": "docs/evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json",
-    "publishedAt": "2026-11-22T13:10:51Z",
-    "releaseId": 454455848,
-    "runtimeVersion": "0.3.1",
-    "sourceCommit": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
-    "sourceTree": "7894f8a984c7344a904ac0e08c6099e282036b1a",
-    "tag": "v0.3.1-beta.1",
-    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1"
+    "publicationEvidence": "docs/evidence/v0.3.2/2026-11-28-beta1-publication/beta1-publication-final-r1.json",
+    "publishedAt": "2026-11-28T00:09:20Z",
+    "releaseId": 461174945,
+    "runtimeVersion": "0.3.2",
+    "sourceCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
+    "sourceTree": "8e5bafde59408ffeb2344e0bdae15b699c939d3b",
+    "tag": "v0.3.2-beta.1",
+    "url": "https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1"
   },
   "qualification": {
     "allRequiredCiGatesAndNativePackagesPassed": true,
-    "evidence": "docs/evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json",
+    "evidence": "docs/evidence/v0.3.2/2026-11-28-beta1-publication/beta1-publication-final-r1.json",
     "ordinarySuitePassed": false,
-    "sourceCommit": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
-    "sourceFiles": 5492,
+    "sourceCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
+    "sourceFiles": 5515,
     "sourceQualificationRuns": {
-      "branchTestingValidity": 45008288717,
-      "branchTestingValidityAttempt": 1,
-      "fivePlatformRelease": 45008292926,
-      "fivePlatformReleaseAttempt": 1,
-      "formatting": 45008288654,
+      "fivePlatformRelease": 46006877723,
+      "fivePlatformReleaseAttempt": 6,
+      "formatting": 46005292962,
       "formattingAttempt": 1,
-      "testingValidity": 45008292926,
-      "testingValidityAttempt": 1
+      "testingValidity": 45978674620,
+      "testingValidityAttempt": 2
     },
     "standardsConformanceClaimed": false
   },
   "runtime": {
     "appPidLimitFieldEnforced": false,
     "capabilityPolicyVersion": 2,
-    "defaultWireVersion": 3,
-    "headerSHA256": "54946a795edfd8f9dec7fdca6a66887e9140c28f473d96e4027d9ab17b5caa97",
+    "defaultWireVersion": 4,
+    "headerSHA256": "73954203a46c5357dd80cbc3d249d887c06a1442fffa408de4ebda94688a5a38",
     "negotiatedWireVersion": 4,
-    "protocolSHA256": "2c7a5fb6eb02fafcf30df741a1be6d742c17d9a3d2a1a58c563bc35f1c438bcf",
-    "publicAbi": 7,
+    "protocolSHA256": "d4615f3fbeecf16a0fe4b07363649da0d7882da112d33f7421d3ab6695924507",
+    "publicAbi": 8,
     "quickjsCommit": "8fcb4751a66986bd42b11de3012e967d77790923",
     "sdkPatchCount": 79,
-    "sourceCommit": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
+    "sourceCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
     "sourceManifest": "docs/data/runtime-source-manifest.json",
-    "sourceScope": "qualified 0.3.1-beta interface baseline (v0.3.1-beta.1); current checkout runtime inputs match",
-    "sourceTree": "7894f8a984c7344a904ac0e08c6099e282036b1a",
+    "sourceScope": "qualified 0.3.2-beta interface baseline (v0.3.2-beta.1); current checkout runtime inputs match",
+    "sourceTree": "8e5bafde59408ffeb2344e0bdae15b699c939d3b",
     "txiki": {
       "commit": "1a230d31183f062fae7a6c4fd2cff466cecc1787",
       "tag": "v26.6.0"
@@ -305,10 +304,10 @@
       "capsid:utils",
       "capsid:uuid"
     ],
-    "version": "0.3.1"
+    "version": "0.3.2"
   },
   "schema": 1,
-  "sourceChangeScope": "post-v0.3.1-beta.1 release publication metadata, docs/perf-site updates, and benchmark_loadgen_correctness CTest serialization/timeout guard; runtime and vendor inputs match v0.3.1-beta.1",
+  "sourceChangeScope": "post-v0.3.2-beta.1 release publication metadata, streamlined README/perf-site installer cutover, and documentation alignment; runtime/build/vendor inputs match qualified v0.3.2-beta.1 identically",
   "stable": {
     "githubLatest": false,
     "prerelease": false,

@@ -1,7 +1,7 @@
 # Config v2 and multi-tenant elastic worker pools
 
-> This design targets `dev/v0.3.2`. It defines Host and application configuration, elastic pools and tenant budgets. The [v0.3.2 acceptance record](../history/v0.3.2/README.md) identifies the three P1 fixes and the remaining release checks.
-> For the published `v0.3.1-beta.1`, use the [tagged Host configuration reference](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/host-config.md) and [tagged application configuration guide](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/capsid-json.md). [Release and measurement provenance](../reference/release-status.md)
+> This design is shipped in `v0.3.2-beta.1` / `dev/v0.3.2`. It defines Host and application configuration, elastic pools and tenant budgets. The [v0.3.2 acceptance record](../history/v0.3.2/README.md) records verified checks and gates.
+> For the earlier `v0.3.1-beta.1`, use the [tagged Host configuration reference](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/host-config.md) and [tagged application configuration guide](https://github.com/rowanellis-113/capsid/blob/v0.3.1-beta.1/docs/capsid-json.md). [Release and measurement provenance](../reference/release-status.md)
 
 ---
 

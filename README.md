@@ -8,7 +8,7 @@ Run untrusted AI-generated code, customer plugins, and webhooks in **dedicated L
 
 <p>
   <a href="https://rowanellis-113.github.io/capsid/"><img src="https://img.shields.io/badge/benchmarks-interactive_charts-059669?style=flat-square" alt="Interactive Benchmarks" /></a>
-  <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1"><img src="https://img.shields.io/badge/prerelease-v0.3.1--beta.1-7C3AED?style=flat-square" alt="Prerelease v0.3.1-beta.1" /></a>
+  <a href="https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1"><img src="https://img.shields.io/badge/prerelease-v0.3.2--beta.1-7C3AED?style=flat-square" alt="Prerelease v0.3.2-beta.1" /></a>
   <a href="docs/reference/embedding-api.md"><img src="https://img.shields.io/badge/C_ABI-v8-0F766E?style=flat-square" alt="Public C ABI v8" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-475569?style=flat-square" alt="Apache-2.0 License" /></a>
 </p>
@@ -131,11 +131,11 @@ Add `"pool":{"minReady":0,"maxWorkers":8,"idleTimeout":"60s"}` in Linux managed 
 
 > **Stable**: [`v0.2.2`](https://github.com/rowanellis-113/capsid/releases/tag/v0.2.2)
 >
-> **Prerelease**: [`v0.3.1-beta.1`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.1-beta.1) *(latest published prebuilt binaries; earlier `single-worker` CLI &amp; C ABI v7 — [Run the published beta](docs/guides/run-application.md#run-the-published-beta) &middot; [Windows packages](docs/guides/install-packages.md#install-on-windows))*
+> **Prerelease**: [`v0.3.2-beta.1`](https://github.com/rowanellis-113/capsid/releases/tag/v0.3.2-beta.1) *(latest published prebuilt binaries — Config v2, Elastic OS Process Pools, C ABI v8 &amp; FetchRPC v4 &middot; [Windows packages](docs/guides/install-packages.md#install-on-windows))*
 
 ```sh
-curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.1-beta.1/install.sh \
-  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.1-beta.1
+curl -fsSL https://github.com/rowanellis-113/capsid/releases/download/v0.3.2-beta.1/install.sh \
+  | CAPSID_REPO=rowanellis-113/capsid bash -s -- v0.3.2-beta.1
 ```
 
 <details>

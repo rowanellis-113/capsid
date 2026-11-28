@@ -36,7 +36,7 @@ git clone --branch dev/v0.3.2 --recurse-submodules \
 cd capsid
 ```
 
-Use `--branch v0.3.1-beta.1` instead if you need the published prerelease source.
+Use `--branch v0.3.2-beta.1` instead if you need the published prerelease source.
 
 For an existing checkout, preserve your work and select the intended revision
 before building. Do not reset or clean a working tree merely to satisfy the

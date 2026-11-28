@@ -1,6 +1,6 @@
 # Capsid documentation
 
-**Start here:** [Run a Fetch application](guides/run-application.md). The quick start includes the commands for both the published `v0.3.1-beta.1` package and this `dev/v0.3.2` source branch. [Release status](reference/release-status.md) identifies the source behind each published result.
+**Start here:** [Run a Fetch application](guides/run-application.md). The quick start covers the unified `capsid-host --app-dir .` CLI shipped in `v0.3.2-beta.1` and `dev/v0.3.2`. [Release status](reference/release-status.md) identifies the source behind each published result.
 
 ## Guides
 
@@ -32,7 +32,7 @@ The source repository contains the review history and captured evidence. SDK pac
 | Directory | What belongs here |
 | --- | --- |
 | [history/](history/README.md) | Dated human reviews, plans, release qualification and original journals. Start with the [v0.3.0 qualification](history/v0.3.0/release-qualification.md) or the [v0.3.2 review](history/v0.3.2/README.md). |
-| [evidence/](evidence/) | Captured outcomes for a specific version and run, including [publication verification](evidence/v0.3.1/2026-11-22-beta1-publication/beta1-publication-final-r1.json). |
+| [evidence/](evidence/) | Captured outcomes for a specific version and run, including [publication verification](evidence/v0.3.2/2026-11-28-beta1-publication/beta1-publication-final-r1.json). |
 | [data/](data/) | Machine-readable manifests, baselines and indexes consumed by builds or tools, including the [capability manifest](data/capability-manifest.json) and [documentation inventory](data/documentation-coverage.json). |
 
 ## Filing a document

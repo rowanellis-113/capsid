@@ -118,7 +118,7 @@ normative security references.
 
 ## Validation and Performance Boundary
 
-The published `v0.3.1-beta.1` source (`845ae5d`) passed its declared CI and native package gates (see [current status](../reference/release-status.md#latest-published-binary-qualification) and the preserved [v0.3.0 qualification record](../history/v0.3.0/release-qualification.md)).
+The published `v0.3.2-beta.1` source (`28895512`) passed its declared CI and native package gates (see [current status](../reference/release-status.md#latest-published-binary-qualification) and the preserved [v0.3.0 qualification record](../history/v0.3.0/release-qualification.md)).
 Known raw WPT failures and genuine skips remain visible; neither full standards
 conformance nor every historical causal issue is claimed closed. Native
 Windows/macOS integration is separate from production isolation.

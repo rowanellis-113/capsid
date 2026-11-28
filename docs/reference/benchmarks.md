@@ -1,14 +1,14 @@
 # Performance: Current Measurements and Methodology
 
-Reviewed 2026-11-27. The latest accepted measurement uses a **local WSL2
+Reviewed 2026-11-28. The latest accepted measurement uses a **local WSL2
 Release/LTO rebuild** of the untagged `dev/v0.3.2` snapshot (`24671d9`,
 powered by `quickjs-turbo v0.15.1-turbo.8` native register-frame VM, C ABI v8,
 HTTP/stream fast paths with IPC event batching, explicit density-preserving PIC
 defaults, and the `v0.3.2` elastic-pool / eviction / Config v2 Host). It
 measures that build, **not any distributed release package**. The
 [current status](release-status.md) and [generated data](../data/current-status.json)
-retain the published `v0.3.1-beta.1` release status separately from this
-development-branch measurement.
+bind the published `v0.3.2-beta.1` release status alongside this recorded
+local measurement.
 
 ## Latest Accepted Record (`capsid-perf-lane-v3`)
 

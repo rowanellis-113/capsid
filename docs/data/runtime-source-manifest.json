@@ -1,13 +1,13 @@
 {
   "schema": 2,
-  "sourceCommit": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
-  "sourceTree": "7894f8a984c7344a904ac0e08c6099e282036b1a",
+  "sourceCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
+  "sourceTree": "8e5bafde59408ffeb2344e0bdae15b699c939d3b",
   "semantics": "sourceCommit/sourceTree/qualifiedReleaseFiles identify the qualified release only. files fingerprint the separately reviewed development checkout, which does not inherit binary qualification.",
   "files": {
     "CMakeLists.txt": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "131546b56361959fae26cd797679e2b570055fea"
+      "gitObject": "cbe63c098e8256e98ee9135728a6f7df4211b7bc"
     },
     "cmake/AuditEscapeCapabilityDefaults.cmake": {
       "mode": "100644",
@@ -22,7 +22,7 @@
     "cmake/AuditTxikiVendor.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6b471da34c89fb352092f41d197b43293da1d3b2"
+      "gitObject": "910b22b1720b769a5f04971fdb1357beddb01eca"
     },
     "cmake/AuditWasmLimits.cmake": {
       "mode": "100644",
@@ -32,7 +32,7 @@
     "cmake/AuditWptCoverage.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "e1eac4373efd3b9447bceaf615b65d85b0dc4e51"
+      "gitObject": "47088abda842ba38b1cf285517b7ae9473fe6832"
     },
     "cmake/CapsidConfig.cmake.in": {
       "mode": "100644",
@@ -42,7 +42,7 @@
     "cmake/CapsidPackage.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "7516870d1df1e2efd9c87f17e3b3b34b78048aaa"
+      "gitObject": "d0830637a1d6516ebd3dc8ff656cd10f578429d2"
     },
     "cmake/CapsidPackagePlatform.cmake": {
       "mode": "100644",
@@ -57,7 +57,7 @@
     "cmake/ComputeBuildIdentity.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "754ea157a03a549d005a270d43231a5ea3198f55"
+      "gitObject": "3ba23e214c7796d59a001bf2253fcb2309c0946e"
     },
     "cmake/ComputeTxikiOverlayKey.cmake": {
       "mode": "100644",
@@ -137,7 +137,12 @@
     "cmake/ValidatePackageMetadata.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "a2e1e053275147481cf224b95c7600cbe0ad25fe"
+      "gitObject": "9ef864bdff89a083738c8f2be9c1ad8762efa90d"
+    },
+    "cmake/VerifyReleaseSource.cmake.in": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "4e4cfced7a77b464486149bb375b796889d2a38f"
     },
     "cmake/WindowsAsanRuntime.cmake": {
       "mode": "100644",
@@ -147,22 +152,22 @@
     "cmake/build_host.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "06b1d6fdd507829fc2fa72c374ca4630e3564275"
+      "gitObject": "485350fae4e7c3780d12c4b326f4fc0452c80402"
     },
     "cmake/build_identity.h.in": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "494bdb218a1dddd8b528684d4e9514d6815b4072"
+      "gitObject": "5e56f2cf709ce7a12f397fabdad634b0efb1c859"
     },
     "cmake/build_tests.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "191702853a0a8e18674601d6de4adc2357845fea"
+      "gitObject": "f827b1dc4a4808ad2698b177cbcfdfef472e3761"
     },
     "cmake/build_worker.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3a6b8f2cc8d3d27e5bbcee8842d1d283e9ec731a"
+      "gitObject": "1c1a330b6e12b1603fe383b8d9d29e16f0e0daae"
     },
     "cmake/capability_manifest_hash.h.in": {
       "mode": "100644",
@@ -187,22 +192,22 @@
     "include/capsid/runtime.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1201b5ad44ab741dd5f3a570c3bd59d6cfbfa82e"
+      "gitObject": "87a131ed446ffbefa6732a51c31b9e2832e78b8b"
     },
     "include/capsid/runtime.hpp": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1ae8512d0196da587572fc29ff77d5e824cd4772"
+      "gitObject": "b660690f2912470053fb0f5c38f5fba4c022ae46"
     },
     "js/bootstrap.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "51cb09f062698a7a6a3d935f432a95f702b9b0ee"
+      "gitObject": "c1ed420ad10e1be366f3118a2593d7c51368a27d"
     },
     "js/dom-exception.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6a9fa079ae57a9f0468125384c1c8be0a34cabe4"
+      "gitObject": "bdb07f467bc39f31905534462ee9cf1802cbb854"
     },
     "js/encoding-data/encodings.js": {
       "mode": "100644",
@@ -232,7 +237,7 @@
     "js/fetch.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c6f72774a0169be333c71e013c406f7bfc2d5e62"
+      "gitObject": "49d1dc08aeaa594e9e1b1bfd5dcf51d2d32b4bae"
     },
     "js/file.js": {
       "mode": "100644",
@@ -252,7 +257,7 @@
     "js/profile-manifest.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bb48aee55dc2fa9853664538d0e6f63316aba4fd"
+      "gitObject": "c69b99e08ee01c0535874e8ac5a95e7bcb921141"
     },
     "js/single-byte-decoder.js": {
       "mode": "100644",
@@ -272,12 +277,12 @@
     "js/url-search-params.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "7ec3b79cb12efef6f1688873e596b9b3454c8c63"
+      "gitObject": "d63112a38d894da37b7b0a8b1c054af24a23695e"
     },
     "js/url.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "2579ff15f46a8d1be22f14f387027f318b3f3b08"
+      "gitObject": "62667f814710455670280045e6854f1a8b19e65c"
     },
     "js/wasm.js": {
       "mode": "100644",
@@ -287,7 +292,7 @@
     "js/websocket.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "44989b6789ab9e9755ef15b06ef4cd0f1b40deac"
+      "gitObject": "51a4b1a944ec117d5f73711dbf47986136d3370d"
     },
     "patches/native-providers/cares-qualified-corrections.patch": {
       "mode": "100644",
@@ -732,52 +737,57 @@
     "src/build_info.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bd2e6a5df1414a5191c64eb06baadce0eb5b8540"
+      "gitObject": "b9cd5c9b4e254d0ce9d07ccf9189dfe4c8cc113b"
     },
     "src/capability_policy.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6630e108f362c44e51d2a343c0f50c7f5a5d6400"
+      "gitObject": "b32b05d616f6529c92751fff2520fb57468bfecb"
     },
     "src/capability_policy.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "0eb7d9f592530e22e0a6b25fd827072412b1561c"
+      "gitObject": "5062b0a212ace72212ab85e88231ba830f65d2bf"
+    },
+    "src/cgroup_io.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "0f1d099bda50c902bbd22678ba445073bfa8c39c"
     },
     "src/channel_io.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "180d8dd807c30484bc0fe30499a22560f2358fd0"
+      "gitObject": "2f1f8adf9c704a87371c7694869fbd9f3d040c2e"
     },
     "src/channel_io.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b02e56c533235aed2b063b5510e88bca1b30d38f"
+      "gitObject": "15e207eb6c1ad106a014634dbe6dd07a1dbdb2fe"
     },
     "src/channel_registry.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c1fec3e38def49ffabca0edc5bf1c00d8c540199"
+      "gitObject": "4fb8c6841dbdacafe22a1ad5831ead9a718dc02a"
     },
     "src/channel_registry.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "380cc16b17edd0ecca82cbe7a4f784365f426700"
+      "gitObject": "ff71bea55063da12513b6a4431eb2fbdeb99c139"
     },
     "src/channel_state.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "aa68238b916680e9eb61246ed2e9eaa367841323"
+      "gitObject": "0468beeedff5683fed446877f7cac0370fb0082c"
     },
     "src/client.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "15b108ad38bc786aca70fdc1b8a3f6fa8d7067cd"
+      "gitObject": "924f1cee76049d9381a7de974b7f2267db973dbc"
     },
     "src/client_channel_state.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d13aa91d890d76b2cf508dbaa750f668085bc397"
+      "gitObject": "3f74671d207b669ce538e1ac3c0a1d66d974d52c"
     },
     "src/client_ipc_metrics.h": {
       "mode": "100644",
@@ -787,7 +797,7 @@
     "src/cpu_topology.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "019cae1cb24200c992b5f337c9bab16fbfe2557c"
+      "gitObject": "02cc6065e97b24ff3683b1c7b1c7d8fc6206ae02"
     },
     "src/cpu_topology.h": {
       "mode": "100644",
@@ -812,22 +822,22 @@
     "src/host/active_state.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "18d30d836aba1986abab6a58162f40bb8064f3df"
+      "gitObject": "539aabe9d1479ae8d8201b7c15b51c7076baf0c9"
     },
     "src/host/active_state.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bb153ba156b5293704b819e49ed939ff12976677"
+      "gitObject": "471e799d8c346117d7c90265d3924c4c192a6755"
     },
     "src/host/admin_api.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "ce10592d6e31cb163f67869e1129f957cf44f1bb"
+      "gitObject": "84355226bbd1859dcaa77ff8a6ebe16cf56cd9ff"
     },
     "src/host/admin_api.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6b00495aa9125ea143397858fce56031b3a33fa8"
+      "gitObject": "f054ebba3f69a2fa49164c198d15b0cf71a42d4e"
     },
     "src/host/admin_http.cc": {
       "mode": "100644",
@@ -852,7 +862,7 @@
     "src/host/artifact_safe_read.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d1536db332460ee8638cbe446e304e0046eda96c"
+      "gitObject": "3b51f5d0468544bb084efa198426f37352a115f0"
     },
     "src/host/artifact_safe_read.h": {
       "mode": "100644",
@@ -872,27 +882,27 @@
     "src/host/binding_compile.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "0238d9c5ba862f2d31ce74b919bc2db5cdcf7207"
+      "gitObject": "8823b626e48e8eda1fdcec9009e98841e48717b9"
     },
     "src/host/binding_compile.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "90f72dc348102d68e3f069a8eb739956a712227b"
+      "gitObject": "deaebdae40c4bbf2448b4dd02e954859371a409c"
     },
     "src/host/binding_registry.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5ebcb2fd4f730d8abaac81f1eb735909a1f6d9a7"
+      "gitObject": "b203bb26350dd54a9278ff2fbda3840a8dbc6800"
     },
     "src/host/binding_registry.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "22eee4c1056007af239fc5c88513391677e24451"
+      "gitObject": "fabf46aaef4023b8cd25b2b01f4e3db907cddf36"
     },
     "src/host/bytecode_attestation.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "4c7abf04fcfd8eeba4651e2257c615e94911df28"
+      "gitObject": "f0015693f5b4ff9f9b8a4d02d34ec40d5a969a70"
     },
     "src/host/bytecode_attestation.h": {
       "mode": "100644",
@@ -907,7 +917,7 @@
     "src/host/channel_ledger.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b0ce7044630ffeb3a8b0a1f7d4e46e286f681213"
+      "gitObject": "69643368746a4cd16db3c0b014835c52e7fefc9e"
     },
     "src/host/client_disconnect.h": {
       "mode": "100644",
@@ -917,37 +927,47 @@
     "src/host/config.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "0f76398faccc8e8d955b245a33d5175fee3870d5"
+      "gitObject": "e967a3b002f88129069ebb0266510e8bebb75ec2"
     },
     "src/host/config.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5b7218b92550ff600e1369e182dd65739a6e6034"
+      "gitObject": "5b8dc710bd9e6c158a12782cc36cdbdf2e8e92aa"
     },
     "src/host/credit_limits.h": {
       "mode": "100644",
       "kind": "blob",
       "gitObject": "dc3491d895630409337ee5d41c6bc6a5d416892e"
     },
+    "src/host/eviction_coordinator.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "32f0fabaa4da9054aec662e20004a3a49099dec4"
+    },
+    "src/host/eviction_coordinator.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "40f3408ae45f81f0e4d55d6a3bc1954052cc463e"
+    },
     "src/host/generation_identity.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "89f01188d7a7b7de1c4b6437ce5d5c0d482ae2bc"
+      "gitObject": "7e40a1c40ff0060cea587d19e37aec6e84bd964d"
     },
     "src/host/generation_identity.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "77dcf72ef408f1f62b70f9692219f07a850efc88"
+      "gitObject": "92719c1058d3b747335abb65182cf4794e483836"
     },
     "src/host/generation_pool.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c5db3caaf5203821cf7dff9eb2c4395be6a73a23"
+      "gitObject": "eb427dfa566bf9964d5a491b4f8ec0c71d2c4dee"
     },
     "src/host/generation_pool.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "4f7bc8e182a540a9e4876c4db5f56a5fa4e8ceef"
+      "gitObject": "9d1c3a1d0b4d36890d5bac46de738c979877d646"
     },
     "src/host/generation_reclaimer.h": {
       "mode": "100644",
@@ -957,12 +977,12 @@
     "src/host/host_config_model.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d52aafaf9d49e09ce25a1a58c496ab9a53b3ed96"
+      "gitObject": "be8c1c68edaf69fd20cdc5939705f37a3f35f50a"
     },
     "src/host/host_config_model.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "34dbded49b8490ec58659c9bc6b786d24f75326d"
+      "gitObject": "8ff673cf5a5e58da4a42c753681d95204798e70d"
     },
     "src/host/ipc_metrics.cc": {
       "mode": "100644",
@@ -974,60 +994,70 @@
       "kind": "blob",
       "gitObject": "2dd0987a96c9b415767689f40f289d9087c417ca"
     },
+    "src/host/json_codec.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "feef172ef616fa88f8cce1224724d699dc3cafd0"
+    },
+    "src/host/json_codec.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "d2c735fbcb4599e12385735c4b815542fcb9300a"
+    },
     "src/host/listener_cors.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "a0818f206cb2507f5279b857ce289ce69890b965"
+      "gitObject": "0e830f6e350a40aef2a368e5486818606287caa1"
     },
     "src/host/listener_cors.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "53cd6c01a1382ce8efb39cd3a66f8c7664b15c87"
+      "gitObject": "7842aa2fb18b5644cfe8d8a8b260e2ac17ceedda"
     },
-    "src/host/local_capsid_policy.cc": {
+    "src/host/local_dev_host.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1f00267b8006604391ed52a0e985aebd93753550"
+      "gitObject": "867b201f01e2ff63e90abbfb18fdf8bd7573743f"
     },
-    "src/host/local_capsid_policy.h": {
+    "src/host/local_dev_host.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3116be745457c21b688358d6c4bb4476670e1e17"
+      "gitObject": "0fb21172db1a699168422b65d037d9bbbad99452"
     },
     "src/host/main.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5917073a5a7cab7eacb7ee25977b3d8653d6c746"
+      "gitObject": "2b70e6ce030cf21f50adb767e88970915db84065"
     },
     "src/host/managed_admin_backend.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "ce5df12653180d519fb440d817a9e76dd8d1a203"
+      "gitObject": "4bcc93a969c80c838dc3cf77a6ed3aaa9cfb5e03"
     },
     "src/host/managed_admin_backend.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d860137d9addfb49e20ed5595368a5669ed069af"
+      "gitObject": "f939ae1b357de08e413a115c69c98ab2af07a25c"
     },
     "src/host/managed_host.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c6f6d301f525d11d56c9276b9129f5a16caa5b5c"
+      "gitObject": "09a0fba3e55ce8e873717407964a3db8a0f6a739"
     },
     "src/host/managed_host.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "cabf39f70a2052fdc6b12fbf0716f1d579e77a64"
+      "gitObject": "2c84057fab1a2077f92c7fc6e697bc3d38abf1e2"
     },
     "src/host/managed_listener.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "a75341b2530eeba7cbb9857374c9acafcaceda27"
+      "gitObject": "1c378ea2f0205ce3f9f4f82a2f29ed27bd0f55c2"
     },
     "src/host/managed_listener.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5f22d03b0f1b9a576af0c8e0d0b1ac51a6b4cd68"
+      "gitObject": "1aaccebebf5c279539bb1aad90ca1e9e765107b7"
     },
     "src/host/managed_registry.cc": {
       "mode": "100644",
@@ -1039,15 +1069,25 @@
       "kind": "blob",
       "gitObject": "1f1f2fefc6c0769b36500c88134ffce98dd0bd49"
     },
+    "src/host/memory_sampler.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "bf5661df1b7ac0f29563012008c409cb318c8a84"
+    },
+    "src/host/memory_sampler.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "8284b974c3674829096af8575251499dac9f1df3"
+    },
     "src/host/metrics.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "930e4f992669ba064b837d8b73b9c151d8c4863a"
+      "gitObject": "dc82dc6c6025c0436a89a75c3ea6b5e04a6b51da"
     },
     "src/host/metrics.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "172cb2250956ab9c74859568db2b257ef08d26aa"
+      "gitObject": "c3d8ad85502fc3fc3e9531962f072d901505f130"
     },
     "src/host/parent_stop_monitor.cc": {
       "mode": "100644",
@@ -1062,12 +1102,12 @@
     "src/host/policy_compiler.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "777dbba93c40c0b7e965d6cfcdfcf8938c0724d6"
+      "gitObject": "9ce9bc7f65a6e317262426922d3f4e350b7d12ac"
     },
     "src/host/policy_compiler.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d4d001c802c2a952408735acf9d433823f5106a0"
+      "gitObject": "ec5a88eb81a6494d85c1e52e09f865e22f36ed14"
     },
     "src/host/poll_limits.h": {
       "mode": "100644",
@@ -1077,17 +1117,17 @@
     "src/host/process_snapshot.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "e1dc2f2142aa8f46f723e76827a28af89c65c5c3"
+      "gitObject": "3e46a2a2125307b2af695cc8ea1c9de7959d6a7c"
     },
     "src/host/process_snapshot.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "cbfabc695ff5c954d0afbba5da02fed21682749a"
+      "gitObject": "e47855db0a16e8ba68a2d945e76271e5cfdb51bd"
     },
     "src/host/protocol_launch.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "03328c33c56a66ab262df7e72db78d0ccc58b7e1"
+      "gitObject": "b9294676211effdc9c6c1111771978556d77c9a6"
     },
     "src/host/quarantine_dispatcher.cc": {
       "mode": "100644",
@@ -1107,22 +1147,22 @@
     "src/host/request_normalization.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "7fcc1ea86301be8fec2026e62350e92a3b7c866d"
+      "gitObject": "836ad19c74566daa2f7bd56820dfe5d150c87530"
     },
     "src/host/request_normalization.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f3b2c00f21d2d6a0e262a588a8140f29025c0756"
+      "gitObject": "3d4a814b787376689195851dad67477b87259822"
     },
     "src/host/response_body_batch.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "8d195f54c82a7076b7b40250780f722045587624"
+      "gitObject": "cd73db1c2cbe82016b621e8a95e356837ea45aa7"
     },
     "src/host/routing_snapshot.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d84462654bdfee47b3428b2bd2416c3215bd366b"
+      "gitObject": "87fd21ae4344030525ad5973800c17f95b1cea3a"
     },
     "src/host/routing_snapshot.h": {
       "mode": "100644",
@@ -1142,77 +1182,52 @@
     "src/host/secret_snapshot.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c95091f3255848b729c4f8ac5bc7581edaf3f88b"
+      "gitObject": "d2aa7258c8dbf7a6b02f0fad94fa2a0535654757"
     },
     "src/host/secret_snapshot.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6b1e3891f4841e943e8f091e9e09bdd093d30ef1"
-    },
-    "src/host/service_lifecycle.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "f7bc8d22401dcbed442a78a07d11deb11ca0d3bf"
+      "gitObject": "6c7882d1507ee9cd2f5ec782381d04f36fbeb3bd"
     },
     "src/host/service_lifecycle.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3530b5cc246df1b153beb6a0be397ca9ae72790f"
-    },
-    "src/host/single_worker_server.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "0275c85b930f83fd20fdc222b8c27770262599fb"
-    },
-    "src/host/single_worker_server.h": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "74507c84b720b294127f396692f88f5e2b4691ea"
-    },
-    "src/host/static_pool.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "9c049ee38807ce725ed5fe827f09e912e104fea5"
-    },
-    "src/host/static_pool.h": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "02b07846731f3cc51abf6b3d78620ee8b2df5e1a"
-    },
-    "src/host/static_pool_server.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "c76530539162e5638d2dd4961ba4ab4adafad5a0"
-    },
-    "src/host/static_pool_server.h": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "6f40db249179fd37776dc10b070d02573495db7b"
+      "gitObject": "a3b9ad28cc323bb956df86e199af2bec2132815d"
     },
     "src/host/structured_log.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1b524560dc161f055a5227c9b226ca4ac0d2f7f9"
+      "gitObject": "c9d722e89a46479f5f55505582b3ee6833bb25db"
     },
     "src/host/structured_log.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "08bb340556eadc34a8360d36facfa556752c5630"
+      "gitObject": "306b5f4fa92fa87321cde141548836790f9f71c3"
     },
     "src/host/trusted_key_store.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "abbcc5c424f93c586ac7490224e62f009eb3d362"
+      "gitObject": "fb2fcc47e3c51de080f7488a8b6cd255b494d23a"
     },
     "src/host/trusted_key_store.h": {
       "mode": "100644",
       "kind": "blob",
       "gitObject": "89b57af0d1bc6f196cd680ae3679308f7da5cf09"
     },
+    "src/host/units.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "d64b9ba5222ac8a1b8c8555d34401d198b952f03"
+    },
+    "src/host/units.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "286365fbc8c7a2618a65ec4ed7d3fba6785842c9"
+    },
     "src/host/websocket_dialer.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b8fc1ce93d97b1ddb3bb17989b27c35678a178a3"
+      "gitObject": "152a3393d9e94efe422647223ddf7d4ca5a0864a"
     },
     "src/host/websocket_dialer.h": {
       "mode": "100644",
@@ -1222,7 +1237,7 @@
     "src/host/websocket_session.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f4d4b7abdacc3cfcff041df51cf5eeafe88743ab"
+      "gitObject": "5dd6edadba8869b65178ffe980d492a8257b9abe"
     },
     "src/host/websocket_session.h": {
       "mode": "100644",
@@ -1232,47 +1247,57 @@
     "src/host/worker_capacity_ledger.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "dfe5c4720fdc57d04c1df102cc2a2005c60db249"
+      "gitObject": "d8aa1addd5dbf7e65eadb45bb1087f7f66cd6bb7"
     },
     "src/host/worker_capacity_ledger.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1617bda355bff3e69dce99a2d3b7fe7e98cb6254"
+      "gitObject": "05a5fe6202f3ef4540cc966255230a09d1663fdb"
+    },
+    "src/host/worker_cgroup.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "69078099f665b94039cd8709570e2ec61c648a02"
+    },
+    "src/host/worker_cgroup.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "4729cd1472afb329a3abfbe62e27c000d512d48f"
     },
     "src/host/worker_event_source.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "01ecc83ee9b8bf958bf727d7394af5e785c5d01b"
+      "gitObject": "3496404b7cc536a7175a8d122bbe7f7cd11ba99b"
     },
     "src/host/worker_event_source.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f1f19b658f8a6aaf82101d9336f09580cd3d2c8b"
+      "gitObject": "b7f8a7e5c18e3b1efb177d15284d8169872f3220"
     },
     "src/host/worker_executor.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bdfef9409d63257796627058d29fb66ae9c67cca"
+      "gitObject": "a073fcaba17962a41285226c0d3069c94efc3522"
     },
     "src/host/worker_executor.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "fbebe4e652ecbe2077d1c264f66cba8083c385b5"
+      "gitObject": "61c0eaa4700c50dc9f7e5b8afc29c9463b2ec309"
     },
     "src/host/worker_recovery.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "834c58fc11dca8497cc44adf870baf4dd14addc1"
+      "gitObject": "287d30b81b5f68b8693510823f9a2853a30d500d"
     },
     "src/host/worker_recovery.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b650376ef929b23d0abe054d56722ff58ca2f347"
+      "gitObject": "efd7dce95f06621de5443972f77e8c54801adb33"
     },
     "src/host/worker_supervisor.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3c3287d02c13154f501cfa6fb185ec20a936804b"
+      "gitObject": "6ae686c99583141f6a67dc83777648030e5ab7f7"
     },
     "src/host/worker_supervisor.h": {
       "mode": "100644",
@@ -1287,7 +1312,7 @@
     "src/host/ws_codec.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "335da3de3d7f5384c8283919e4d8b447d26d959e"
+      "gitObject": "79b60b9ae54eba9b572e3413d0bcc5c2f9c2fbe6"
     },
     "src/host/ws_stream.cc": {
       "mode": "100644",
@@ -1302,32 +1327,47 @@
     "src/ipc_validation.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "441e62a0f2d94780d89abddc6891646241bce46a"
+      "gitObject": "8195e34569417d76c8ee07936d71f264629a9c63"
     },
     "src/ipc_validation.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "11542a55e16ad7e3dec71308569b027154da5eea"
+      "gitObject": "8f1ae98f00d9e65b9156232037cbaf7cd1b4bcea"
+    },
+    "src/json_escape.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "aaccf9b26da7a7b9f56fe5d0713cdd74f19d62f4"
     },
     "src/memory_metrics.cc": {
       "mode": "100644",
       "kind": "blob",
       "gitObject": "9bb2c939a08fdf87d553a8518169f7a568371dff"
     },
+    "src/net_target.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "460c11c7260196f4b4a28e2a4f225dc164a7ee1b"
+    },
+    "src/net_target.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "ebb546db0dc5f12d36e118f7b2158203c6b11ff6"
+    },
     "src/outbound_buffer.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "41d6a6f04be38f5263216e1b7a7fdcb5036e2fb9"
+      "gitObject": "b6555594144bf1bf9cd8e09e3ea177c428e20476"
     },
     "src/protocol.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "afcffe4c4aa6545cde04df5eb6da280e246ce1ca"
+      "gitObject": "15e59cc8768c6ce1bc0675976b66eca4623e0cd5"
     },
     "src/protocol.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "9cdba82fcf85bb326c31f62756d6085aca46fc3b"
+      "gitObject": "032ddc95c9630bc56ca80afeabc93e9145583e81"
     },
     "src/response_headers.cc": {
       "mode": "100644",
@@ -1347,7 +1387,7 @@
     "src/sandbox.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "653569a7741c22d23125cb24b9de6e1644537a08"
+      "gitObject": "9e0e7648e4481da0c4c3c02620ef83aef7fb5e0e"
     },
     "src/sandbox.h": {
       "mode": "100644",
@@ -1357,12 +1397,12 @@
     "src/txiki_restricted_core.c": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "8077a6e3cf5f1712b293ef209162ebbc54a0696d"
+      "gitObject": "489b3899773579f3e059cdbe9df66dc3c24a1074"
     },
     "src/win32_compat.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "904fdb768f64aa05eecb39ad2b20d2ab06663d67"
+      "gitObject": "daf5d6ff82cf79c941b62b477f04b730f0bf5238"
     },
     "src/worker_exit_status.h": {
       "mode": "100644",
@@ -1372,12 +1412,12 @@
     "src/worker_main.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "db571a4a168b43b438f35119f873d9f709a13f2b"
+      "gitObject": "e6c03ac09804596c7cf0229a317e62086a288e24"
     },
     "src/worker_runtime.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "13040ab944386e1791e6b747126c07a77d19b9c4"
+      "gitObject": "7b334d3a1dd51a18ce87e1d81eb8363fb334fa54"
     },
     "src/worker_runtime.h": {
       "mode": "100644",
@@ -1559,7 +1599,7 @@
     "CMakeLists.txt": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "131546b56361959fae26cd797679e2b570055fea"
+      "gitObject": "cbe63c098e8256e98ee9135728a6f7df4211b7bc"
     },
     "cmake/AuditEscapeCapabilityDefaults.cmake": {
       "mode": "100644",
@@ -1574,7 +1614,7 @@
     "cmake/AuditTxikiVendor.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6b471da34c89fb352092f41d197b43293da1d3b2"
+      "gitObject": "910b22b1720b769a5f04971fdb1357beddb01eca"
     },
     "cmake/AuditWasmLimits.cmake": {
       "mode": "100644",
@@ -1584,7 +1624,7 @@
     "cmake/AuditWptCoverage.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "e1eac4373efd3b9447bceaf615b65d85b0dc4e51"
+      "gitObject": "47088abda842ba38b1cf285517b7ae9473fe6832"
     },
     "cmake/CapsidConfig.cmake.in": {
       "mode": "100644",
@@ -1594,7 +1634,7 @@
     "cmake/CapsidPackage.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "7516870d1df1e2efd9c87f17e3b3b34b78048aaa"
+      "gitObject": "d0830637a1d6516ebd3dc8ff656cd10f578429d2"
     },
     "cmake/CapsidPackagePlatform.cmake": {
       "mode": "100644",
@@ -1609,7 +1649,7 @@
     "cmake/ComputeBuildIdentity.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "754ea157a03a549d005a270d43231a5ea3198f55"
+      "gitObject": "3ba23e214c7796d59a001bf2253fcb2309c0946e"
     },
     "cmake/ComputeTxikiOverlayKey.cmake": {
       "mode": "100644",
@@ -1689,7 +1729,12 @@
     "cmake/ValidatePackageMetadata.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "a2e1e053275147481cf224b95c7600cbe0ad25fe"
+      "gitObject": "9ef864bdff89a083738c8f2be9c1ad8762efa90d"
+    },
+    "cmake/VerifyReleaseSource.cmake.in": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "4e4cfced7a77b464486149bb375b796889d2a38f"
     },
     "cmake/WindowsAsanRuntime.cmake": {
       "mode": "100644",
@@ -1699,22 +1744,22 @@
     "cmake/build_host.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "06b1d6fdd507829fc2fa72c374ca4630e3564275"
+      "gitObject": "485350fae4e7c3780d12c4b326f4fc0452c80402"
     },
     "cmake/build_identity.h.in": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "494bdb218a1dddd8b528684d4e9514d6815b4072"
+      "gitObject": "5e56f2cf709ce7a12f397fabdad634b0efb1c859"
     },
     "cmake/build_tests.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f6d8d06480256d91ca9dae14af500f883fc7ce68"
+      "gitObject": "f827b1dc4a4808ad2698b177cbcfdfef472e3761"
     },
     "cmake/build_worker.cmake": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3a6b8f2cc8d3d27e5bbcee8842d1d283e9ec731a"
+      "gitObject": "1c1a330b6e12b1603fe383b8d9d29e16f0e0daae"
     },
     "cmake/capability_manifest_hash.h.in": {
       "mode": "100644",
@@ -1739,22 +1784,22 @@
     "include/capsid/runtime.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1201b5ad44ab741dd5f3a570c3bd59d6cfbfa82e"
+      "gitObject": "87a131ed446ffbefa6732a51c31b9e2832e78b8b"
     },
     "include/capsid/runtime.hpp": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1ae8512d0196da587572fc29ff77d5e824cd4772"
+      "gitObject": "b660690f2912470053fb0f5c38f5fba4c022ae46"
     },
     "js/bootstrap.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "51cb09f062698a7a6a3d935f432a95f702b9b0ee"
+      "gitObject": "c1ed420ad10e1be366f3118a2593d7c51368a27d"
     },
     "js/dom-exception.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6a9fa079ae57a9f0468125384c1c8be0a34cabe4"
+      "gitObject": "bdb07f467bc39f31905534462ee9cf1802cbb854"
     },
     "js/encoding-data/encodings.js": {
       "mode": "100644",
@@ -1784,7 +1829,7 @@
     "js/fetch.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c6f72774a0169be333c71e013c406f7bfc2d5e62"
+      "gitObject": "49d1dc08aeaa594e9e1b1bfd5dcf51d2d32b4bae"
     },
     "js/file.js": {
       "mode": "100644",
@@ -1804,7 +1849,7 @@
     "js/profile-manifest.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bb48aee55dc2fa9853664538d0e6f63316aba4fd"
+      "gitObject": "c69b99e08ee01c0535874e8ac5a95e7bcb921141"
     },
     "js/single-byte-decoder.js": {
       "mode": "100644",
@@ -1824,12 +1869,12 @@
     "js/url-search-params.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "7ec3b79cb12efef6f1688873e596b9b3454c8c63"
+      "gitObject": "d63112a38d894da37b7b0a8b1c054af24a23695e"
     },
     "js/url.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "2579ff15f46a8d1be22f14f387027f318b3f3b08"
+      "gitObject": "62667f814710455670280045e6854f1a8b19e65c"
     },
     "js/wasm.js": {
       "mode": "100644",
@@ -1839,7 +1884,7 @@
     "js/websocket.js": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "44989b6789ab9e9755ef15b06ef4cd0f1b40deac"
+      "gitObject": "51a4b1a944ec117d5f73711dbf47986136d3370d"
     },
     "patches/native-providers/cares-qualified-corrections.patch": {
       "mode": "100644",
@@ -2284,52 +2329,57 @@
     "src/build_info.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bd2e6a5df1414a5191c64eb06baadce0eb5b8540"
+      "gitObject": "b9cd5c9b4e254d0ce9d07ccf9189dfe4c8cc113b"
     },
     "src/capability_policy.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6630e108f362c44e51d2a343c0f50c7f5a5d6400"
+      "gitObject": "b32b05d616f6529c92751fff2520fb57468bfecb"
     },
     "src/capability_policy.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "0eb7d9f592530e22e0a6b25fd827072412b1561c"
+      "gitObject": "5062b0a212ace72212ab85e88231ba830f65d2bf"
+    },
+    "src/cgroup_io.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "0f1d099bda50c902bbd22678ba445073bfa8c39c"
     },
     "src/channel_io.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "180d8dd807c30484bc0fe30499a22560f2358fd0"
+      "gitObject": "2f1f8adf9c704a87371c7694869fbd9f3d040c2e"
     },
     "src/channel_io.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b02e56c533235aed2b063b5510e88bca1b30d38f"
+      "gitObject": "15e207eb6c1ad106a014634dbe6dd07a1dbdb2fe"
     },
     "src/channel_registry.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c1fec3e38def49ffabca0edc5bf1c00d8c540199"
+      "gitObject": "4fb8c6841dbdacafe22a1ad5831ead9a718dc02a"
     },
     "src/channel_registry.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "380cc16b17edd0ecca82cbe7a4f784365f426700"
+      "gitObject": "ff71bea55063da12513b6a4431eb2fbdeb99c139"
     },
     "src/channel_state.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "aa68238b916680e9eb61246ed2e9eaa367841323"
+      "gitObject": "0468beeedff5683fed446877f7cac0370fb0082c"
     },
     "src/client.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "15b108ad38bc786aca70fdc1b8a3f6fa8d7067cd"
+      "gitObject": "924f1cee76049d9381a7de974b7f2267db973dbc"
     },
     "src/client_channel_state.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d13aa91d890d76b2cf508dbaa750f668085bc397"
+      "gitObject": "3f74671d207b669ce538e1ac3c0a1d66d974d52c"
     },
     "src/client_ipc_metrics.h": {
       "mode": "100644",
@@ -2339,7 +2389,7 @@
     "src/cpu_topology.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "019cae1cb24200c992b5f337c9bab16fbfe2557c"
+      "gitObject": "02cc6065e97b24ff3683b1c7b1c7d8fc6206ae02"
     },
     "src/cpu_topology.h": {
       "mode": "100644",
@@ -2364,22 +2414,22 @@
     "src/host/active_state.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "18d30d836aba1986abab6a58162f40bb8064f3df"
+      "gitObject": "539aabe9d1479ae8d8201b7c15b51c7076baf0c9"
     },
     "src/host/active_state.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bb153ba156b5293704b819e49ed939ff12976677"
+      "gitObject": "471e799d8c346117d7c90265d3924c4c192a6755"
     },
     "src/host/admin_api.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "ce10592d6e31cb163f67869e1129f957cf44f1bb"
+      "gitObject": "84355226bbd1859dcaa77ff8a6ebe16cf56cd9ff"
     },
     "src/host/admin_api.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6b00495aa9125ea143397858fce56031b3a33fa8"
+      "gitObject": "f054ebba3f69a2fa49164c198d15b0cf71a42d4e"
     },
     "src/host/admin_http.cc": {
       "mode": "100644",
@@ -2404,7 +2454,7 @@
     "src/host/artifact_safe_read.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d1536db332460ee8638cbe446e304e0046eda96c"
+      "gitObject": "3b51f5d0468544bb084efa198426f37352a115f0"
     },
     "src/host/artifact_safe_read.h": {
       "mode": "100644",
@@ -2424,27 +2474,27 @@
     "src/host/binding_compile.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "0238d9c5ba862f2d31ce74b919bc2db5cdcf7207"
+      "gitObject": "8823b626e48e8eda1fdcec9009e98841e48717b9"
     },
     "src/host/binding_compile.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "90f72dc348102d68e3f069a8eb739956a712227b"
+      "gitObject": "deaebdae40c4bbf2448b4dd02e954859371a409c"
     },
     "src/host/binding_registry.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5ebcb2fd4f730d8abaac81f1eb735909a1f6d9a7"
+      "gitObject": "b203bb26350dd54a9278ff2fbda3840a8dbc6800"
     },
     "src/host/binding_registry.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "22eee4c1056007af239fc5c88513391677e24451"
+      "gitObject": "fabf46aaef4023b8cd25b2b01f4e3db907cddf36"
     },
     "src/host/bytecode_attestation.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "4c7abf04fcfd8eeba4651e2257c615e94911df28"
+      "gitObject": "f0015693f5b4ff9f9b8a4d02d34ec40d5a969a70"
     },
     "src/host/bytecode_attestation.h": {
       "mode": "100644",
@@ -2459,7 +2509,7 @@
     "src/host/channel_ledger.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b0ce7044630ffeb3a8b0a1f7d4e46e286f681213"
+      "gitObject": "69643368746a4cd16db3c0b014835c52e7fefc9e"
     },
     "src/host/client_disconnect.h": {
       "mode": "100644",
@@ -2469,37 +2519,47 @@
     "src/host/config.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "0f76398faccc8e8d955b245a33d5175fee3870d5"
+      "gitObject": "e967a3b002f88129069ebb0266510e8bebb75ec2"
     },
     "src/host/config.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5b7218b92550ff600e1369e182dd65739a6e6034"
+      "gitObject": "5b8dc710bd9e6c158a12782cc36cdbdf2e8e92aa"
     },
     "src/host/credit_limits.h": {
       "mode": "100644",
       "kind": "blob",
       "gitObject": "dc3491d895630409337ee5d41c6bc6a5d416892e"
     },
+    "src/host/eviction_coordinator.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "32f0fabaa4da9054aec662e20004a3a49099dec4"
+    },
+    "src/host/eviction_coordinator.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "40f3408ae45f81f0e4d55d6a3bc1954052cc463e"
+    },
     "src/host/generation_identity.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "89f01188d7a7b7de1c4b6437ce5d5c0d482ae2bc"
+      "gitObject": "7e40a1c40ff0060cea587d19e37aec6e84bd964d"
     },
     "src/host/generation_identity.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "77dcf72ef408f1f62b70f9692219f07a850efc88"
+      "gitObject": "92719c1058d3b747335abb65182cf4794e483836"
     },
     "src/host/generation_pool.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c5db3caaf5203821cf7dff9eb2c4395be6a73a23"
+      "gitObject": "eb427dfa566bf9964d5a491b4f8ec0c71d2c4dee"
     },
     "src/host/generation_pool.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "4f7bc8e182a540a9e4876c4db5f56a5fa4e8ceef"
+      "gitObject": "9d1c3a1d0b4d36890d5bac46de738c979877d646"
     },
     "src/host/generation_reclaimer.h": {
       "mode": "100644",
@@ -2509,12 +2569,12 @@
     "src/host/host_config_model.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d52aafaf9d49e09ce25a1a58c496ab9a53b3ed96"
+      "gitObject": "be8c1c68edaf69fd20cdc5939705f37a3f35f50a"
     },
     "src/host/host_config_model.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "34dbded49b8490ec58659c9bc6b786d24f75326d"
+      "gitObject": "8ff673cf5a5e58da4a42c753681d95204798e70d"
     },
     "src/host/ipc_metrics.cc": {
       "mode": "100644",
@@ -2526,60 +2586,70 @@
       "kind": "blob",
       "gitObject": "2dd0987a96c9b415767689f40f289d9087c417ca"
     },
+    "src/host/json_codec.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "feef172ef616fa88f8cce1224724d699dc3cafd0"
+    },
+    "src/host/json_codec.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "d2c735fbcb4599e12385735c4b815542fcb9300a"
+    },
     "src/host/listener_cors.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "a0818f206cb2507f5279b857ce289ce69890b965"
+      "gitObject": "0e830f6e350a40aef2a368e5486818606287caa1"
     },
     "src/host/listener_cors.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "53cd6c01a1382ce8efb39cd3a66f8c7664b15c87"
+      "gitObject": "7842aa2fb18b5644cfe8d8a8b260e2ac17ceedda"
     },
-    "src/host/local_capsid_policy.cc": {
+    "src/host/local_dev_host.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1f00267b8006604391ed52a0e985aebd93753550"
+      "gitObject": "867b201f01e2ff63e90abbfb18fdf8bd7573743f"
     },
-    "src/host/local_capsid_policy.h": {
+    "src/host/local_dev_host.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3116be745457c21b688358d6c4bb4476670e1e17"
+      "gitObject": "0fb21172db1a699168422b65d037d9bbbad99452"
     },
     "src/host/main.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5917073a5a7cab7eacb7ee25977b3d8653d6c746"
+      "gitObject": "2b70e6ce030cf21f50adb767e88970915db84065"
     },
     "src/host/managed_admin_backend.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "ce5df12653180d519fb440d817a9e76dd8d1a203"
+      "gitObject": "4bcc93a969c80c838dc3cf77a6ed3aaa9cfb5e03"
     },
     "src/host/managed_admin_backend.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d860137d9addfb49e20ed5595368a5669ed069af"
+      "gitObject": "f939ae1b357de08e413a115c69c98ab2af07a25c"
     },
     "src/host/managed_host.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c6f6d301f525d11d56c9276b9129f5a16caa5b5c"
+      "gitObject": "09a0fba3e55ce8e873717407964a3db8a0f6a739"
     },
     "src/host/managed_host.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "cabf39f70a2052fdc6b12fbf0716f1d579e77a64"
+      "gitObject": "2c84057fab1a2077f92c7fc6e697bc3d38abf1e2"
     },
     "src/host/managed_listener.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "a75341b2530eeba7cbb9857374c9acafcaceda27"
+      "gitObject": "1c378ea2f0205ce3f9f4f82a2f29ed27bd0f55c2"
     },
     "src/host/managed_listener.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "5f22d03b0f1b9a576af0c8e0d0b1ac51a6b4cd68"
+      "gitObject": "1aaccebebf5c279539bb1aad90ca1e9e765107b7"
     },
     "src/host/managed_registry.cc": {
       "mode": "100644",
@@ -2591,15 +2661,25 @@
       "kind": "blob",
       "gitObject": "1f1f2fefc6c0769b36500c88134ffce98dd0bd49"
     },
+    "src/host/memory_sampler.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "bf5661df1b7ac0f29563012008c409cb318c8a84"
+    },
+    "src/host/memory_sampler.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "8284b974c3674829096af8575251499dac9f1df3"
+    },
     "src/host/metrics.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "930e4f992669ba064b837d8b73b9c151d8c4863a"
+      "gitObject": "dc82dc6c6025c0436a89a75c3ea6b5e04a6b51da"
     },
     "src/host/metrics.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "172cb2250956ab9c74859568db2b257ef08d26aa"
+      "gitObject": "c3d8ad85502fc3fc3e9531962f072d901505f130"
     },
     "src/host/parent_stop_monitor.cc": {
       "mode": "100644",
@@ -2614,12 +2694,12 @@
     "src/host/policy_compiler.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "777dbba93c40c0b7e965d6cfcdfcf8938c0724d6"
+      "gitObject": "9ce9bc7f65a6e317262426922d3f4e350b7d12ac"
     },
     "src/host/policy_compiler.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d4d001c802c2a952408735acf9d433823f5106a0"
+      "gitObject": "ec5a88eb81a6494d85c1e52e09f865e22f36ed14"
     },
     "src/host/poll_limits.h": {
       "mode": "100644",
@@ -2629,17 +2709,17 @@
     "src/host/process_snapshot.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "e1dc2f2142aa8f46f723e76827a28af89c65c5c3"
+      "gitObject": "3e46a2a2125307b2af695cc8ea1c9de7959d6a7c"
     },
     "src/host/process_snapshot.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "cbfabc695ff5c954d0afbba5da02fed21682749a"
+      "gitObject": "e47855db0a16e8ba68a2d945e76271e5cfdb51bd"
     },
     "src/host/protocol_launch.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "03328c33c56a66ab262df7e72db78d0ccc58b7e1"
+      "gitObject": "b9294676211effdc9c6c1111771978556d77c9a6"
     },
     "src/host/quarantine_dispatcher.cc": {
       "mode": "100644",
@@ -2659,22 +2739,22 @@
     "src/host/request_normalization.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "7fcc1ea86301be8fec2026e62350e92a3b7c866d"
+      "gitObject": "836ad19c74566daa2f7bd56820dfe5d150c87530"
     },
     "src/host/request_normalization.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f3b2c00f21d2d6a0e262a588a8140f29025c0756"
+      "gitObject": "3d4a814b787376689195851dad67477b87259822"
     },
     "src/host/response_body_batch.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "8d195f54c82a7076b7b40250780f722045587624"
+      "gitObject": "cd73db1c2cbe82016b621e8a95e356837ea45aa7"
     },
     "src/host/routing_snapshot.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "d84462654bdfee47b3428b2bd2416c3215bd366b"
+      "gitObject": "87fd21ae4344030525ad5973800c17f95b1cea3a"
     },
     "src/host/routing_snapshot.h": {
       "mode": "100644",
@@ -2694,77 +2774,52 @@
     "src/host/secret_snapshot.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "c95091f3255848b729c4f8ac5bc7581edaf3f88b"
+      "gitObject": "d2aa7258c8dbf7a6b02f0fad94fa2a0535654757"
     },
     "src/host/secret_snapshot.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "6b1e3891f4841e943e8f091e9e09bdd093d30ef1"
-    },
-    "src/host/service_lifecycle.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "f7bc8d22401dcbed442a78a07d11deb11ca0d3bf"
+      "gitObject": "6c7882d1507ee9cd2f5ec782381d04f36fbeb3bd"
     },
     "src/host/service_lifecycle.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3530b5cc246df1b153beb6a0be397ca9ae72790f"
-    },
-    "src/host/single_worker_server.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "0275c85b930f83fd20fdc222b8c27770262599fb"
-    },
-    "src/host/single_worker_server.h": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "74507c84b720b294127f396692f88f5e2b4691ea"
-    },
-    "src/host/static_pool.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "9c049ee38807ce725ed5fe827f09e912e104fea5"
-    },
-    "src/host/static_pool.h": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "02b07846731f3cc51abf6b3d78620ee8b2df5e1a"
-    },
-    "src/host/static_pool_server.cc": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "c76530539162e5638d2dd4961ba4ab4adafad5a0"
-    },
-    "src/host/static_pool_server.h": {
-      "mode": "100644",
-      "kind": "blob",
-      "gitObject": "6f40db249179fd37776dc10b070d02573495db7b"
+      "gitObject": "a3b9ad28cc323bb956df86e199af2bec2132815d"
     },
     "src/host/structured_log.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1b524560dc161f055a5227c9b226ca4ac0d2f7f9"
+      "gitObject": "c9d722e89a46479f5f55505582b3ee6833bb25db"
     },
     "src/host/structured_log.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "08bb340556eadc34a8360d36facfa556752c5630"
+      "gitObject": "306b5f4fa92fa87321cde141548836790f9f71c3"
     },
     "src/host/trusted_key_store.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "abbcc5c424f93c586ac7490224e62f009eb3d362"
+      "gitObject": "fb2fcc47e3c51de080f7488a8b6cd255b494d23a"
     },
     "src/host/trusted_key_store.h": {
       "mode": "100644",
       "kind": "blob",
       "gitObject": "89b57af0d1bc6f196cd680ae3679308f7da5cf09"
     },
+    "src/host/units.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "d64b9ba5222ac8a1b8c8555d34401d198b952f03"
+    },
+    "src/host/units.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "286365fbc8c7a2618a65ec4ed7d3fba6785842c9"
+    },
     "src/host/websocket_dialer.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b8fc1ce93d97b1ddb3bb17989b27c35678a178a3"
+      "gitObject": "152a3393d9e94efe422647223ddf7d4ca5a0864a"
     },
     "src/host/websocket_dialer.h": {
       "mode": "100644",
@@ -2774,7 +2829,7 @@
     "src/host/websocket_session.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f4d4b7abdacc3cfcff041df51cf5eeafe88743ab"
+      "gitObject": "5dd6edadba8869b65178ffe980d492a8257b9abe"
     },
     "src/host/websocket_session.h": {
       "mode": "100644",
@@ -2784,47 +2839,57 @@
     "src/host/worker_capacity_ledger.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "dfe5c4720fdc57d04c1df102cc2a2005c60db249"
+      "gitObject": "d8aa1addd5dbf7e65eadb45bb1087f7f66cd6bb7"
     },
     "src/host/worker_capacity_ledger.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "1617bda355bff3e69dce99a2d3b7fe7e98cb6254"
+      "gitObject": "05a5fe6202f3ef4540cc966255230a09d1663fdb"
+    },
+    "src/host/worker_cgroup.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "69078099f665b94039cd8709570e2ec61c648a02"
+    },
+    "src/host/worker_cgroup.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "4729cd1472afb329a3abfbe62e27c000d512d48f"
     },
     "src/host/worker_event_source.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "01ecc83ee9b8bf958bf727d7394af5e785c5d01b"
+      "gitObject": "3496404b7cc536a7175a8d122bbe7f7cd11ba99b"
     },
     "src/host/worker_event_source.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "f1f19b658f8a6aaf82101d9336f09580cd3d2c8b"
+      "gitObject": "b7f8a7e5c18e3b1efb177d15284d8169872f3220"
     },
     "src/host/worker_executor.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "bdfef9409d63257796627058d29fb66ae9c67cca"
+      "gitObject": "a073fcaba17962a41285226c0d3069c94efc3522"
     },
     "src/host/worker_executor.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "fbebe4e652ecbe2077d1c264f66cba8083c385b5"
+      "gitObject": "61c0eaa4700c50dc9f7e5b8afc29c9463b2ec309"
     },
     "src/host/worker_recovery.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "834c58fc11dca8497cc44adf870baf4dd14addc1"
+      "gitObject": "287d30b81b5f68b8693510823f9a2853a30d500d"
     },
     "src/host/worker_recovery.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "b650376ef929b23d0abe054d56722ff58ca2f347"
+      "gitObject": "efd7dce95f06621de5443972f77e8c54801adb33"
     },
     "src/host/worker_supervisor.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "3c3287d02c13154f501cfa6fb185ec20a936804b"
+      "gitObject": "6ae686c99583141f6a67dc83777648030e5ab7f7"
     },
     "src/host/worker_supervisor.h": {
       "mode": "100644",
@@ -2839,7 +2904,7 @@
     "src/host/ws_codec.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "335da3de3d7f5384c8283919e4d8b447d26d959e"
+      "gitObject": "79b60b9ae54eba9b572e3413d0bcc5c2f9c2fbe6"
     },
     "src/host/ws_stream.cc": {
       "mode": "100644",
@@ -2854,32 +2919,47 @@
     "src/ipc_validation.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "441e62a0f2d94780d89abddc6891646241bce46a"
+      "gitObject": "8195e34569417d76c8ee07936d71f264629a9c63"
     },
     "src/ipc_validation.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "11542a55e16ad7e3dec71308569b027154da5eea"
+      "gitObject": "8f1ae98f00d9e65b9156232037cbaf7cd1b4bcea"
+    },
+    "src/json_escape.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "aaccf9b26da7a7b9f56fe5d0713cdd74f19d62f4"
     },
     "src/memory_metrics.cc": {
       "mode": "100644",
       "kind": "blob",
       "gitObject": "9bb2c939a08fdf87d553a8518169f7a568371dff"
     },
+    "src/net_target.cc": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "460c11c7260196f4b4a28e2a4f225dc164a7ee1b"
+    },
+    "src/net_target.h": {
+      "mode": "100644",
+      "kind": "blob",
+      "gitObject": "ebb546db0dc5f12d36e118f7b2158203c6b11ff6"
+    },
     "src/outbound_buffer.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "41d6a6f04be38f5263216e1b7a7fdcb5036e2fb9"
+      "gitObject": "b6555594144bf1bf9cd8e09e3ea177c428e20476"
     },
     "src/protocol.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "afcffe4c4aa6545cde04df5eb6da280e246ce1ca"
+      "gitObject": "15e59cc8768c6ce1bc0675976b66eca4623e0cd5"
     },
     "src/protocol.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "9cdba82fcf85bb326c31f62756d6085aca46fc3b"
+      "gitObject": "032ddc95c9630bc56ca80afeabc93e9145583e81"
     },
     "src/response_headers.cc": {
       "mode": "100644",
@@ -2899,7 +2979,7 @@
     "src/sandbox.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "653569a7741c22d23125cb24b9de6e1644537a08"
+      "gitObject": "9e0e7648e4481da0c4c3c02620ef83aef7fb5e0e"
     },
     "src/sandbox.h": {
       "mode": "100644",
@@ -2909,12 +2989,12 @@
     "src/txiki_restricted_core.c": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "8077a6e3cf5f1712b293ef209162ebbc54a0696d"
+      "gitObject": "489b3899773579f3e059cdbe9df66dc3c24a1074"
     },
     "src/win32_compat.h": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "904fdb768f64aa05eecb39ad2b20d2ab06663d67"
+      "gitObject": "daf5d6ff82cf79c941b62b477f04b730f0bf5238"
     },
     "src/worker_exit_status.h": {
       "mode": "100644",
@@ -2924,12 +3004,12 @@
     "src/worker_main.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "db571a4a168b43b438f35119f873d9f709a13f2b"
+      "gitObject": "e6c03ac09804596c7cf0229a317e62086a288e24"
     },
     "src/worker_runtime.cc": {
       "mode": "100644",
       "kind": "blob",
-      "gitObject": "13040ab944386e1791e6b747126c07a77d19b9c4"
+      "gitObject": "7b334d3a1dd51a18ce87e1d81eb8363fb334fa54"
     },
     "src/worker_runtime.h": {
       "mode": "100644",
@@ -3108,20 +3188,15 @@
     }
   },
   "qualifiedReleaseDigests": {
-    "headerSHA256": "54946a795edfd8f9dec7fdca6a66887e9140c28f473d96e4027d9ab17b5caa97",
-    "protocolSHA256": "2c7a5fb6eb02fafcf30df741a1be6d742c17d9a3d2a1a58c563bc35f1c438bcf"
+    "headerSHA256": "73954203a46c5357dd80cbc3d249d887c06a1442fffa408de4ebda94688a5a38",
+    "protocolSHA256": "d4615f3fbeecf16a0fe4b07363649da0d7882da112d33f7421d3ab6695924507"
   },
   "checkout": {
-    "kind": "test-harness-successor",
-    "baseCommit": "845ae5dee5833c1bed1c2630cfb65e6ed76af7d7",
+    "kind": "docs-successor",
+    "baseCommit": "288955124e23eb88060b8267ea93e3d0e6a4fbbe",
     "releaseQualificationInherited": false,
-    "changeScope": "post-v0.3.1-beta.1 release publication metadata, docs/perf-site updates, and benchmark_loadgen_correctness CTest serialization/timeout guard; runtime and vendor inputs match v0.3.1-beta.1",
-    "buildInputChanges": {
-      "cmake/build_tests.cmake": {
-        "qualifiedGitObject": "f6d8d06480256d91ca9dae14af500f883fc7ce68",
-        "currentGitObject": "191702853a0a8e18674601d6de4adc2357845fea"
-      }
-    },
+    "changeScope": "post-v0.3.2-beta.1 release publication metadata, streamlined README/perf-site installer cutover, and documentation alignment; runtime/build/vendor inputs match qualified v0.3.2-beta.1 identically",
+    "buildInputChanges": {},
     "runtimeInputChanges": {},
     "vendorPatchChanges": {}
   }

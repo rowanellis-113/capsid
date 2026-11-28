@@ -34,7 +34,7 @@ def derive(root):
     reference = load(root / "tests/wpt/workerd-default-profile-v2.json")
     capability = load(root / "docs/data/capability-manifest.json")
     baseline = load(root / "docs/data/txiki-upgrade-baseline.json")
-    review_path = "docs/data/performance-review-v031-beta1.json"
+    review_path = "docs/data/performance-review-v032.json"
     review = load(root / review_path)
     measured_source = load(root / review["measuredSourceManifest"])
     header = (root / "include/capsid/runtime.h").read_text(encoding="utf-8")
@@ -54,7 +54,7 @@ def derive(root):
     assert beta["draft"] is False and len(beta["assets"]) == 11
     assert beta["githubLatest"] == (github_latest["tag"] == beta["tag"])
     assert not (beta["prerelease"] and beta["githubLatest"])
-    assert abi == 7 and wire == 3
+    assert abi == 8 and wire == 4
     # Bind the API/source description to its declared release, rather than just
     # relabeling a changed runtime tree with the old qualified commit.
     source_paths = ["src", "include", "js", "patches", "cmake", "CMakeLists.txt", "vendor"]
