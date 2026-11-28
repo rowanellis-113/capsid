@@ -22,16 +22,25 @@ const NativeRequest = globalThis.Request;
 const nativeFetch = globalThis.fetch;
 const IntrinsicAbortController = globalThis.AbortController;
 const abortControllerAbort = IntrinsicAbortController.prototype.abort;
+const abortControllerSignalDesc = Object.getOwnPropertyDescriptor(
+  IntrinsicAbortController.prototype,
+  'signal',
+);
+const abortControllerSignalGetter = abortControllerSignalDesc
+  ? abortControllerSignalDesc.get
+  : null;
 
 const bodyTypeError = globalThis.TypeError;
 const bodyRangeError = globalThis.RangeError;
 const bodyProperty = Object.getOwnPropertyDescriptor;
+const objectCreate = Object.create;
 const objectPrototype = Object.prototype;
 const hasOwn = objectPrototype.hasOwnProperty;
 const objectHasOwn = Object.hasOwn;
 const getPrototypeOf = Object.getPrototypeOf;
 const objectKeys = Object.keys;
 const applyIntrinsic = Reflect.apply;
+const numberIsInteger = Number.isInteger;
 const headerBuiltinString = String;
 const headerByteArray = Uint8Array;
 const headerBigInt = BigInt;
@@ -54,10 +63,12 @@ const weakMapGet = weakMapPrototype.get;
 const weakMapSet = weakMapPrototype.set;
 const weakSetHas = WeakSet.prototype.has;
 const weakSetAdd = WeakSet.prototype.add;
-const mapGet = Map.prototype.get;
-const mapSet = Map.prototype.set;
-const mapHas = Map.prototype.has;
-const mapDelete = Map.prototype.delete;
+const IntrinsicMap = Map;
+const mapGet = IntrinsicMap.prototype.get;
+const mapSet = IntrinsicMap.prototype.set;
+const mapHas = IntrinsicMap.prototype.has;
+const mapDelete = IntrinsicMap.prototype.delete;
+const mapForEach = IntrinsicMap.prototype.forEach;
 
 const sharedTextEncoder = new TextEncoder();
 const sharedTextDecoder = new TextDecoder();
@@ -223,6 +234,26 @@ function safeSetOwnDataProp(obj, key, value) {
   if (desc !== undefined && desc.get === undefined && desc.set === undefined && desc.writable) {
     obj[key] = value;
   }
+}
+
+function readAbortControllerSignal(controller) {
+  const desc = bodyProperty(controller, 'signal');
+  if (desc !== undefined && desc.get === undefined && desc.set === undefined) {
+    return desc.value;
+  }
+  return abortControllerSignalGetter !== null
+    ? applyIntrinsic(abortControllerSignalGetter, controller, [])
+    : null;
+}
+
+function getResponseHeadersState(res) {
+  if (bindingHttpTrackingEnabled && isObjectValue(res)) {
+    const slot = weakMapGet.call(responsePrivateSlots, res);
+    if (slot !== undefined) {
+      return slot.headersState;
+    }
+  }
+  return res._headersState;
 }
 const readableLocked = Object.getOwnPropertyDescriptor(ReadableStream.prototype, 'locked').get;
 const headerInvocationMessage =
@@ -438,7 +469,7 @@ function cloneHeaderState(src) {
     k0: src.k0,
     v0: src.v0,
     pairs: src.pairs === null ? null : arraySlice.call(src.pairs),
-    map: src.map === null ? null : new Map(src.map),
+    map: src.map === null ? null : new IntrinsicMap(src.map),
     cookies: src.cookies === null ? null : arraySlice.call(src.cookies),
     immutable: false,
   };
@@ -506,7 +537,7 @@ function headerStateAppendNormalized(state, name, value) {
       p[n + 1] = value;
       return;
     }
-    const nextMap = new Map();
+    const nextMap = new IntrinsicMap();
     for (let i = 0; i < n; i += 2) {
       mapSet.call(nextMap, p[i], p[i + 1]);
     }
@@ -552,7 +583,7 @@ function headerStateSetNormalized(state, name, value) {
       p[n + 1] = value;
       return;
     }
-    const nextMap = new Map();
+    const nextMap = new IntrinsicMap();
     for (let i = 0; i < n; i += 2) {
       mapSet.call(nextMap, p[i], p[i + 1]);
     }
@@ -960,13 +991,13 @@ class Headers {
 const headersPrototype = Headers.prototype;
 
 function createEmptyHeaders() {
-  const headers = Object.create(headersPrototype);
+  const headers = objectCreate(headersPrototype);
   setHeaderState(headers, createHeaderState());
   return headers;
 }
 
 export function createHeadersFromIncomingPairs(rawPairs, canonical = false) {
-  const headers = Object.create(headersPrototype);
+  const headers = objectCreate(headersPrototype);
   const state = createHeaderState();
   setHeaderState(headers, state);
   if (rawPairs !== undefined && rawPairs !== null) {
@@ -992,7 +1023,7 @@ export function createHeadersFromIncomingPairs(rawPairs, canonical = false) {
 }
 
 function cloneHeadersFromOwnedState(srcState) {
-  const headers = Object.create(headersPrototype);
+  const headers = objectCreate(headersPrototype);
   setHeaderState(headers, cloneHeaderState(srcState));
   return headers;
 }
@@ -1002,7 +1033,7 @@ function wrapNormalizedNativeHeaders(nativeHeaders) {
   if (owned !== undefined) {
     return cloneHeadersFromOwnedState(owned);
   }
-  const headers = Object.create(headersPrototype);
+  const headers = objectCreate(headersPrototype);
   const state = createHeaderState();
   setHeaderState(headers, state);
   for (const [name, value] of nativeHeaders) {
@@ -1234,7 +1265,7 @@ export function snapshotRequestForBinding(req, checkReadableTransferable, extrac
         abortControllerAbort.call(state.abortController, state.cancelReason);
       }
     }
-    slot.signal = state.abortController.signal;
+    slot.signal = readAbortControllerSignal(state.abortController);
     safeSetOwnDataProp(req, '_signal', slot.signal);
     safeSetOwnDataProp(req, '_signalState', null);
   }
@@ -1316,7 +1347,7 @@ export function snapshotResponseForBinding(res, checkReadableTransferable, extra
   }
   if (
     typeof slot.status !== 'number' ||
-    !Number.isInteger(slot.status) ||
+    !numberIsInteger(slot.status) ||
     (slot.status !== 0 && (slot.status < 100 || slot.status > 599))
   ) {
     return { error: 'Response status was tampered with' };
@@ -1490,9 +1521,9 @@ function bridgePairsFromState(state) {
       return [[k0, state.v0]];
     }
     const cookies = state.cookies;
-    const pairs = new Array(cookies.length);
+    const pairs = [];
     for (let i = 0; i < cookies.length; i++) {
-      pairs[i] = ['set-cookie', cookies[i]];
+      arrayPush.call(pairs, ['set-cookie', cookies[i]]);
     }
     return pairs;
   }
@@ -1505,13 +1536,13 @@ function bridgePairsFromState(state) {
         bridgeLastHasContentLength = true;
       }
       if (name !== 'set-cookie') {
-        pairs.push([name, p[i + 1]]);
+        arrayPush.call(pairs, [name, p[i + 1]]);
       }
     }
     const cookies = state.cookies;
     if (cookies !== null) {
       for (let i = 0; i < cookies.length; i++) {
-        pairs.push(['set-cookie', cookies[i]]);
+        arrayPush.call(pairs, ['set-cookie', cookies[i]]);
       }
     }
     return pairs;
@@ -1519,18 +1550,18 @@ function bridgePairsFromState(state) {
   const m = state.map;
   if (m !== null) {
     const pairs = [];
-    for (const name of m.keys()) {
+    mapForEach.call(m, (val, name) => {
       if (name === 'content-length') {
         bridgeLastHasContentLength = true;
       }
       if (name !== 'set-cookie') {
-        pairs.push([name, mapGet.call(m, name)]);
+        arrayPush.call(pairs, [name, val]);
       }
-    }
+    });
     const cookies = state.cookies;
     if (cookies !== null) {
       for (let i = 0; i < cookies.length; i++) {
-        pairs.push(['set-cookie', cookies[i]]);
+        arrayPush.call(pairs, ['set-cookie', cookies[i]]);
       }
     }
     return pairs;
@@ -1639,7 +1670,7 @@ function bridgeFlatFromState(state) {
 
 export function bridgeResponseHeadersFlat(response) {
   bridgeLastHasContentLength = false;
-  const state = response._headersState;
+  const state = getResponseHeadersState(response);
   if (state !== null && !objectHasOwn(response, 'headers')) {
     return bridgeFlatFromState(state);
   }
@@ -1665,7 +1696,7 @@ export function bridgeResponseHeadersFlat(response) {
 
 export function bridgeResponseHeaders(response) {
   bridgeLastHasContentLength = false;
-  const state = response._headersState;
+  const state = getResponseHeadersState(response);
   if (state !== null && !objectHasOwn(response, 'headers')) {
     return bridgePairsFromState(state);
   }
@@ -2251,10 +2282,10 @@ function assignRequestSlots(
   req.mode = mode;
   req.referrer = null;
   req._headers = headers;
-  req._rawHeaders = rawHeaders;
-  req._rawHeadersCanonical = rawHeadersCanonical;
+  req._rawHeaders = bindingHttpTrackingEnabled ? null : rawHeaders;
+  req._rawHeadersCanonical = bindingHttpTrackingEnabled ? false : rawHeadersCanonical;
   req._signal = signal;
-  req._signalState = signalState;
+  req._signalState = bindingHttpTrackingEnabled ? null : signalState;
   req._noBody = noBody;
   req._bodyInit = bodyInit;
   req._bodySize = bodySize;
@@ -2374,20 +2405,27 @@ class Request {
   }
 
   get headers() {
+    if (bindingHttpTrackingEnabled) {
+      const slot = weakMapGet.call(requestPrivateSlots, this);
+      if (slot !== undefined) {
+        if (slot.headers === null && slot.rawHeaders !== null) {
+          const raw = slot.rawHeaders;
+          const canonical = slot.rawHeadersCanonical;
+          slot.rawHeaders = null;
+          slot.rawHeadersCanonical = false;
+          const materialized = createHeadersFromIncomingPairs(raw, canonical);
+          slot.headers = materialized;
+          safeSetOwnDataProp(this, '_headers', materialized);
+        }
+        return slot.headers;
+      }
+    }
     if (this._headers === null && this._rawHeaders !== null) {
       const raw = this._rawHeaders;
       const canonical = this._rawHeadersCanonical;
       this._rawHeaders = null;
       this._rawHeadersCanonical = false;
       this._headers = createHeadersFromIncomingPairs(raw, canonical);
-      if (bindingHttpTrackingEnabled) {
-        const slot = weakMapGet.call(requestPrivateSlots, this);
-        if (slot !== undefined) {
-          slot.headers = this._headers;
-          slot.rawHeaders = null;
-          slot.rawHeadersCanonical = false;
-        }
-      }
     }
     return this._headers;
   }
@@ -2407,6 +2445,26 @@ class Request {
   }
 
   get signal() {
+    if (bindingHttpTrackingEnabled) {
+      const slot = weakMapGet.call(requestPrivateSlots, this);
+      if (slot !== undefined) {
+        if (slot.signal !== null) return slot.signal;
+        const state = slot.signalState;
+        if (state !== null) {
+          slot.signalState = null;
+          if (state.abortController === null) {
+            state.abortController = new IntrinsicAbortController();
+            if (state.cancelled) {
+              abortControllerAbort.call(state.abortController, state.cancelReason);
+            }
+          }
+          slot.signal = readAbortControllerSignal(state.abortController);
+          safeSetOwnDataProp(this, '_signal', slot.signal);
+          return slot.signal;
+        }
+        return null;
+      }
+    }
     if (this._signal !== null) return this._signal;
     const state = this._signalState;
     if (state !== null) {
@@ -2418,13 +2476,6 @@ class Request {
         }
       }
       this._signal = state.abortController.signal;
-      if (bindingHttpTrackingEnabled) {
-        const slot = weakMapGet.call(requestPrivateSlots, this);
-        if (slot !== undefined) {
-          slot.signal = this._signal;
-          slot.signalState = null;
-        }
-      }
       return this._signal;
     }
     return null;
@@ -2780,7 +2831,7 @@ function assignResponseSlots(
   res.ok = ok;
   res.statusText = statusText;
   res._headers = headers;
-  res._headersState = headersState;
+  res._headersState = bindingHttpTrackingEnabled ? null : headersState;
   res.url = url;
   res.redirected = redirected;
   res._noBody = noBody;
@@ -2922,16 +2973,22 @@ class Response {
   }
 
   get headers() {
+    if (bindingHttpTrackingEnabled) {
+      const slot = weakMapGet.call(responsePrivateSlots, this);
+      if (slot !== undefined) {
+        if (slot.headers === null && slot.headersState !== null) {
+          const headers = objectCreate(headersPrototype);
+          setHeaderState(headers, slot.headersState);
+          slot.headers = headers;
+          safeSetOwnDataProp(this, '_headers', headers);
+        }
+        return slot.headers;
+      }
+    }
     if (this._headers === null && this._headersState !== null) {
-      const headers = Object.create(headersPrototype);
+      const headers = objectCreate(headersPrototype);
       setHeaderState(headers, this._headersState);
       this._headers = headers;
-      if (bindingHttpTrackingEnabled) {
-        const slot = weakMapGet.call(responsePrivateSlots, this);
-        if (slot !== undefined) {
-          slot.headers = headers;
-        }
-      }
     }
     return this._headers;
   }
@@ -3007,9 +3064,10 @@ class Response {
     }
     if (this.type === 'error') {
       const wrapped = Object.create(Response.prototype);
+      const privState = getResponseHeadersState(this);
       const srcState =
-        this._headersState !== null && !objectHasOwn(this, 'headers')
-          ? this._headersState
+        privState !== null && !objectHasOwn(this, 'headers')
+          ? privState
           : getHeaderState(this.headers);
       let clonedState;
       if (srcState !== undefined && srcState !== null) {
@@ -3071,7 +3129,8 @@ class Response {
         clonedSlot.url = this.url;
       }
     }
-    const hState = this._headersState !== null ? this._headersState : getHeaderState(this.headers);
+    const privState = getResponseHeadersState(this);
+    const hState = privState !== null ? privState : getHeaderState(this.headers);
     if (hState !== undefined && hState !== null && hState.immutable) {
       finishFetchedResponse(cloned, this.url, this.redirected);
       if (this._bodyStream !== null) weakSetAdd.call(ordinaryFetchStreams, this._bodyStream);
@@ -3182,8 +3241,9 @@ function tryExtractFastResponseInitHeaders(init) {
   ) {
     return undefined;
   }
-  return init._headersState !== null
-    ? init._headersState
+  const fastState = getResponseHeadersState(init);
+  return fastState !== null
+    ? fastState
     : init._headers !== null
       ? getHeaderState(init._headers)
       : undefined;

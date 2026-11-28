@@ -506,6 +506,92 @@ void test_remote_error_structured_and_tamper_proof() {
     require(reason.kind == capsid::BindingAbortReason::Kind::kDefaultAbort,
             "uncloneable abort reason did not fall back to default AbortError");
 
+    // Materialize all three abort-reason variants in the target runtime and
+    // verify add/remove listener + read_reason helpers directly.
+    {
+        capsid::BindingAbortReason def_reason;
+        JSValue mat_def =
+            capsid::materialize_abort_reason(target.ctx(), def_reason, &dst_intrinsics);
+        require(!JS_IsException(mat_def) && JS_IsObject(mat_def), "materialize default abort");
+        JSValue g = JS_GetGlobalObject(target.ctx());
+        JS_SetPropertyStr(target.ctx(), g, "__matDef", mat_def);
+        JS_FreeValue(target.ctx(), g);
+        JSValue chk = target.eval(
+            "(__matDef instanceof __origDOMException) && __matDef.name === 'AbortError'");
+        require(JS_ToBool(target.ctx(), chk) == 1, "default abort reason is AbortError");
+        JS_FreeValue(target.ctx(), chk);
+
+        capsid::BindingAbortReason err_reason;
+        err_reason.kind = capsid::BindingAbortReason::Kind::kRemoteError;
+        err_reason.error =
+            capsid::RemoteErrorInfo::make_dom_exception("TimeoutError", "custom-timeout");
+        JSValue mat_err =
+            capsid::materialize_abort_reason(target.ctx(), err_reason, &dst_intrinsics);
+        require(!JS_IsException(mat_err), "materialize remote error abort");
+        g = JS_GetGlobalObject(target.ctx());
+        JS_SetPropertyStr(target.ctx(), g, "__matErr", mat_err);
+        JS_FreeValue(target.ctx(), g);
+        chk = target.eval(
+            "(__matErr instanceof __origDOMException) && __matErr.name === 'TimeoutError' && "
+            "__matErr.message === 'custom-timeout'");
+        require(JS_ToBool(target.ctx(), chk) == 1, "remote error abort reason mismatch");
+        JS_FreeValue(target.ctx(), chk);
+
+        capsid::BindingAbortReason val_reason;
+        val_reason.kind = capsid::BindingAbortReason::Kind::kNeutralValue;
+        val_reason.value.kind = capsid::NeutralValue::Kind::kString;
+        val_reason.value.string.assign("A\0B", 3);
+        JSValue mat_val =
+            capsid::materialize_abort_reason(target.ctx(), val_reason, &dst_intrinsics);
+        require(!JS_IsException(mat_val) && JS_IsString(mat_val), "materialize value abort");
+        g = JS_GetGlobalObject(target.ctx());
+        JS_SetPropertyStr(target.ctx(), g, "__matVal", mat_val);
+        JS_FreeValue(target.ctx(), g);
+        chk = target.eval("__matVal.length === 3 && __matVal.charCodeAt(1) === 0");
+        require(JS_ToBool(target.ctx(), chk) == 1, "value abort reason preserved embedded NUL");
+        JS_FreeValue(target.ctx(), chk);
+
+        JSValue sig_pair = source.eval("globalThis.__abortCalls = 0;"
+                                       "(() => { const s = new AbortSignal();"
+                                       "  const fn = () => { globalThis.__abortCalls++; };"
+                                       "  return [s, fn]; })()");
+        JSValue sig = JS_GetPropertyUint32(source.ctx(), sig_pair, 0);
+        JSValue fn = JS_GetPropertyUint32(source.ctx(), sig_pair, 1);
+        JS_FreeValue(source.ctx(), sig_pair);
+        require(capsid::binding_signal_add_abort_listener(source.ctx(), sig, fn, &src_intrinsics),
+                "add abort listener failed");
+        capsid::binding_signal_remove_abort_listener(source.ctx(), sig, fn, &src_intrinsics);
+        require(capsid::binding_signal_add_abort_listener(source.ctx(), sig, fn, &src_intrinsics),
+                "re-add abort listener failed");
+        JSValue sg = JS_GetGlobalObject(source.ctx());
+        JS_SetPropertyStr(source.ctx(), sg, "__testSig", JS_DupValue(source.ctx(), sig));
+        JS_FreeValue(source.ctx(), sg);
+        JS_FreeValue(source.ctx(), source.eval("__testSig._abort('stop-now');"));
+        JSValue calls_val = source.eval("globalThis.__abortCalls");
+        int calls_i = 0;
+        JS_ToInt32(source.ctx(), &calls_i, calls_val);
+        JS_FreeValue(source.ctx(), calls_val);
+        require(calls_i == 1, "abort listener did not fire exactly once");
+        JSValue read_reason = JS_UNDEFINED;
+        require(
+            capsid::binding_signal_read_reason(source.ctx(), sig, &src_intrinsics, &read_reason) &&
+                JS_IsString(read_reason),
+            "binding_signal_read_reason failed");
+        JS_FreeValue(source.ctx(), read_reason);
+        JS_FreeValue(source.ctx(), sig);
+        JS_FreeValue(source.ctx(), fn);
+    }
+
+    // T4: NUL-embedded option key must fail closed as unknown option.
+    {
+        JSValue nul_opt = source.eval("({ ['timeoutMs\\u0000evil']: 10 })");
+        opt_err.clear();
+        require(!capsid::parse_binding_call_options(source.ctx(), nul_opt, &src_intrinsics, &opts,
+                                                    &opt_err),
+                "NUL-embedded option key must be rejected");
+        JS_FreeValue(source.ctx(), nul_opt);
+    }
+
     capsid::free_binding_rpc_intrinsics(source.ctx(), &src_intrinsics);
     capsid::free_binding_rpc_intrinsics(target.ctx(), &dst_intrinsics);
 }
@@ -648,6 +734,332 @@ void test_neutral_byte_estimation_and_incremental_reservation() {
     require(ledger.empty(), "ledger empty after rollback of failed mid-clone reservation");
 }
 
+// T4: Strings with embedded NUL code units and plain objects with empty or
+// NUL-containing keys must round-trip losslessly code-unit for code-unit.
+void test_string_and_object_key_fidelity() {
+    RuntimeFixture fixture;
+    JSContext* ctx = fixture.ctx();
+
+    // 1. Embedded NUL strings: [65, 0, 66], [0], [0, 65, 0], and multi-byte UTF-8.
+    JSValue str_in =
+        fixture.eval("[String.fromCharCode(65, 0, 66), '\\u0000', '\\u0000A\\u0000', '你好🚀']");
+    capsid::NeutralValue str_nv;
+    std::string err;
+    require(capsid::neutral_from_js(ctx, str_in, &str_nv, &err),
+            ("embedded-NUL string clone failed: " + err).c_str());
+    JS_FreeValue(ctx, str_in);
+    require(str_nv.kind == capsid::NeutralValue::Kind::kArray && str_nv.array.size() == 4,
+            "string array shape mismatch");
+    require(str_nv.array[0].string.size() == 3 && str_nv.array[0].string[0] == 'A' &&
+                str_nv.array[0].string[1] == '\0' && str_nv.array[0].string[2] == 'B',
+            "neutral string truncated at embedded NUL");
+    require(str_nv.array[1].string.size() == 1 && str_nv.array[1].string[0] == '\0',
+            "single NUL string lost");
+    require(str_nv.array[2].string.size() == 3 && str_nv.array[2].string[0] == '\0' &&
+                str_nv.array[2].string[1] == 'A' && str_nv.array[2].string[2] == '\0',
+            "leading/trailing NUL string lost");
+
+    JSValue str_out = capsid::neutral_to_js(ctx, str_nv);
+    require(!JS_IsException(str_out), "embedded-NUL string materialization failed");
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__strOut", str_out);
+    JS_FreeValue(ctx, global);
+    JSValue str_ok =
+        fixture.eval("(() => {"
+                     "  const units = (s) => Array.from(s, (c) => c.charCodeAt(0));"
+                     "  const u0 = units(__strOut[0]);"
+                     "  const u1 = units(__strOut[1]);"
+                     "  const u2 = units(__strOut[2]);"
+                     "  return u0.length === 3 && u0[0] === 65 && u0[1] === 0 && u0[2] === 66 &&"
+                     "         u1.length === 1 && u1[0] === 0 &&"
+                     "         u2.length === 3 && u2[0] === 0 && u2[1] === 65 && u2[2] === 0 &&"
+                     "         __strOut[3] === '你好🚀';"
+                     "})()");
+    require(JS_ToBool(ctx, str_ok) == 1, "round-tripped strings lost embedded NUL or UTF-8");
+    JS_FreeValue(ctx, str_ok);
+
+    // 2. Plain objects with empty key "" and NUL-embedded keys.
+    JSValue obj_in =
+        fixture.eval("({ '': 7, name: 'demo', ['a\\u0000b']: 99, ['\\u0000']: 'nul-val' })");
+    capsid::NeutralValue obj_nv;
+    err.clear();
+    require(capsid::neutral_from_js(ctx, obj_in, &obj_nv, &err),
+            ("special-key object clone failed: " + err).c_str());
+    JS_FreeValue(ctx, obj_in);
+    require(obj_nv.kind == capsid::NeutralValue::Kind::kObject && obj_nv.object.size() == 4,
+            "special-key object dropped keys");
+    require(obj_nv.object[0].first.empty() && obj_nv.object[0].second.number == 7.0,
+            "empty key lost in NeutralValue");
+    require(obj_nv.object[1].first == "name" && obj_nv.object[1].second.string == "demo",
+            "name key mismatch in NeutralValue");
+    require(obj_nv.object[2].first.size() == 3 && obj_nv.object[2].first[0] == 'a' &&
+                obj_nv.object[2].first[1] == '\0' && obj_nv.object[2].first[2] == 'b' &&
+                obj_nv.object[2].second.number == 99.0,
+            "NUL-embedded object key truncated in NeutralValue");
+    require(obj_nv.object[3].first.size() == 1 && obj_nv.object[3].first[0] == '\0' &&
+                obj_nv.object[3].second.string == "nul-val",
+            "single-NUL object key lost in NeutralValue");
+
+    JSValue obj_out = capsid::neutral_to_js(ctx, obj_nv);
+    require(!JS_IsException(obj_out), "special-key object materialization failed");
+    global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__objOut", obj_out);
+    JS_FreeValue(ctx, global);
+    JSValue obj_ok = fixture.eval(
+        "(() => {"
+        "  const keys = Object.keys(__objOut);"
+        "  return keys.length === 4 &&"
+        "         keys[0] === '' && __objOut[''] === 7 &&"
+        "         keys[1] === 'name' && __objOut.name === 'demo' &&"
+        "         keys[2] === 'a\\u0000b' && keys[2].length === 3 && __objOut['a\\u0000b'] === 99 &&"
+        "         keys[3] === '\\u0000' && keys[3].length === 1 && __objOut['\\u0000'] === 'nul-val';"
+        "})()");
+    require(JS_ToBool(ctx, obj_ok) == 1, "round-tripped object lost empty or NUL-embedded keys");
+    JS_FreeValue(ctx, obj_ok);
+}
+
+// T1/R2: Exact-fit vs 1-byte-short quota boundaries for HTTP Request metadata,
+// HTTP Response metadata, header pairs, and RpcTarget method tables — proving
+// ZERO native copies occur on rejection and all three ledger tiers stay at
+// their exact initial baseline.
+void test_precopy_quota_boundaries_and_zero_copy_on_reject() {
+    RuntimeFixture rt;
+    JSContext* ctx = rt.ctx();
+    const std::size_t kBaseline = 17;
+
+    auto make_ledger_at_cap = [&](std::size_t cap) -> capsid::BindingRpcLedger {
+        capsid::BindingRpcLimits limits;
+        limits.max_bytes_per_request = cap;
+        limits.max_bytes_per_binding = cap;
+        limits.max_bytes_per_worker = cap;
+        capsid::BindingRpcLedger ledger(limits);
+        capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
+        require(ledger.reserve_bytes(1, "svc", kBaseline, &qerr), "baseline reserve failed");
+        return ledger;
+    };
+    auto check_tiers = [&](const capsid::BindingRpcLedger& ledger, std::size_t expected,
+                           const char* msg) {
+        require(ledger.request_counts(1).bytes == expected &&
+                    ledger.binding_counts("svc").bytes == expected &&
+                    ledger.worker_counts().bytes == expected,
+                msg);
+    };
+
+    // 1. HTTP Request metadata (64 + url + method + credentials + redirect + mode).
+    JSValue req_info =
+        rt.eval("({ url: 'https://t1.test/path/item', method: 'POST', credentials: 'same-origin', "
+                "   redirect: 'follow', mode: 'cors' })");
+    const std::size_t req_expected = 64 + 25 + 4 + 11 + 6 + 4; // 114
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + req_expected - 1);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        capsid::NeutralHttpRequest req;
+        std::string err;
+        std::size_t copies = 99;
+        require(!capsid::extract_neutral_http_request_meta(
+                    ctx, req_info, &req, test_reserve_clone_bytes, &rctx, &err, &copies),
+                "Request meta 1-byte-short must reject");
+        require(err.find("byte quota") != std::string::npos, "expected byte quota error");
+        require(copies == 0 && req.url.empty() && req.method.empty() && req.credentials.empty() &&
+                    req.redirect.empty() && !req.has_mode && req.mode.empty(),
+                "Request meta must perform ZERO native copies on quota reject");
+        require(rctx.reserved == 0, "failed Request meta must not retain reservation");
+        check_tiers(ledger, kBaseline, "Request meta reject must leave all 3 tiers at baseline");
+    }
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + req_expected);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        capsid::NeutralHttpRequest req;
+        std::string err;
+        std::size_t copies = 0;
+        require(capsid::extract_neutral_http_request_meta(
+                    ctx, req_info, &req, test_reserve_clone_bytes, &rctx, &err, &copies),
+                ("Request meta exact-fit rejected: " + err).c_str());
+        require(copies == 5 && req.url == "https://t1.test/path/item" && req.method == "POST" &&
+                    req.has_mode && req.mode == "cors",
+                "Request meta exact-fit values mismatch");
+        require(rctx.reserved == req_expected &&
+                    capsid::estimate_neutral_request_bytes(req) == req_expected,
+                "Request meta reserved bytes mismatch");
+        check_tiers(ledger, kBaseline + req_expected, "Request meta exact-fit tier accounting");
+        ledger.release_bytes(1, "svc", rctx.reserved);
+        check_tiers(ledger, kBaseline, "Request meta release restores baseline");
+    }
+    JS_FreeValue(ctx, req_info);
+
+    // 2. HTTP Response metadata (64 + statusText + url + type).
+    JSValue res_info = rt.eval("({ status: 201, redirected: true, statusText: 'Created', "
+                               "   url: 'https://t1.test/res', type: 'default' })");
+    const std::size_t res_expected = 64 + 7 + 19 + 7; // 97
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + res_expected - 1);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        capsid::NeutralHttpResponse res;
+        std::string err;
+        std::size_t copies = 99;
+        require(!capsid::extract_neutral_http_response_meta(
+                    ctx, res_info, &res, test_reserve_clone_bytes, &rctx, &err, &copies),
+                "Response meta 1-byte-short must reject");
+        require(err.find("byte quota") != std::string::npos, "expected byte quota error");
+        require(copies == 0 && res.status_text.empty() && res.url.empty() && res.type.empty() &&
+                    res.status == 200 && !res.redirected,
+                "Response meta must perform ZERO native copies on quota reject");
+        check_tiers(ledger, kBaseline, "Response meta reject must leave all 3 tiers at baseline");
+    }
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + res_expected);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        capsid::NeutralHttpResponse res;
+        std::string err;
+        std::size_t copies = 0;
+        require(capsid::extract_neutral_http_response_meta(
+                    ctx, res_info, &res, test_reserve_clone_bytes, &rctx, &err, &copies),
+                ("Response meta exact-fit rejected: " + err).c_str());
+        require(copies == 3 && res.status == 201 && res.redirected &&
+                    res.status_text == "Created" && res.url == "https://t1.test/res" &&
+                    res.type == "default",
+                "Response meta exact-fit values mismatch");
+        require(rctx.reserved == res_expected &&
+                    capsid::estimate_neutral_response_bytes(res) == res_expected,
+                "Response meta reserved bytes mismatch");
+        check_tiers(ledger, kBaseline + res_expected, "Response meta exact-fit tier accounting");
+        ledger.release_bytes(1, "svc", rctx.reserved);
+        check_tiers(ledger, kBaseline, "Response meta release restores baseline");
+    }
+    JS_FreeValue(ctx, res_info);
+
+    // 3. Header pairs (per-entry reserve before copy).
+    JSValue hdrs_js = rt.eval("[['x-one', 'alpha'], ['x-two', 'beta-long']]");
+    const std::size_t h0_bytes = 5 + 5 + 16; // 26
+    const std::size_t h1_bytes = 5 + 9 + 16; // 30
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + h0_bytes - 1);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        std::vector<std::pair<std::string, std::string>> pairs;
+        std::string err;
+        std::size_t copies = 99;
+        require(!capsid::extract_neutral_header_pairs(
+                    ctx, hdrs_js, &pairs, test_reserve_clone_bytes, &rctx, &err, &copies),
+                "Header 0 1-byte-short must reject");
+        require(copies == 0 && pairs.empty() && rctx.reserved == 0,
+                "Header 0 reject must perform ZERO copies");
+        check_tiers(ledger, kBaseline, "Header 0 reject leaves all 3 tiers at baseline");
+    }
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + h0_bytes + h1_bytes - 1);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        std::vector<std::pair<std::string, std::string>> pairs;
+        std::string err;
+        std::size_t copies = 0;
+        require(!capsid::extract_neutral_header_pairs(
+                    ctx, hdrs_js, &pairs, test_reserve_clone_bytes, &rctx, &err, &copies),
+                "Header 1 1-byte-short must reject");
+        require(copies == 2 && pairs.size() == 1 && rctx.reserved == h0_bytes,
+                "Header 1 reject must not copy header 1");
+        ledger.release_bytes(1, "svc", rctx.reserved);
+        check_tiers(ledger, kBaseline, "Header 1 rollback restores baseline");
+    }
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + h0_bytes + h1_bytes);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        std::vector<std::pair<std::string, std::string>> pairs;
+        std::string err;
+        std::size_t copies = 0;
+        require(capsid::extract_neutral_header_pairs(ctx, hdrs_js, &pairs, test_reserve_clone_bytes,
+                                                     &rctx, &err, &copies),
+                ("Headers exact-fit rejected: " + err).c_str());
+        require(copies == 4 && pairs.size() == 2 && rctx.reserved == h0_bytes + h1_bytes,
+                "Headers exact-fit mismatch");
+        check_tiers(ledger, kBaseline + h0_bytes + h1_bytes, "Headers exact-fit tier accounting");
+        ledger.release_bytes(1, "svc", rctx.reserved);
+        check_tiers(ledger, kBaseline, "Headers release restores baseline");
+    }
+    JS_FreeValue(ctx, hdrs_js);
+
+    // 4. RpcTarget method table inspection (32 + sum(name.size() + 16)).
+    JSValue target_setup = rt.eval("class BaseTarget {};"
+                                   "class SampleTarget extends BaseTarget {"
+                                   "  alpha() { return 1; }"
+                                   "  betaMethod() { return 2; }"
+                                   "  dispose() {}"
+                                   "}"
+                                   "[new SampleTarget(), BaseTarget.prototype, Object.prototype]");
+    JSValue target_obj = JS_GetPropertyUint32(ctx, target_setup, 0);
+    JSValue base_proto = JS_GetPropertyUint32(ctx, target_setup, 1);
+    JSValue obj_proto = JS_GetPropertyUint32(ctx, target_setup, 2);
+    JS_FreeValue(ctx, target_setup);
+    const std::size_t handle_expected = 32 + (5 + 16) + (10 + 16); // 79
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + handle_expected - 1);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        std::vector<std::string> methods;
+        std::map<std::string, JSValue> method_fns;
+        std::string err;
+        std::size_t copies = 99;
+        require(!capsid::inspect_rpc_target_methods(ctx, target_obj, base_proto, obj_proto, 128,
+                                                    &methods, &method_fns, test_reserve_clone_bytes,
+                                                    &rctx, &err, &copies),
+                "RpcTarget methods 1-byte-short must reject");
+        require(err.find("byte quota") != std::string::npos, "expected byte quota error");
+        require(copies == 0 && methods.empty() && method_fns.empty() && rctx.reserved == 0,
+                "RpcTarget reject must perform ZERO native method-name copies");
+        check_tiers(ledger, kBaseline, "RpcTarget reject leaves all 3 tiers at baseline");
+    }
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + handle_expected);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        std::vector<std::string> methods;
+        std::map<std::string, JSValue> method_fns;
+        std::string err;
+        std::size_t copies = 0;
+        require(capsid::inspect_rpc_target_methods(ctx, target_obj, base_proto, obj_proto, 128,
+                                                   &methods, &method_fns, test_reserve_clone_bytes,
+                                                   &rctx, &err, &copies),
+                ("RpcTarget methods exact-fit rejected: " + err).c_str());
+        require(copies == 2 && methods.size() == 2 && method_fns.size() == 2 &&
+                    rctx.reserved == handle_expected,
+                "RpcTarget exact-fit mismatch");
+        check_tiers(ledger, kBaseline + handle_expected, "RpcTarget exact-fit tier accounting");
+        for (std::map<std::string, JSValue>::iterator mit = method_fns.begin();
+             mit != method_fns.end(); ++mit) {
+            JS_FreeValue(ctx, mit->second);
+        }
+        method_fns.clear();
+        ledger.release_bytes(1, "svc", rctx.reserved);
+        check_tiers(ledger, kBaseline, "RpcTarget release restores baseline");
+    }
+    // Embedded NUL method name and accessor must fail closed with zero copies/reservations.
+    {
+        capsid::BindingRpcLedger ledger = make_ledger_at_cap(kBaseline + 1024);
+        IncrementalCloneLedgerCtx rctx;
+        rctx.ledger = &ledger;
+        JSValue nul_method_target = rt.eval("({ ['ping\\u0000x']() { return 1; } })");
+        std::vector<std::string> methods;
+        std::map<std::string, JSValue> method_fns;
+        std::string err;
+        std::size_t copies = 99;
+        require(!capsid::inspect_rpc_target_methods(ctx, nul_method_target, base_proto, obj_proto,
+                                                    128, &methods, &method_fns,
+                                                    test_reserve_clone_bytes, &rctx, &err, &copies),
+                "RpcTarget NUL-embedded method name must reject");
+        require(copies == 0 && rctx.reserved == 0, "invalid method name must reserve/copy zero");
+        JS_FreeValue(ctx, nul_method_target);
+        check_tiers(ledger, kBaseline, "invalid RpcTarget leaves baseline untouched");
+    }
+    JS_FreeValue(ctx, target_obj);
+    JS_FreeValue(ctx, base_proto);
+    JS_FreeValue(ctx, obj_proto);
+}
+
 } // namespace
 
 int main() {
@@ -663,5 +1075,7 @@ int main() {
     test_neutral_to_js_propagates_conversion_errors();
     test_remote_error_structured_and_tamper_proof();
     test_neutral_byte_estimation_and_incremental_reservation();
+    test_string_and_object_key_fidelity();
+    test_precopy_quota_boundaries_and_zero_copy_on_reject();
     return 0;
 }

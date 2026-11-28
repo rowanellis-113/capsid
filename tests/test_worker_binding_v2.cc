@@ -2175,6 +2175,7 @@ void test_audit_r2_r4_r5_regressions(const char* worker_path) {
     const std::string binding_src = R"JS(
 let disposedCount = 0;
 let barrierWaiters = [];
+let expiredProviderHits = 0;
 class TrackedHandle extends RpcTarget {
   ping() { return 'ok'; }
   [Symbol.dispose]() { disposedCount++; }
@@ -2192,6 +2193,7 @@ export default () => ({
       url: req.url,
       method: req.method,
       hdr: req.headers.get('x-lazy-in'),
+      updatedHdr: req.headers.get('x-updated'),
       hasSignal: Boolean(req.signal),
       referrer: req.referrer,
     };
@@ -2202,6 +2204,19 @@ export default () => ({
       status: res.status,
       hasBody: res.body !== null,
       hdr: res.headers.get('x-empty'),
+      addedHdr: res.headers.get('x-added'),
+      mapHdr0: res.headers.get('x-m-00'),
+      mapHdr19: res.headers.get('x-m-19'),
+    };
+  },
+  echoFidelity(v) {
+    return {
+      echoed: v,
+      fromBinding: {
+        str: String.fromCharCode(65, 0, 66),
+        nul: '\u0000',
+        rec: { '': 7, name: 'demo', ['a\u0000b']: 99 },
+      },
     };
   },
   openTracked() { return new TrackedHandle(); },
@@ -2218,7 +2233,11 @@ export default () => ({
   },
   observeDuringBurst() { return { disposedAtCall: disposedCount }; },
   resetDisposed() { disposedCount = 0; barrierWaiters = []; return true; },
-  slowNever() { return new Promise(() => {}); },
+  countedSlow() {
+    expiredProviderHits++;
+    return new Promise(() => {});
+  },
+  getCountedHits() { return expiredProviderHits; },
   ping(tag) { return 'pong:' + tag; },
 });
 )JS";
@@ -2280,13 +2299,29 @@ export default {
       out.r2HeaderQuotaOk =
         acceptedCount > 0 && acceptedCount < 40 && rejectedByteQuota > 0 && refilled > 120000;
 
-      // R4: Side-effect-free private Fetch snapshot on:
-      //  (a) incoming Request with lazy _rawHeaders + lazy _signalState;
-      //  (b) empty-body Response(null, { status: 204 });
-      //  (c) rejected already-used Response.
-      // Business callback counter MUST stay strictly 0 across ALL three!
+      // R4/T3: Side-effect-free private Fetch snapshot on:
+      //  (a) incoming Request with private lazy rawHeaders + private signalState
+      //      (never aliased onto req._rawHeaders / req._signalState);
+      //  (b) empty-body Response(null, { status: 204 }) + map-promoted Response
+      //      (>16 headers, never aliased onto res._headersState);
+      //  (c) rejected already-used Response;
+      //  (d) tampered builtins (Number.isInteger, Object.create, Map.prototype.keys,
+      //      Array.prototype.push) invoke ZERO callbacks;
+      //  (e) normal Headers.set/append updates still propagate to the peer.
       let callbackCount = 0;
       const bump = () => { callbackCount++; };
+
+      const emptyRes = new Response(null, { status: 204, headers: { 'x-empty': 'yes' } });
+      const mapInit = {};
+      for (let i = 0; i < 20; ++i) {
+        mapInit['x-m-' + String(i).padStart(2, '0')] = 'v' + i;
+      }
+      const mapRes = new Response(null, { status: 204, headers: mapInit });
+      const nestedNotAliased =
+        incomingReq._rawHeaders === null &&
+        incomingReq._signalState === null &&
+        emptyRes._headersState === null &&
+        mapRes._headersState === null;
 
       installHostileGetters(
         incomingReq,
@@ -2294,16 +2329,18 @@ export default {
          'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
         bump,
       );
-      const reqSnap = await svc.inspectReqSnapshot(incomingReq);
-
-      const emptyRes = new Response(null, { status: 204, headers: { 'x-empty': 'yes' } });
       installHostileGetters(
         emptyRes,
         ['status', 'statusText', 'url', 'type', 'redirected', 'headers', '_headers',
          '_headersState', 'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
         bump,
       );
-      const resSnap = await svc.inspectResSnapshot(emptyRes);
+      installHostileGetters(
+        mapRes,
+        ['status', 'statusText', 'url', 'type', 'redirected', 'headers', '_headers',
+         '_headersState', 'body', '_bodyStream', '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
+        bump,
+      );
 
       const usedRes = new Response('already-read');
       await usedRes.text();
@@ -2313,14 +2350,47 @@ export default {
          '_bodyFastKind', '_bodyFastData', '_bodyConsumed'],
         bump,
       );
-      let usedRejected = false;
+
+      const origIsInt = Number.isInteger;
+      const origObjCreate = Object.create;
+      const origMapKeys = Map.prototype.keys;
+      const origArrPush = Array.prototype.push;
+      let reqSnap, resSnap, mapSnap, usedRejected = false;
       try {
-        await svc.inspectResSnapshot(usedRes);
-      } catch (e) {
-        usedRejected = Boolean(e && e.message && e.message.includes('already used'));
+        Number.isInteger = () => { bump(); throw new Error('hostile-isInteger'); };
+        Object.create = () => { bump(); throw new Error('hostile-create'); };
+        Map.prototype.keys = () => { bump(); throw new Error('hostile-map-keys'); };
+        Array.prototype.push = () => { bump(); throw new Error('hostile-arr-push'); };
+
+        const pReq = svc.inspectReqSnapshot(incomingReq);
+        const pRes = svc.inspectResSnapshot(emptyRes);
+        const pMap = svc.inspectResSnapshot(mapRes);
+        const pUsed = svc.inspectResSnapshot(usedRes).then(
+          () => false,
+          (e) => Boolean(e && e.message && e.message.includes('already used')),
+        );
+        Number.isInteger = origIsInt;
+        Object.create = origObjCreate;
+        Map.prototype.keys = origMapKeys;
+        Array.prototype.push = origArrPush;
+        [reqSnap, resSnap, mapSnap, usedRejected] = await Promise.all([pReq, pRes, pMap, pUsed]);
+      } finally {
+        Number.isInteger = origIsInt;
+        Object.create = origObjCreate;
+        Map.prototype.keys = origMapKeys;
+        Array.prototype.push = origArrPush;
       }
 
+      // Normal Headers mutation on Request and Response must still propagate.
+      const mutReq = new Request('https://r4.test/mut', { headers: { 'x-lazy-in': 'orig' } });
+      mutReq.headers.set('x-updated', 'v2');
+      const mutReqSnap = await svc.inspectReqSnapshot(mutReq);
+      const mutRes = new Response(null, { status: 204, headers: { 'x-empty': 'base' } });
+      mutRes.headers.append('x-added', 'ok');
+      const mutResSnap = await svc.inspectResSnapshot(mutRes);
+
       out.r4ZeroCallbackOk =
+        nestedNotAliased === true &&
         callbackCount === 0 &&
         reqSnap.isReq === true &&
         reqSnap.method === 'GET' &&
@@ -2331,21 +2401,81 @@ export default {
         resSnap.status === 204 &&
         resSnap.hasBody === false &&
         resSnap.hdr === 'yes' &&
-        usedRejected === true;
+        mapSnap.isRes === true &&
+        mapSnap.mapHdr0 === 'v0' &&
+        mapSnap.mapHdr19 === 'v19' &&
+        usedRejected === true &&
+        mutReqSnap.hdr === 'orig' &&
+        mutReqSnap.updatedHdr === 'v2' &&
+        mutResSnap.hdr === 'base' &&
+        mutResSnap.addedHdr === 'ok';
 
-      // R5 part B: >32 simultaneous timeoutMs expirations share the bounded
-      // control budget without starving ordinary RPC.
+      // T4: Bidirectional scalar string (embedded NUL) & record (empty + NUL key) fidelity.
+      const sentPayload = {
+        str: String.fromCharCode(65, 0, 66),
+        nul: '\u0000',
+        rec: { '': 7, name: 'demo', ['a\u0000b']: 99 },
+      };
+      const fid = await svc.echoFidelity(sentPayload);
+      const checkFid = (obj) => {
+        if (!obj || typeof obj.str !== 'string' || typeof obj.nul !== 'string' || !obj.rec) {
+          return false;
+        }
+        const keys = Object.keys(obj.rec);
+        return (
+          obj.str.length === 3 &&
+          obj.str.charCodeAt(0) === 65 &&
+          obj.str.charCodeAt(1) === 0 &&
+          obj.str.charCodeAt(2) === 66 &&
+          obj.nul.length === 1 &&
+          obj.nul.charCodeAt(0) === 0 &&
+          keys.length === 3 &&
+          keys[0] === '' &&
+          obj.rec[''] === 7 &&
+          keys[1] === 'name' &&
+          obj.rec.name === 'demo' &&
+          keys[2] === 'a\u0000b' &&
+          keys[2].length === 3 &&
+          obj.rec['a\u0000b'] === 99
+        );
+      };
+      out.t4FidelityOk = checkFid(fid.echoed) && checkFid(fid.fromBinding);
+
+      // R5/T2: Queue 40 calls with timeoutMs: 25, then synchronously spin past
+      // their deadline BEFORE yielding so all 40 stay kQueued when Turn 1 runs:
+      // 32 expire in control stage (exhausting control budget) and the remaining
+      // 8 hit pump_binding_calls() where dequeue-time expiry MUST reject them
+      // with ZERO provider entries and strictly 1 settlement per caller while
+      // the valid ping behind them succeeds.
+      const settleCounts = new Array(40).fill(0);
       const expCalls = [];
       for (let i = 0; i < 40; ++i) {
-        expCalls.push(svc.slowNever(null, { timeoutMs: 25 }).catch((e) => e.name));
+        expCalls.push(
+          svc.countedSlow(i, { timeoutMs: 25 }).then(
+            () => {
+              settleCounts[i]++;
+              return 'resolved';
+            },
+            (e) => {
+              settleCounts[i]++;
+              return e && e.name ? e.name : String(e);
+            },
+          ),
+        );
       }
-      await new Promise((r) => setTimeout(r, 45));
-      const alive = await svc.ping('after-timeout-burst');
-      const expNames = await Promise.all(expCalls);
+      const spinEnd = Date.now() + 45;
+      while (Date.now() < spinEnd) {
+        // Keep all 40 calls queued past their 25 ms deadline before Turn 1.
+      }
+      const validPing = svc.ping('after-timeout-burst');
+      const [alive, expNames] = await Promise.all([validPing, Promise.all(expCalls)]);
+      const providerHits = await svc.getCountedHits();
       out.r5TimeoutBurstOk =
         alive === 'pong:after-timeout-burst' &&
+        providerHits === 0 &&
         expNames.length === 40 &&
-        expNames.every((n) => n === 'TimeoutError');
+        expNames.every((n) => n === 'TimeoutError') &&
+        settleCounts.every((c) => c === 1);
 
       return new Response(JSON.stringify(out));
     }
@@ -2407,8 +2537,12 @@ export default {
                        app_src.size(), "file:///r2-r4-r5.js"),
                    "load r2/r4/r5 bundle");
 
-    auto wait_until = [&](auto predicate) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    auto wait_until = [&](const char* stage, auto predicate) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto deadline = started + std::chrono::seconds(15);
+        int events_seen = 0;
+        int last_ev_type = -1;
+        std::uint64_t last_req_id = 0;
         while (std::chrono::steady_clock::now() < deadline) {
             const capsid_result flush = capsid_worker_flush(worker);
             require(flush == CAPSID_OK || flush == CAPSID_WOULD_BLOCK, "flush");
@@ -2416,12 +2550,17 @@ export default {
             ev.struct_size = sizeof(ev);
             const capsid_result r = capsid_worker_next_event(worker, &ev);
             if (r == CAPSID_OK) {
+                ++events_seen;
+                last_ev_type = static_cast<int>(ev.type);
+                last_req_id = ev.request_id;
                 if (ev.type == CAPSID_EVENT_ERROR) {
                     const std::string emsg(reinterpret_cast<const char*>(ev.payload.data),
                                            ev.payload.size);
-                    require(false, "unexpected worker error in r2/r4/r5 test: " + emsg);
+                    require(false, std::string("unexpected worker error in stage=") + stage +
+                                       " req=" + std::to_string(ev.request_id) + ": " + emsg);
                 }
-                require(ev.type != CAPSID_EVENT_EXIT, "unexpected worker exit in r2/r4/r5 test");
+                require(ev.type != CAPSID_EVENT_EXIT,
+                        std::string("unexpected worker exit in stage=") + stage);
                 if (predicate(ev))
                     return;
                 continue;
@@ -2432,12 +2571,18 @@ export default {
             pfd.events = POLLIN | (flush == CAPSID_WOULD_BLOCK ? POLLOUT : 0);
             require(capsid::win32::capsid_poll(&pfd, 1, 20) >= 0, "poll");
         }
-        require(false, "r2/r4/r5 test timed out");
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - started)
+                                    .count();
+        require(false, std::string("r2/r4/r5 test timed out in stage=") + stage + " elapsed_ms=" +
+                           std::to_string(elapsed_ms) + " events=" + std::to_string(events_seen) +
+                           " last_type=" + std::to_string(last_ev_type) +
+                           " last_req=" + std::to_string(last_req_id));
     };
 
-    wait_until([](const capsid_event& ev) { return ev.type == CAPSID_EVENT_READY; });
+    wait_until("ready", [](const capsid_event& ev) { return ev.type == CAPSID_EVENT_READY; });
 
-    // Request 1: R2 + R4 + R5 timeout burst (with lazy incoming header x-lazy-in).
+    // Request 1: R2 + R4/T3 + T4 + R5/T2 timeout burst (with lazy incoming header x-lazy-in).
     const capsid_header hdrs[1] = {{
         {reinterpret_cast<const std::uint8_t*>("x-lazy-in"), 9},
         {reinterpret_cast<const std::uint8_t*>("lazy-ok"), 7},
@@ -2446,15 +2591,15 @@ export default {
         capsid_worker_begin_bodyless_request(worker, 1, "GET", "https://v2.test/r2-r4", hdrs, 1),
         "begin r2-r4");
     std::string body1;
-    wait_until([&](const capsid_event& ev) {
+    wait_until("req1:r2-r4-t2-t3-t4", [&](const capsid_event& ev) {
         if (ev.request_id == 1 && ev.type == CAPSID_EVENT_RESPONSE_BODY) {
             body1.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
         }
         return ev.request_id == 1 && ev.type == CAPSID_EVENT_RESPONSE_END;
     });
-    require(body1 ==
-                "{\"r2HeaderQuotaOk\":true,\"r4ZeroCallbackOk\":true,\"r5TimeoutBurstOk\":true}",
-            "R2/R4/R5 regressions failed: " + body1);
+    require(body1 == "{\"r2HeaderQuotaOk\":true,\"r4ZeroCallbackOk\":true,\"t4FidelityOk\":true,"
+                     "\"r5TimeoutBurstOk\":true}",
+            "R2/R4/T2/T3/T4/R5 regressions failed: " + body1);
 
     // Concurrent Requests 2 & 3: R5 48-handle burst multi-turn fairness proof.
     require_result(
@@ -2465,7 +2610,7 @@ export default {
         "begin r5-b");
     std::string bodyA, bodyB;
     bool endA = false, endB = false;
-    wait_until([&](const capsid_event& ev) {
+    wait_until("req2+3:r5-48-handles", [&](const capsid_event& ev) {
         if (ev.request_id == 2 && ev.type == CAPSID_EVENT_RESPONSE_BODY) {
             bodyA.append(reinterpret_cast<const char*>(ev.payload.data), ev.payload.size);
         } else if (ev.request_id == 2 && ev.type == CAPSID_EVENT_RESPONSE_END) {

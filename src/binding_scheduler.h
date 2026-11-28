@@ -30,6 +30,14 @@ namespace capsid {
 // inheritance and expiry deterministically with a controllable clock.
 constexpr std::uint64_t kBindingDisposalBudgetNs = UINT64_C(100000000);
 
+// T2/R5: Authoritative dispatch-boundary deadline check shared by
+// WorkerRuntime::pump_binding_calls() and controllable-clock unit tests.
+// A queued call whose effective deadline has already elapsed must never enter
+// its Binding provider method even if the turn's control budget was exhausted.
+inline bool is_binding_call_expired(std::uint64_t now_ns, std::uint64_t deadline_ns) {
+    return deadline_ns != 0 && now_ns >= deadline_ns;
+}
+
 struct BindingDisposalState {
     std::uint64_t deadline_ns = 0;
     bool interrupted = false;

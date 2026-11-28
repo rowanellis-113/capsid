@@ -202,11 +202,12 @@ bool learn_class_ids(JSContext* ctx, CloneContext* context) {
 
 bool clone_string(JSContext* ctx, JSValueConst value, std::size_t weight_overhead,
                   std::string* target, std::string* error, CloneContext* context) {
-    const char* text = JS_ToCString(ctx, value);
+    size_t size = 0;
+    const char* text = JS_ToCStringLen(ctx, &size, value);
     if (text == NULL) {
+        clear_pending_exception(ctx);
         return fail_closed(error, "unprintable string");
     }
-    const std::size_t size = std::strlen(text);
     if (size > kMaxBindingCloneBytes - context->bytes) {
         JS_FreeCString(ctx, text);
         return fail_closed(error, "clone byte limit exceeded");
@@ -401,7 +402,6 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
             return false;
         }
         ++context->depth;
-        out->array.reserve((std::min)(static_cast<std::size_t>(length), kMaxBindingCloneNodes));
         for (uint32_t index = 0; index < length; ++index) {
             JSAtom atom = JS_NewAtomUInt32(ctx, index);
             JSPropertyDescriptor descriptor;
@@ -456,28 +456,32 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
     }
     ++context->depth;
     for (uint32_t index = 0; index < count; ++index) {
-        const char* key = JS_AtomToCString(ctx, tab[index].atom);
+        size_t key_len = 0;
+        const char* key = JS_AtomToCStringLen(ctx, &key_len, tab[index].atom);
         if (key == NULL) {
-            continue;
+            clear_pending_exception(ctx);
+            JS_FreePropertyEnum(ctx, tab, count);
+            --context->depth;
+            context->ancestors.erase(identity);
+            return fail_closed(error, "object property key is unreadable");
         }
-        const std::string key_string(key);
-        JS_FreeCString(ctx, key);
-        if (key_string.empty()) {
-            continue;
-        }
-        if (key_string.size() > kMaxBindingCloneBytes - context->bytes) {
+        if (key_len > kMaxBindingCloneBytes - context->bytes) {
+            JS_FreeCString(ctx, key);
             JS_FreePropertyEnum(ctx, tab, count);
             --context->depth;
             context->ancestors.erase(identity);
             return fail_closed(error, "clone byte limit exceeded");
         }
-        if (!charge_clone_bytes(context, key_string.size(), error)) {
+        if (!charge_clone_bytes(context, key_len, error)) {
+            JS_FreeCString(ctx, key);
             JS_FreePropertyEnum(ctx, tab, count);
             --context->depth;
             context->ancestors.erase(identity);
             return false;
         }
-        context->bytes += key_string.size();
+        std::string key_string(key, key_len);
+        JS_FreeCString(ctx, key);
+        context->bytes += key_len;
         JSPropertyDescriptor descriptor;
         if (JS_GetOwnProperty(ctx, &descriptor, value, tab[index].atom) < 0) {
             JS_FreePropertyEnum(ctx, tab, count);
@@ -508,7 +512,7 @@ bool clone_value(JSContext* ctx, JSValueConst value, NeutralValue* out, std::str
             context->ancestors.erase(identity);
             return false;
         }
-        out->object.push_back(std::make_pair(key_string, std::move(child)));
+        out->object.push_back(std::make_pair(std::move(key_string), std::move(child)));
     }
     JS_FreePropertyEnum(ctx, tab, count);
     --context->depth;
@@ -1332,13 +1336,15 @@ bool parse_binding_call_options(JSContext* ctx, JSValueConst value,
     }
     BindingCallOptions parsed;
     for (uint32_t index = 0; index < count; ++index) {
-        const char* key = JS_AtomToCString(ctx, tab[index].atom);
+        size_t key_len = 0;
+        const char* key = JS_AtomToCStringLen(ctx, &key_len, tab[index].atom);
         if (key == NULL) {
+            clear_pending_exception(ctx);
             free_binding_call_options(ctx, &parsed);
             JS_FreePropertyEnum(ctx, tab, count);
             return fail_closed(error, "binding call option key is unreadable");
         }
-        const std::string key_str(key);
+        const std::string key_str(key, key_len);
         JS_FreeCString(ctx, key);
 
         JSPropertyDescriptor desc;
@@ -1476,7 +1482,15 @@ JSValue neutral_to_js_ex(JSContext* ctx, const NeutralValue& value,
                 JS_FreeValue(ctx, object);
                 return child;
             }
-            if (JS_SetPropertyStr(ctx, object, entry.first.c_str(), child) < 0) {
+            JSAtom key_atom = JS_NewAtomLen(ctx, entry.first.data(), entry.first.size());
+            if (key_atom == JS_ATOM_NULL) {
+                JS_FreeValue(ctx, child);
+                JS_FreeValue(ctx, object);
+                return JS_EXCEPTION;
+            }
+            const int def_rc = JS_DefinePropertyValue(ctx, object, key_atom, child, JS_PROP_C_W_E);
+            JS_FreeAtom(ctx, key_atom);
+            if (def_rc < 0) {
                 JS_FreeValue(ctx, object);
                 return JS_EXCEPTION;
             }
@@ -1616,6 +1630,500 @@ std::size_t estimate_neutral_value_bytes(const NeutralValue& value) {
     }
     }
     return 1;
+}
+
+bool valid_binding_method_name(const char* name, std::size_t len) {
+    static const char* const reserved[] = {"constructor", "prototype", "__proto__",
+                                           "then",        "catch",     "finally"};
+    if (name == NULL || len == 0 || len > 64) {
+        return false;
+    }
+    for (std::size_t index = 0; index < sizeof(reserved) / sizeof(reserved[0]); ++index) {
+        const std::size_t rlen = std::strlen(reserved[index]);
+        if (len == rlen && std::memcmp(name, reserved[index], rlen) == 0) {
+            return false;
+        }
+    }
+    const auto ascii_alpha = [](unsigned char ch) {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+    };
+    const unsigned char first = static_cast<unsigned char>(name[0]);
+    if (!(ascii_alpha(first) || first == '_' || first == '$')) {
+        return false;
+    }
+    for (std::size_t index = 1; index < len; ++index) {
+        const unsigned char ch = static_cast<unsigned char>(name[index]);
+        if (!(ascii_alpha(ch) || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_binding_method_name(const std::string& name) {
+    return valid_binding_method_name(name.data(), name.size());
+}
+
+namespace {
+
+struct BorrowedJsString {
+    JSContext* ctx = NULL;
+    JSValue val = JS_UNDEFINED;
+    const char* ptr = NULL;
+    std::size_t len = 0;
+    bool present = false;
+
+    explicit BorrowedJsString(JSContext* c) : ctx(c) {}
+    ~BorrowedJsString() { reset(); }
+
+    BorrowedJsString(const BorrowedJsString&) = delete;
+    BorrowedJsString& operator=(const BorrowedJsString&) = delete;
+
+    void reset() {
+        if (ctx != NULL) {
+            if (ptr != NULL) {
+                JS_FreeCString(ctx, ptr);
+                ptr = NULL;
+            }
+            if (!JS_IsUndefined(val)) {
+                JS_FreeValue(ctx, val);
+                val = JS_UNDEFINED;
+            }
+        }
+        len = 0;
+        present = false;
+    }
+
+    bool borrow_prop(JSValueConst obj, const char* name) {
+        reset();
+        JSValue prop = JS_GetPropertyStr(ctx, obj, name);
+        if (JS_IsException(prop)) {
+            clear_pending_exception(ctx);
+            return false;
+        }
+        if (!JS_IsString(prop)) {
+            JS_FreeValue(ctx, prop);
+            return false;
+        }
+        size_t slen = 0;
+        const char* s = JS_ToCStringLen(ctx, &slen, prop);
+        if (s == NULL) {
+            clear_pending_exception(ctx);
+            JS_FreeValue(ctx, prop);
+            return false;
+        }
+        val = prop;
+        ptr = s;
+        len = slen;
+        present = true;
+        return true;
+    }
+
+    void copy_to(std::string* out, std::size_t* copy_count) const {
+        if (present && out != NULL) {
+            out->assign(ptr, len);
+            if (copy_count != NULL) {
+                ++(*copy_count);
+            }
+        }
+    }
+};
+
+} // namespace
+
+bool extract_neutral_http_request_meta(JSContext* ctx, JSValueConst info, NeutralHttpRequest* out,
+                                       BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                       std::string* error, std::size_t* out_copies) {
+    if (out_copies != NULL) {
+        *out_copies = 0;
+    }
+    if (ctx == NULL || out == NULL || !JS_IsObject(info)) {
+        return fail_closed(error, "invalid Request metadata object");
+    }
+    BorrowedJsString url(ctx);
+    BorrowedJsString method(ctx);
+    BorrowedJsString credentials(ctx);
+    BorrowedJsString redirect(ctx);
+    BorrowedJsString mode(ctx);
+    url.borrow_prop(info, "url");
+    method.borrow_prop(info, "method");
+    credentials.borrow_prop(info, "credentials");
+    redirect.borrow_prop(info, "redirect");
+    mode.borrow_prop(info, "mode");
+
+    std::size_t meta_bytes = 64;
+    meta_bytes = saturating_add(meta_bytes, url.len);
+    meta_bytes = saturating_add(meta_bytes, method.len);
+    meta_bytes = saturating_add(meta_bytes, credentials.len);
+    meta_bytes = saturating_add(meta_bytes, redirect.len);
+    if (mode.present) {
+        meta_bytes = saturating_add(meta_bytes, mode.len);
+    }
+    if (reserve_bytes != NULL && !reserve_bytes(meta_bytes, error, reserve_opaque)) {
+        return false;
+    }
+    url.copy_to(&out->url, out_copies);
+    method.copy_to(&out->method, out_copies);
+    credentials.copy_to(&out->credentials, out_copies);
+    redirect.copy_to(&out->redirect, out_copies);
+    if (mode.present) {
+        out->has_mode = true;
+        mode.copy_to(&out->mode, out_copies);
+    }
+    return true;
+}
+
+bool extract_neutral_http_response_meta(JSContext* ctx, JSValueConst info, NeutralHttpResponse* out,
+                                        BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                        std::string* error, std::size_t* out_copies) {
+    if (out_copies != NULL) {
+        *out_copies = 0;
+    }
+    if (ctx == NULL || out == NULL || !JS_IsObject(info)) {
+        return fail_closed(error, "invalid Response metadata object");
+    }
+    JSValue st_val = JS_GetPropertyStr(ctx, info, "status");
+    int32_t st_i32 = 200;
+    if (JS_IsException(st_val)) {
+        clear_pending_exception(ctx);
+    } else {
+        if (JS_ToInt32(ctx, &st_i32, st_val) != 0) {
+            clear_pending_exception(ctx);
+            st_i32 = 200;
+        }
+        JS_FreeValue(ctx, st_val);
+    }
+    JSValue redir_val = JS_GetPropertyStr(ctx, info, "redirected");
+    bool redirected = false;
+    if (JS_IsException(redir_val)) {
+        clear_pending_exception(ctx);
+    } else {
+        redirected = JS_ToBool(ctx, redir_val) != 0;
+        JS_FreeValue(ctx, redir_val);
+    }
+
+    BorrowedJsString status_text(ctx);
+    BorrowedJsString url(ctx);
+    BorrowedJsString type(ctx);
+    status_text.borrow_prop(info, "statusText");
+    url.borrow_prop(info, "url");
+    type.borrow_prop(info, "type");
+
+    std::size_t meta_bytes = 64;
+    meta_bytes = saturating_add(meta_bytes, status_text.len);
+    meta_bytes = saturating_add(meta_bytes, url.len);
+    meta_bytes = saturating_add(meta_bytes, type.len);
+    if (reserve_bytes != NULL && !reserve_bytes(meta_bytes, error, reserve_opaque)) {
+        return false;
+    }
+    out->status = static_cast<std::uint16_t>(st_i32);
+    out->redirected = redirected;
+    status_text.copy_to(&out->status_text, out_copies);
+    url.copy_to(&out->url, out_copies);
+    type.copy_to(&out->type, out_copies);
+    return true;
+}
+
+bool extract_neutral_header_pairs(JSContext* ctx, JSValueConst arr,
+                                  std::vector<std::pair<std::string, std::string>>* out,
+                                  BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                  std::string* error, std::size_t* out_copies) {
+    if (out_copies != NULL) {
+        *out_copies = 0;
+    }
+    if (ctx == NULL || out == NULL) {
+        return fail_closed(error, "invalid proxy headers destination");
+    }
+    out->clear();
+    if (JS_IsNull(arr) || JS_IsUndefined(arr)) {
+        return true;
+    }
+    if (!JS_IsArray(arr)) {
+        return fail_closed(error, "invalid proxy headers array");
+    }
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    uint32_t count = 0;
+    if (JS_IsException(len_val) || JS_ToUint32(ctx, &count, len_val) != 0) {
+        if (JS_IsException(len_val)) {
+            clear_pending_exception(ctx);
+        } else {
+            clear_pending_exception(ctx);
+            JS_FreeValue(ctx, len_val);
+        }
+        return fail_closed(error, "unreadable proxy headers length");
+    }
+    JS_FreeValue(ctx, len_val);
+    if (count > kMaxBindingProxyHeaders) {
+        return fail_closed(error, "proxy header count limit exceeded");
+    }
+    std::size_t total_bytes = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        JSValue entry = JS_GetPropertyUint32(ctx, arr, i);
+        if (!JS_IsArray(entry)) {
+            if (JS_IsException(entry)) {
+                clear_pending_exception(ctx);
+            } else {
+                JS_FreeValue(ctx, entry);
+            }
+            return fail_closed(error, "invalid proxy header pair");
+        }
+        JSValue k = JS_GetPropertyUint32(ctx, entry, 0);
+        JSValue v = JS_GetPropertyUint32(ctx, entry, 1);
+        JS_FreeValue(ctx, entry);
+        if (JS_IsException(k) || JS_IsException(v)) {
+            clear_pending_exception(ctx);
+            if (!JS_IsException(k)) {
+                JS_FreeValue(ctx, k);
+            }
+            if (!JS_IsException(v)) {
+                JS_FreeValue(ctx, v);
+            }
+            return fail_closed(error, "unreadable proxy header entry");
+        }
+        size_t klen = 0;
+        size_t vlen = 0;
+        const char* ks = JS_ToCStringLen(ctx, &klen, k);
+        const char* vs = JS_ToCStringLen(ctx, &vlen, v);
+        JS_FreeValue(ctx, k);
+        JS_FreeValue(ctx, v);
+        if (ks == NULL || vs == NULL) {
+            clear_pending_exception(ctx);
+            if (ks != NULL) {
+                JS_FreeCString(ctx, ks);
+            }
+            if (vs != NULL) {
+                JS_FreeCString(ctx, vs);
+            }
+            return fail_closed(error, "unreadable proxy header entry");
+        }
+        if (klen > kMaxBindingProxyHeaderBytes || vlen > kMaxBindingProxyHeaderBytes - klen ||
+            total_bytes > kMaxBindingProxyHeaderBytes - (klen + vlen)) {
+            JS_FreeCString(ctx, ks);
+            JS_FreeCString(ctx, vs);
+            return fail_closed(error, "proxy header byte limit exceeded");
+        }
+        const std::size_t entry_bytes = saturating_add(saturating_add(klen, vlen), 16);
+        if (reserve_bytes != NULL && !reserve_bytes(entry_bytes, error, reserve_opaque)) {
+            JS_FreeCString(ctx, ks);
+            JS_FreeCString(ctx, vs);
+            return false;
+        }
+        total_bytes += klen + vlen;
+        out->push_back(std::make_pair(std::string(ks, klen), std::string(vs, vlen)));
+        if (out_copies != NULL) {
+            *out_copies += 2;
+        }
+        JS_FreeCString(ctx, ks);
+        JS_FreeCString(ctx, vs);
+    }
+    return true;
+}
+
+bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueConst rpc_target_proto,
+                                JSValueConst object_proto, std::size_t max_methods,
+                                std::vector<std::string>* out_methods,
+                                std::map<std::string, JSValue>* out_method_fns,
+                                BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                std::string* error, std::size_t* out_copies) {
+    if (out_copies != NULL) {
+        *out_copies = 0;
+    }
+    if (ctx == NULL || out_methods == NULL || out_method_fns == NULL) {
+        return fail_closed(error, "invalid RpcTarget inspection arguments");
+    }
+    out_methods->clear();
+    for (std::map<std::string, JSValue>::iterator mit = out_method_fns->begin();
+         mit != out_method_fns->end(); ++mit) {
+        JS_FreeValue(ctx, mit->second);
+    }
+    out_method_fns->clear();
+
+    constexpr std::size_t kMaxStackMethods = 128;
+    const std::size_t method_limit =
+        (max_methods > 0 && max_methods < kMaxStackMethods) ? max_methods : kMaxStackMethods;
+    struct PendingMethod {
+        JSAtom atom = JS_ATOM_NULL;
+        std::size_t name_len = 0;
+        JSValue fn = JS_UNDEFINED;
+    };
+    PendingMethod pending[kMaxStackMethods];
+    std::size_t pending_count = 0;
+    auto cleanup_pending = [&]() {
+        for (std::size_t i = 0; i < pending_count; ++i) {
+            if (pending[i].atom != JS_ATOM_NULL) {
+                JS_FreeAtom(ctx, pending[i].atom);
+                pending[i].atom = JS_ATOM_NULL;
+            }
+            if (!JS_IsUndefined(pending[i].fn)) {
+                JS_FreeValue(ctx, pending[i].fn);
+                pending[i].fn = JS_UNDEFINED;
+            }
+        }
+        pending_count = 0;
+    };
+
+    std::unordered_set<JSAtom> seen;
+    JSValue cur = JS_DupValue(ctx, target);
+    for (int depth = 0; depth < 16 && JS_IsObject(cur); ++depth) {
+        if (JS_IsProxy(cur)) {
+            JS_FreeValue(ctx, cur);
+            cleanup_pending();
+            return fail_closed(error, "RpcTarget prototype chain contains a Proxy");
+        }
+        if ((JS_IsObject(rpc_target_proto) &&
+             JS_VALUE_GET_PTR(cur) == JS_VALUE_GET_PTR(rpc_target_proto)) ||
+            (JS_IsObject(object_proto) &&
+             JS_VALUE_GET_PTR(cur) == JS_VALUE_GET_PTR(object_proto))) {
+            break;
+        }
+        JSPropertyEnum* tab = NULL;
+        uint32_t count = 0;
+        if (JS_GetOwnPropertyNames(ctx, &tab, &count, cur, JS_GPN_STRING_MASK | JS_GPN_SET_ENUM) <
+            0) {
+            clear_pending_exception(ctx);
+            JS_FreeValue(ctx, cur);
+            cleanup_pending();
+            return fail_closed(error, "RpcTarget method enumeration failed");
+        }
+        for (uint32_t i = 0; i < count; ++i) {
+            size_t name_len = 0;
+            const char* raw_name = JS_AtomToCStringLen(ctx, &name_len, tab[i].atom);
+            if (raw_name == NULL) {
+                clear_pending_exception(ctx);
+                JS_FreePropertyEnum(ctx, tab, count);
+                JS_FreeValue(ctx, cur);
+                cleanup_pending();
+                return fail_closed(error, "RpcTarget property name is unreadable");
+            }
+
+            JSPropertyDescriptor desc;
+            const int present = JS_GetOwnProperty(ctx, &desc, cur, tab[i].atom);
+            if (present <= 0) {
+                if (present < 0) {
+                    clear_pending_exception(ctx);
+                }
+                JS_FreeCString(ctx, raw_name);
+                JS_FreePropertyEnum(ctx, tab, count);
+                JS_FreeValue(ctx, cur);
+                cleanup_pending();
+                return fail_closed(error, "RpcTarget property descriptor is unreadable");
+            }
+            const bool is_accessor = !JS_IsUndefined(desc.getter) || !JS_IsUndefined(desc.setter);
+            const bool is_func = JS_IsFunction(ctx, desc.value);
+            JS_FreeValue(ctx, desc.getter);
+            JS_FreeValue(ctx, desc.setter);
+
+            const bool is_constructor =
+                (name_len == 11 && std::memcmp(raw_name, "constructor", 11) == 0);
+            if (is_constructor) {
+                JS_FreeValue(ctx, desc.value);
+                JS_FreeCString(ctx, raw_name);
+                continue;
+            }
+            if (is_accessor) {
+                if (error != NULL) {
+                    *error = "RpcTarget cannot expose accessor property: " +
+                             std::string(raw_name, name_len);
+                }
+                JS_FreeValue(ctx, desc.value);
+                JS_FreeCString(ctx, raw_name);
+                JS_FreePropertyEnum(ctx, tab, count);
+                JS_FreeValue(ctx, cur);
+                cleanup_pending();
+                return false;
+            }
+            if (!seen.insert(tab[i].atom).second) {
+                JS_FreeValue(ctx, desc.value);
+                JS_FreeCString(ctx, raw_name);
+                continue;
+            }
+            const bool is_dispose = (name_len == 7 && std::memcmp(raw_name, "dispose", 7) == 0);
+            if (!is_func || is_dispose) {
+                JS_FreeValue(ctx, desc.value);
+                JS_FreeCString(ctx, raw_name);
+                continue;
+            }
+            if (!valid_binding_method_name(raw_name, name_len)) {
+                if (error != NULL) {
+                    *error =
+                        "RpcTarget exposes invalid method name: " + std::string(raw_name, name_len);
+                }
+                JS_FreeValue(ctx, desc.value);
+                JS_FreeCString(ctx, raw_name);
+                JS_FreePropertyEnum(ctx, tab, count);
+                JS_FreeValue(ctx, cur);
+                cleanup_pending();
+                return false;
+            }
+            JS_FreeCString(ctx, raw_name);
+            if (pending_count >= method_limit) {
+                JS_FreeValue(ctx, desc.value);
+                JS_FreePropertyEnum(ctx, tab, count);
+                JS_FreeValue(ctx, cur);
+                cleanup_pending();
+                return fail_closed(error, "RpcTarget exceeds 128 method limit");
+            }
+            // T1/F7: Retain only the QuickJS atom and validated callable on the
+            // stack during pass 1 — zero native string/map copies until quota
+            // reservation succeeds below.
+            pending[pending_count].atom = JS_DupAtom(ctx, tab[i].atom);
+            pending[pending_count].name_len = name_len;
+            pending[pending_count].fn = desc.value;
+            ++pending_count;
+        }
+        JS_FreePropertyEnum(ctx, tab, count);
+        JSValue next = JS_GetPrototype(ctx, cur);
+        JS_FreeValue(ctx, cur);
+        if (JS_IsException(next)) {
+            clear_pending_exception(ctx);
+            cleanup_pending();
+            return fail_closed(error, "RpcTarget prototype walk failed");
+        }
+        cur = next;
+    }
+    JS_FreeValue(ctx, cur);
+    if (pending_count == 0) {
+        cleanup_pending();
+        return fail_closed(error, "RpcTarget must expose at least 1 method");
+    }
+
+    std::size_t handle_bytes = 32;
+    for (std::size_t i = 0; i < pending_count; ++i) {
+        handle_bytes = saturating_add(handle_bytes, pending[i].name_len);
+        handle_bytes = saturating_add(handle_bytes, 16);
+    }
+    if (reserve_bytes != NULL && !reserve_bytes(handle_bytes, error, reserve_opaque)) {
+        cleanup_pending();
+        return false;
+    }
+
+    for (std::size_t i = 0; i < pending_count; ++i) {
+        size_t slen = 0;
+        const char* s = JS_AtomToCStringLen(ctx, &slen, pending[i].atom);
+        if (s == NULL) {
+            clear_pending_exception(ctx);
+            cleanup_pending();
+            for (std::map<std::string, JSValue>::iterator mit = out_method_fns->begin();
+                 mit != out_method_fns->end(); ++mit) {
+                JS_FreeValue(ctx, mit->second);
+            }
+            out_method_fns->clear();
+            out_methods->clear();
+            return fail_closed(error, "RpcTarget method name copy failed");
+        }
+        std::string method_name(s, slen);
+        JS_FreeCString(ctx, s);
+        JS_FreeAtom(ctx, pending[i].atom);
+        pending[i].atom = JS_ATOM_NULL;
+        out_methods->push_back(method_name);
+        out_method_fns->emplace(std::move(method_name), pending[i].fn);
+        pending[i].fn = JS_UNDEFINED;
+        if (out_copies != NULL) {
+            ++(*out_copies);
+        }
+    }
+    pending_count = 0;
+    return true;
 }
 
 JSValue binding_call_id_to_js(JSContext* ctx, std::uint64_t call_id) {

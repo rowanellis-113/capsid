@@ -1201,7 +1201,8 @@ pid_t spawn_http_responder(int listener, const std::string& response) {
             _exit(2);
         }
         char request[4096];
-        (void)read(client, request, sizeof(request));
+        const ssize_t ignored_read = read(client, request, sizeof(request));
+        (void)ignored_read;
         size_t offset = 0;
         while (offset < response.size()) {
             const ssize_t written =
@@ -1403,7 +1404,8 @@ pid_t spawn_websocket_responder(int listener) {
         }
         // The client closes from its onopen callback. Waiting for one frame
         // keeps the handshake alive long enough to prove that callback ran.
-        (void)read(client, chunk, sizeof(chunk));
+        const ssize_t ignored_frame = read(client, chunk, sizeof(chunk));
+        (void)ignored_frame;
         close(client);
         close(listener);
         _exit(0);

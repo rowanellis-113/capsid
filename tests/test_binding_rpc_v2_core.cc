@@ -488,6 +488,156 @@ void test_scheduler_shared_control_budget_multiturn_fairness() {
     require(uv_loop_close(&loop) == 0, "uv_loop_close clean after fairness test");
 }
 
+struct DispatchExpiryCall {
+    std::uint64_t id = 0;
+    std::uint64_t deadline_ns = 0;
+    bool has_custom_timeout = false;
+    bool expect_expired = false;
+    bool queued = true;
+    int provider_entries = 0;
+    int settlements = 0;
+    bool settled_timeout = false;
+    bool settled_ok = false;
+};
+
+struct DispatchExpiryHarness {
+    capsid::BindingScheduler* sched = nullptr;
+    capsid::BindingRpcLedger* ledger = nullptr;
+    std::uint64_t now_ns = 0;
+    std::vector<DispatchExpiryCall> calls;
+    std::size_t expired_in_control = 0;
+    std::size_t expired_at_dispatch = 0;
+    std::size_t dispatched_valid = 0;
+};
+
+bool dispatch_expiry_control_stage(std::size_t* budget, void* opaque) {
+    DispatchExpiryHarness* h = static_cast<DispatchExpiryHarness*>(opaque);
+    bool more = false;
+    for (std::size_t i = 0; i < h->calls.size(); ++i) {
+        DispatchExpiryCall& c = h->calls[i];
+        if (!c.queued || !c.has_custom_timeout ||
+            !capsid::is_binding_call_expired(h->now_ns, c.deadline_ns)) {
+            continue;
+        }
+        if (*budget == 0) {
+            more = true;
+            break;
+        }
+        --(*budget);
+        h->sched->cancel_call(0, c.id);
+        c.queued = false;
+        ++c.settlements;
+        c.settled_timeout = true;
+        h->ledger->release_frame(1, "svc", 64);
+        h->ledger->release_call(1, "svc");
+        ++h->expired_in_control;
+    }
+    return more;
+}
+
+void dispatch_expiry_turn_callback(void* opaque) {
+    DispatchExpiryHarness* h = static_cast<DispatchExpiryHarness*>(opaque);
+    static const capsid::BindingScheduler::ControlStageCallback kStages[1] = {
+        dispatch_expiry_control_stage,
+    };
+    h->sched->run_control_stages(kStages, 1, h);
+
+    // Mirror WorkerRuntime::pump_binding_calls(): check effective deadline at
+    // dequeue before ever invoking the provider method.
+    const std::size_t budget = h->sched->config().max_dispatches_per_turn;
+    for (std::size_t i = 0; i < budget; ++i) {
+        std::uint64_t call_id = 0;
+        if (!h->sched->pop_next_call(&call_id)) {
+            break;
+        }
+        DispatchExpiryCall& c = h->calls[static_cast<std::size_t>(call_id - 1)];
+        if (!c.queued) {
+            continue;
+        }
+        c.queued = false;
+        if (capsid::is_binding_call_expired(h->now_ns, c.deadline_ns)) {
+            ++c.settlements;
+            c.settled_timeout = true;
+            h->ledger->release_frame(1, "svc", 64);
+            h->ledger->release_call(1, "svc");
+            ++h->expired_at_dispatch;
+            continue;
+        }
+        ++c.provider_entries;
+        ++c.settlements;
+        c.settled_ok = true;
+        h->ledger->release_frame(1, "svc", 64);
+        h->ledger->release_call(1, "svc");
+        ++h->dispatched_valid;
+    }
+}
+
+// T2/R5: Controllable-clock proof that when the 32-unit control budget runs
+// out with expired queued calls still left in BindingScheduler, dequeue-time
+// deadline checks prevent ANY expired call from entering the provider method,
+// settle every caller strictly once, and still advance valid queued calls.
+void test_scheduler_expired_queued_calls_never_enter_provider() {
+    uv_loop_t loop;
+    require(uv_loop_init(&loop) == 0, "uv_loop_init dispatch expiry");
+
+    capsid::BindingRpcLimits limits;
+    capsid::BindingRpcLedger ledger(limits);
+    capsid::BindingScheduler sched; // control budget = 32, dispatch budget = 16
+    sched.configure_bindings(1);
+
+    DispatchExpiryHarness h;
+    h.sched = &sched;
+    h.ledger = &ledger;
+    h.now_ns = 1000;
+    require(sched.attach(&loop, dispatch_expiry_turn_callback, &h),
+            "attach dispatch expiry scheduler");
+
+    // Queue 40 calls expiring at t = 1500 followed by 4 valid calls expiring at t = 5000.
+    for (std::uint64_t id = 1; id <= 44; ++id) {
+        capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
+        require(ledger.reserve_call(1, "svc", &qerr), "reserve call");
+        require(ledger.reserve_frame(1, "svc", 64, &qerr), "reserve frame");
+        DispatchExpiryCall c;
+        c.id = id;
+        c.expect_expired = (id <= 40);
+        c.has_custom_timeout = (id <= 40);
+        c.deadline_ns = (id <= 40) ? 1500 : 5000;
+        h.calls.push_back(c);
+        sched.enqueue_call(0, id);
+    }
+
+    // Advance controllable clock past t = 1500 (still before t = 5000).
+    h.now_ns = 2000;
+    sched.run_turn();
+
+    // Control stage expired 32 of 40 -> 8 expired + 4 valid remained in call queue.
+    // Dispatch stage popped those 8 expired calls (rejecting them at dequeue
+    // with ZERO provider entries) AND immediately dispatched all 4 valid calls!
+    require(h.expired_in_control == 32, "control budget must cap at 32 expired calls");
+    require(h.expired_at_dispatch == 8,
+            "remaining 8 expired queued calls must be caught at dequeue boundary");
+    require(h.dispatched_valid == 4, "valid queued calls behind expired calls must still advance");
+    for (std::size_t i = 0; i < h.calls.size(); ++i) {
+        const DispatchExpiryCall& c = h.calls[i];
+        require(c.settlements == 1, "every caller must settle strictly once");
+        if (c.expect_expired) {
+            require(c.provider_entries == 0, "expired queued call must NEVER enter provider");
+            require(c.settled_timeout && !c.settled_ok, "expired call must settle as TimeoutError");
+        } else {
+            require(c.provider_entries == 1 && c.settled_ok && !c.settled_timeout,
+                    "valid call must enter provider once and succeed");
+        }
+    }
+    require(sched.pending_calls() == 0 && ledger.empty(),
+            "all calls drained and 3-tier ledger returned cleanly to zero");
+
+    sched.detach();
+    for (int i = 0; i < 5; ++i) {
+        uv_run(&loop, UV_RUN_NOWAIT);
+    }
+    require(uv_loop_close(&loop) == 0, "uv_loop_close clean after dispatch expiry test");
+}
+
 } // namespace
 
 int main() {
@@ -498,6 +648,7 @@ int main() {
     test_scheduler_immediate_libuv_wake_and_turn_budget();
     test_disposal_deadline_state_controllable_clock();
     test_scheduler_shared_control_budget_multiturn_fairness();
-    std::cout << "test-binding-rpc-v2-core: PASS (7 suites)" << std::endl;
+    test_scheduler_expired_queued_calls_never_enter_provider();
+    std::cout << "test-binding-rpc-v2-core: PASS (8 suites)" << std::endl;
     return 0;
 }

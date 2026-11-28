@@ -7285,33 +7285,6 @@ class WorkerRuntime {
         return true;
     }
 
-    static bool valid_binding_method_name(const std::string& name) {
-        static const char* const reserved[] = {"constructor", "prototype", "__proto__",
-                                               "then",        "catch",     "finally"};
-        if (name.empty() || name.size() > 64) {
-            return false;
-        }
-        for (size_t index = 0; index < sizeof(reserved) / sizeof(reserved[0]); ++index) {
-            if (name == reserved[index]) {
-                return false;
-            }
-        }
-        const auto ascii_alpha = [](unsigned char ch) {
-            return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
-        };
-        const unsigned char first = static_cast<unsigned char>(name[0]);
-        if (!(ascii_alpha(first) || first == '_' || first == '$')) {
-            return false;
-        }
-        for (size_t index = 1; index < name.size(); ++index) {
-            const unsigned char ch = static_cast<unsigned char>(name[index]);
-            if (!(ascii_alpha(ch) || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$')) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     static std::string js_error_text(JSContext* ctx) {
         JSValue exception = JS_GetException(ctx);
         const char* text = JS_ToCString(ctx, exception);
@@ -7577,7 +7550,7 @@ class WorkerRuntime {
             if (!tab[index].is_enumerable) {
                 continue;
             }
-            if (!valid_binding_method_name(method_name)) {
+            if (!capsid::valid_binding_method_name(method_name)) {
                 JS_FreePropertyEnum(ctx, tab, count);
                 JS_FreeValue(ctx, result);
                 *error = "binding '" + descriptor.name +
@@ -8256,146 +8229,6 @@ class WorkerRuntime {
         pending_handle_disposal_set_.clear();
     }
 
-    static bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target,
-                                           JSValueConst rpc_target_proto, JSValueConst object_proto,
-                                           std::vector<std::string>* out_methods,
-                                           std::map<std::string, JSValue>* out_method_fns,
-                                           std::string* error) {
-        out_methods->clear();
-        auto cleanup = [&]() {
-            for (auto mit = out_method_fns->begin(); mit != out_method_fns->end(); ++mit) {
-                JS_FreeValue(ctx, mit->second);
-            }
-            out_method_fns->clear();
-            out_methods->clear();
-        };
-        std::unordered_set<std::string> seen;
-        JSValue cur = JS_DupValue(ctx, target);
-        for (int depth = 0; depth < 16 && JS_IsObject(cur); ++depth) {
-            if (JS_IsProxy(cur)) {
-                JS_FreeValue(ctx, cur);
-                cleanup();
-                if (error != NULL)
-                    *error = "RpcTarget prototype chain contains a Proxy";
-                return false;
-            }
-            if ((JS_IsObject(rpc_target_proto) &&
-                 JS_VALUE_GET_PTR(cur) == JS_VALUE_GET_PTR(rpc_target_proto)) ||
-                (JS_IsObject(object_proto) &&
-                 JS_VALUE_GET_PTR(cur) == JS_VALUE_GET_PTR(object_proto))) {
-                break;
-            }
-            JSPropertyEnum* tab = NULL;
-            uint32_t count = 0;
-            if (JS_GetOwnPropertyNames(ctx, &tab, &count, cur,
-                                       JS_GPN_STRING_MASK | JS_GPN_SET_ENUM) < 0) {
-                JSValue exc = JS_GetException(ctx);
-                JS_FreeValue(ctx, exc);
-                JS_FreeValue(ctx, cur);
-                cleanup();
-                if (error != NULL)
-                    *error = "RpcTarget method enumeration failed";
-                return false;
-            }
-            for (uint32_t i = 0; i < count; ++i) {
-                const char* raw_name = JS_AtomToCString(ctx, tab[i].atom);
-                if (raw_name == NULL) {
-                    JS_FreePropertyEnum(ctx, tab, count);
-                    JS_FreeValue(ctx, cur);
-                    cleanup();
-                    if (error != NULL)
-                        *error = "RpcTarget property name is unreadable";
-                    return false;
-                }
-                const std::string prop_name(raw_name);
-                JS_FreeCString(ctx, raw_name);
-
-                JSPropertyDescriptor desc;
-                const int present = JS_GetOwnProperty(ctx, &desc, cur, tab[i].atom);
-                if (present <= 0) {
-                    JS_FreePropertyEnum(ctx, tab, count);
-                    JS_FreeValue(ctx, cur);
-                    cleanup();
-                    if (error != NULL)
-                        *error = "RpcTarget property descriptor is unreadable";
-                    return false;
-                }
-                const bool is_accessor =
-                    !JS_IsUndefined(desc.getter) || !JS_IsUndefined(desc.setter);
-                const bool is_func = JS_IsFunction(ctx, desc.value);
-                JS_FreeValue(ctx, desc.getter);
-                JS_FreeValue(ctx, desc.setter);
-
-                if (prop_name == "constructor") {
-                    JS_FreeValue(ctx, desc.value);
-                    continue;
-                }
-                if (is_accessor) {
-                    JS_FreeValue(ctx, desc.value);
-                    JS_FreePropertyEnum(ctx, tab, count);
-                    JS_FreeValue(ctx, cur);
-                    cleanup();
-                    if (error != NULL) {
-                        *error = "RpcTarget cannot expose accessor property: " + prop_name;
-                    }
-                    return false;
-                }
-                if (!seen.insert(prop_name).second) {
-                    JS_FreeValue(ctx, desc.value);
-                    continue;
-                }
-                if (!is_func || prop_name == "dispose") {
-                    JS_FreeValue(ctx, desc.value);
-                    continue;
-                }
-                if (!valid_binding_method_name(prop_name)) {
-                    JS_FreeValue(ctx, desc.value);
-                    JS_FreePropertyEnum(ctx, tab, count);
-                    JS_FreeValue(ctx, cur);
-                    cleanup();
-                    if (error != NULL) {
-                        *error = "RpcTarget exposes invalid method name: " + prop_name;
-                    }
-                    return false;
-                }
-                if (out_methods->size() >= capsid::kBindingHandleMaxMethods) {
-                    JS_FreeValue(ctx, desc.value);
-                    JS_FreePropertyEnum(ctx, tab, count);
-                    JS_FreeValue(ctx, cur);
-                    cleanup();
-                    if (error != NULL)
-                        *error = "RpcTarget exceeds 128 method limit";
-                    return false;
-                }
-                // F7: Snapshot the validated callable reference at export time
-                // so post-export mutation or getter injection cannot bypass
-                // validation at dispatch time.
-                out_methods->push_back(prop_name);
-                out_method_fns->emplace(prop_name, desc.value);
-            }
-            JS_FreePropertyEnum(ctx, tab, count);
-            JSValue next = JS_GetPrototype(ctx, cur);
-            JS_FreeValue(ctx, cur);
-            if (JS_IsException(next)) {
-                JSValue exc = JS_GetException(ctx);
-                JS_FreeValue(ctx, exc);
-                cleanup();
-                if (error != NULL)
-                    *error = "RpcTarget prototype walk failed";
-                return false;
-            }
-            cur = next;
-        }
-        JS_FreeValue(ctx, cur);
-        if (out_methods->empty()) {
-            cleanup();
-            if (error != NULL)
-                *error = "RpcTarget must expose at least 1 method";
-            return false;
-        }
-        return true;
-    }
-
     static JSValue binding_handle_method_call(JSContext* ctx, JSValueConst, int argc,
                                               JSValueConst* argv, int, JSValueConst* func_data) {
         WorkerRuntime* self = g_worker;
@@ -8642,80 +8475,6 @@ class WorkerRuntime {
         out->assign(s, len);
         JS_FreeCString(ctx, s);
         JS_FreeValue(ctx, val);
-        return true;
-    }
-
-    static bool read_js_header_pairs(JSContext* ctx, JSValueConst arr,
-                                     std::vector<std::pair<std::string, std::string>>* out,
-                                     std::string* error, void* clone_opaque = NULL) {
-        out->clear();
-        if (JS_IsNull(arr) || JS_IsUndefined(arr)) {
-            return true;
-        }
-        if (!JS_IsArray(arr)) {
-            if (error != NULL)
-                *error = "invalid proxy headers array";
-            return false;
-        }
-        JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
-        uint32_t count = 0;
-        if (JS_IsException(len_val) || JS_ToUint32(ctx, &count, len_val) != 0) {
-            JS_FreeValue(ctx, len_val);
-            if (error != NULL)
-                *error = "unreadable proxy headers length";
-            return false;
-        }
-        JS_FreeValue(ctx, len_val);
-        if (count > capsid::kMaxBindingProxyHeaders) {
-            if (error != NULL)
-                *error = "proxy header count limit exceeded";
-            return false;
-        }
-        size_t total_bytes = 0;
-        out->reserve(count);
-        for (uint32_t i = 0; i < count; ++i) {
-            JSValue entry = JS_GetPropertyUint32(ctx, arr, i);
-            if (!JS_IsArray(entry)) {
-                JS_FreeValue(ctx, entry);
-                if (error != NULL)
-                    *error = "invalid proxy header pair";
-                return false;
-            }
-            JSValue k = JS_GetPropertyUint32(ctx, entry, 0);
-            JSValue v = JS_GetPropertyUint32(ctx, entry, 1);
-            JS_FreeValue(ctx, entry);
-            size_t klen = 0, vlen = 0;
-            const char* ks = JS_ToCStringLen(ctx, &klen, k);
-            const char* vs = JS_ToCStringLen(ctx, &vlen, v);
-            JS_FreeValue(ctx, k);
-            JS_FreeValue(ctx, v);
-            if (ks == NULL || vs == NULL) {
-                if (ks)
-                    JS_FreeCString(ctx, ks);
-                if (vs)
-                    JS_FreeCString(ctx, vs);
-                if (error != NULL)
-                    *error = "unreadable proxy header entry";
-                return false;
-            }
-            if (klen + vlen > capsid::kMaxBindingProxyHeaderBytes ||
-                total_bytes > capsid::kMaxBindingProxyHeaderBytes - (klen + vlen)) {
-                JS_FreeCString(ctx, ks);
-                JS_FreeCString(ctx, vs);
-                if (error != NULL)
-                    *error = "proxy header byte limit exceeded";
-                return false;
-            }
-            if (!reserve_binding_clone_bytes(klen + vlen + 16, error, clone_opaque)) {
-                JS_FreeCString(ctx, ks);
-                JS_FreeCString(ctx, vs);
-                return false;
-            }
-            total_bytes += klen + vlen;
-            out->push_back(std::make_pair(std::string(ks, klen), std::string(vs, vlen)));
-            JS_FreeCString(ctx, ks);
-            JS_FreeCString(ctx, vs);
-        }
         return true;
     }
 
@@ -9277,21 +9036,14 @@ class WorkerRuntime {
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 capsid::NeutralHttpRequest req;
-                read_js_string_prop(ctx, info, "url", &req.url);
-                read_js_string_prop(ctx, info, "method", &req.method);
-                read_js_string_prop(ctx, info, "credentials", &req.credentials);
-                read_js_string_prop(ctx, info, "redirect", &req.redirect);
-                if (read_js_string_prop(ctx, info, "mode", &req.mode)) {
-                    req.has_mode = true;
-                }
-                const size_t req_meta_bytes = capsid::estimate_neutral_request_bytes(req);
-                if (!reserve_binding_clone_bytes(req_meta_bytes, error, opaque)) {
+                if (!capsid::extract_neutral_http_request_meta(
+                        ctx, info, &req, reserve_binding_clone_bytes, opaque, error)) {
                     JS_FreeValue(ctx, info);
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 JSValue headers_val = JS_GetPropertyStr(ctx, info, "headers");
-                const bool headers_ok =
-                    read_js_header_pairs(ctx, headers_val, &req.headers, error, opaque);
+                const bool headers_ok = capsid::extract_neutral_header_pairs(
+                    ctx, headers_val, &req.headers, reserve_binding_clone_bytes, opaque, error);
                 JS_FreeValue(ctx, headers_val);
                 if (!headers_ok) {
                     JS_FreeValue(ctx, info);
@@ -9415,25 +9167,14 @@ class WorkerRuntime {
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 capsid::NeutralHttpResponse res;
-                JSValue st_val = JS_GetPropertyStr(ctx, info, "status");
-                int32_t st_i32 = 200;
-                JS_ToInt32(ctx, &st_i32, st_val);
-                JS_FreeValue(ctx, st_val);
-                res.status = static_cast<uint16_t>(st_i32);
-                read_js_string_prop(ctx, info, "statusText", &res.status_text);
-                read_js_string_prop(ctx, info, "url", &res.url);
-                read_js_string_prop(ctx, info, "type", &res.type);
-                JSValue redir_val = JS_GetPropertyStr(ctx, info, "redirected");
-                res.redirected = JS_ToBool(ctx, redir_val) != 0;
-                JS_FreeValue(ctx, redir_val);
-                const size_t res_meta_bytes = capsid::estimate_neutral_response_bytes(res);
-                if (!reserve_binding_clone_bytes(res_meta_bytes, error, opaque)) {
+                if (!capsid::extract_neutral_http_response_meta(
+                        ctx, info, &res, reserve_binding_clone_bytes, opaque, error)) {
                     JS_FreeValue(ctx, info);
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 JSValue headers_val = JS_GetPropertyStr(ctx, info, "headers");
-                const bool headers_ok =
-                    read_js_header_pairs(ctx, headers_val, &res.headers, error, opaque);
+                const bool headers_ok = capsid::extract_neutral_header_pairs(
+                    ctx, headers_val, &res.headers, reserve_binding_clone_bytes, opaque, error);
                 JS_FreeValue(ctx, headers_val);
                 if (!headers_ok) {
                     JS_FreeValue(ctx, info);
@@ -9523,9 +9264,10 @@ class WorkerRuntime {
                 const BindingRuntimeMethodTable& table = self->binding_tables_[cctx->table_index];
                 std::vector<std::string> methods;
                 std::map<std::string, JSValue> method_fns;
-                if (!inspect_rpc_target_methods(ctx, value, table.rpc_target_proto,
-                                                table.intrinsics.object_proto, &methods,
-                                                &method_fns, error)) {
+                if (!capsid::inspect_rpc_target_methods(
+                        ctx, value, table.rpc_target_proto, table.intrinsics.object_proto,
+                        capsid::kBindingHandleMaxMethods, &methods, &method_fns,
+                        reserve_binding_clone_bytes, opaque, error)) {
                     return capsid::BindingCloneHookResult::kFailed;
                 }
                 auto free_method_fns = [&]() {
@@ -9570,14 +9312,6 @@ class WorkerRuntime {
                     JS_FreeValue(ctx, lval);
                 }
 
-                size_t handle_bytes = 32;
-                for (size_t mi = 0; mi < methods.size(); ++mi) {
-                    handle_bytes += methods[mi].size() + 16;
-                }
-                if (!reserve_binding_clone_bytes(handle_bytes, error, opaque)) {
-                    free_method_fns();
-                    return capsid::BindingCloneHookResult::kFailed;
-                }
                 uint64_t handle_id = 0;
                 capsid::BindingQuotaError qerr = capsid::BindingQuotaError::kOk;
                 if (!self->binding_handles_.open_handle(cctx->request_id, cctx->binding_id,
@@ -11302,6 +11036,36 @@ class WorkerRuntime {
         return false;
     }
 
+    void expire_single_binding_call(std::map<uint64_t, PendingBindingCall>::iterator found,
+                                    bool cancel_from_scheduler) {
+        if (found == pending_binding_calls_.end()) {
+            return;
+        }
+        PendingBindingCall& call = found->second;
+        if (cancel_from_scheduler && call.state == BindingCallState::kQueued) {
+            binding_scheduler_.cancel_call(call.table_index, found->first);
+        }
+        call.cancel_reason.kind = capsid::BindingAbortReason::Kind::kRemoteError;
+        call.cancel_reason.error =
+            capsid::RemoteErrorInfo::make_dom_exception("TimeoutError", "binding call timed out");
+        if (call.state == BindingCallState::kDispatched) {
+            abort_binding_controller(call, true);
+        }
+        if (!JS_IsUndefined(call.user_reject)) {
+            UserRequestTokenGuard token_guard(this, call.request_id);
+            JSValue error = capsid::materialize_remote_error(ctx_, call.cancel_reason.error,
+                                                             &user_binding_intrinsics_);
+            JSValue settle = JS_Call(ctx_, call.user_reject, JS_UNDEFINED, 1, &error);
+            if (JS_IsException(settle)) {
+                JSValue exc = JS_GetException(ctx_);
+                JS_FreeValue(ctx_, exc);
+            }
+            JS_FreeValue(ctx_, settle);
+            JS_FreeValue(ctx_, error);
+        }
+        finish_binding_call(found);
+    }
+
     // Cancels up to `*control_budget` calls whose per-call `timeoutMs` deadline
     // has elapsed with a structured TimeoutError DOMException without aborting
     // the parent request. Returns true if additional expired calls remain for
@@ -11315,7 +11079,8 @@ class WorkerRuntime {
         for (std::map<uint64_t, PendingBindingCall>::iterator it = pending_binding_calls_.begin();
              it != pending_binding_calls_.end() && !shutting_down_;) {
             PendingBindingCall& call = it->second;
-            if (!call.has_custom_timeout || call.deadline_ns == 0 || now < call.deadline_ns ||
+            if (!call.has_custom_timeout ||
+                !capsid::is_binding_call_expired(now, call.deadline_ns) ||
                 call.state == BindingCallState::kCanceling ||
                 call.state == BindingCallState::kSettled) {
                 ++it;
@@ -11326,28 +11091,8 @@ class WorkerRuntime {
                 break;
             }
             --(*control_budget);
-            if (call.state == BindingCallState::kQueued) {
-                binding_scheduler_.cancel_call(call.table_index, it->first);
-            }
-            call.cancel_reason.kind = capsid::BindingAbortReason::Kind::kRemoteError;
-            call.cancel_reason.error = capsid::RemoteErrorInfo::make_dom_exception(
-                "TimeoutError", "binding call timed out");
-            if (call.state == BindingCallState::kDispatched) {
-                abort_binding_controller(call, true);
-            }
-            if (!JS_IsUndefined(call.user_reject)) {
-                JSValue error = capsid::materialize_remote_error(ctx_, call.cancel_reason.error,
-                                                                 &user_binding_intrinsics_);
-                JSValue settle = JS_Call(ctx_, call.user_reject, JS_UNDEFINED, 1, &error);
-                if (JS_IsException(settle)) {
-                    JSValue exc = JS_GetException(ctx_);
-                    JS_FreeValue(ctx_, exc);
-                }
-                JS_FreeValue(ctx_, settle);
-                JS_FreeValue(ctx_, error);
-            }
             std::map<uint64_t, PendingBindingCall>::iterator doomed = it++;
-            finish_binding_call(doomed);
+            expire_single_binding_call(doomed, true);
         }
         return more_expired && !shutting_down_;
     }
@@ -11394,6 +11139,13 @@ class WorkerRuntime {
             }
             PendingBindingCall& call = found->second;
             if (call.state != BindingCallState::kQueued) {
+                continue;
+            }
+            // T2/R5: Re-check the effective call deadline at dequeue time so a
+            // queued call deferred by a saturated control budget never enters
+            // its Binding provider method after expiry.
+            if (capsid::is_binding_call_expired(uv_hrtime(), call.deadline_ns)) {
+                expire_single_binding_call(found, false);
                 continue;
             }
             call.state = BindingCallState::kDispatched;
@@ -11646,6 +11398,7 @@ class WorkerRuntime {
                                                            &user_binding_intrinsics_);
             }
             if (!JS_IsUndefined(handler)) {
+                UserRequestTokenGuard settle_guard(this, call.request_id);
                 JSValue settle = JS_Call(ctx_, handler, JS_UNDEFINED, 1, &payload);
                 if (JS_IsException(settle)) {
                     JSValue exc = JS_GetException(ctx_);
@@ -11732,6 +11485,7 @@ class WorkerRuntime {
                 abort_binding_controller(call, call.state == BindingCallState::kCanceling);
             }
             if (!JS_IsUndefined(call.user_reject)) {
+                UserRequestTokenGuard cancel_guard(this, call.request_id);
                 JSValue error = JS_NewError(ctx_);
                 JS_DefinePropertyValueStr(ctx_, error, "message",
                                           JS_NewString(ctx_, "binding call was canceled"),

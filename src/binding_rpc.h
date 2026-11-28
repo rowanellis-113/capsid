@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -99,6 +100,8 @@ enum class BindingCloneHookResult {
     kFailed = 2,
 };
 
+typedef bool (*BindingReserveBytesFn)(std::size_t delta, std::string* error, void* opaque);
+
 struct BindingCloneHooks {
     BindingCloneHookResult (*try_capture)(JSContext* ctx, JSValueConst value, NeutralValue* out,
                                           std::string* error, void* opaque) = nullptr;
@@ -106,7 +109,7 @@ struct BindingCloneHooks {
     // Incremental byte-quota reservation invoked before retaining native bytes
     // during clone so queued payloads cannot bypass 3-tier byte caps while
     // cloning.
-    bool (*reserve_bytes)(std::size_t delta, std::string* error, void* opaque) = nullptr;
+    BindingReserveBytesFn reserve_bytes = nullptr;
     void* opaque = nullptr;
 };
 
@@ -249,6 +252,31 @@ JSValue neutral_to_js_ex(JSContext* ctx, const NeutralValue& value, const Bindin
 std::size_t estimate_neutral_request_bytes(const NeutralHttpRequest& request);
 std::size_t estimate_neutral_response_bytes(const NeutralHttpResponse& response);
 std::size_t estimate_neutral_value_bytes(const NeutralValue& value);
+
+// Validates a Binding factory or RpcTarget method identifier (ASCII JS
+// identifier, <= 64 bytes, no embedded NUL, non-reserved).
+bool valid_binding_method_name(const char* name, std::size_t len);
+bool valid_binding_method_name(const std::string& name);
+
+// T1/R2: Measure-and-reserve-BEFORE-copy extractors for HTTP proxy metadata,
+// header pairs, and RpcTarget method tables. On quota rejection, ZERO native
+// string copies are performed and output containers remain untouched.
+bool extract_neutral_http_request_meta(JSContext* ctx, JSValueConst info, NeutralHttpRequest* out,
+                                       BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                       std::string* error, std::size_t* out_copies = nullptr);
+bool extract_neutral_http_response_meta(JSContext* ctx, JSValueConst info, NeutralHttpResponse* out,
+                                        BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                        std::string* error, std::size_t* out_copies = nullptr);
+bool extract_neutral_header_pairs(JSContext* ctx, JSValueConst arr,
+                                  std::vector<std::pair<std::string, std::string>>* out,
+                                  BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                  std::string* error, std::size_t* out_copies = nullptr);
+bool inspect_rpc_target_methods(JSContext* ctx, JSValueConst target, JSValueConst rpc_target_proto,
+                                JSValueConst object_proto, std::size_t max_methods,
+                                std::vector<std::string>* out_methods,
+                                std::map<std::string, JSValue>* out_method_fns,
+                                BindingReserveBytesFn reserve_bytes, void* reserve_opaque,
+                                std::string* error, std::size_t* out_copies = nullptr);
 
 // Internal Binding RPC identifiers are never Number/Int64 values: IDs above
 // 2^63 must survive the JS callback-data round trip exactly and zero is
